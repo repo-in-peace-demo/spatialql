@@ -33,6 +33,13 @@ export default defineConfig({
     exclude: ['@babylonjs/havok'],
     include: [
       'three',
+      // @iwsdk/core is served unbundled in dev, so its `signal`/`computed`
+      // come straight from node_modules, while @pmndrs/uikit's pre-bundle
+      // would otherwise inline a private copy of this package. UIKit
+      // unwraps signal-valued properties with `instanceof Signal`, which
+      // fails across two copies ("Invalid number: 1"). As its own optimized
+      // entry, both sides share one instance.
+      '@preact/signals-core',
       '@pmndrs/uikit',
       '@pmndrs/uikit-horizon',
       '@pmndrs/uikit-lucide',

@@ -6,6 +6,6 @@
  */
 
 import { defineComponents } from '@iwsdk/core';
-import { TableSlab, TableSlabRuntime } from './table-slab-component.js';
+import { JoinDocked, JoinResultSlab, TableSlab, TableSlabRuntime } from './table-slab-component.js';
 
-export default defineComponents([TableSlab, TableSlabRuntime]);
+export default defineComponents([TableSlab, TableSlabRuntime, JoinDocked, JoinResultSlab]);

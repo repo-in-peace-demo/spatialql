@@ -35,7 +35,10 @@ export type SlabReport = {
   position: Vector3;
   yawDeg: number;
   tiltFromFlatDeg: number;
-  degreesBelowForward: number;
+  /** Signed degrees from the head's forward direction (negative = below). */
+  topEdgeDeg: number;
+  bottomEdgeDeg: number;
+  edgesFit: boolean;
 };
 
 export type PlacementReport = {
@@ -155,7 +158,9 @@ export class PlacementDebug {
         position: fmtVec(slab.position),
         yawDeg: fmt(slab.yawDeg, 1),
         tiltFromFlatDeg: fmt(slab.tiltFromFlatDeg, 1),
-        degBelowHeadForward: fmt(slab.degreesBelowForward, 1),
+        topEdgeDeg: fmt(slab.topEdgeDeg, 1),
+        bottomEdgeDeg: fmt(slab.bottomEdgeDeg, 1),
+        edgesInView: slab.edgesFit,
       })),
     );
     console.groupEnd();

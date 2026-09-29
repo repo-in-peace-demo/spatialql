@@ -17,6 +17,7 @@ import type { Table } from './types.js';
 
 export const CUSTOMERS_TABLE: Table = {
   id: 'customers',
+  alias: 'c',
   columns: ['id', 'name', 'city'],
   rows: [
     { id: 1, name: 'Alderly Finch', city: 'Rivermere' },
@@ -36,8 +37,10 @@ export const CUSTOMERS_TABLE: Table = {
  */
 export const ORDERS_TABLE: Table = {
   id: 'orders',
+  alias: 'o',
   columns: ['id', 'customerId', 'product', 'amount'],
   columnLabels: { customerId: 'Cust ID' },
+  foreignKeys: [{ column: 'customerId', references: { tableId: 'customers', column: 'id' } }],
   rows: [
     { id: 101, customerId: 2, product: 'Notebook Set', amount: 12 },
     { id: 102, customerId: 2, product: 'Water Bottle', amount: 18 },

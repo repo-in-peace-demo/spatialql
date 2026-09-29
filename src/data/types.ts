@@ -8,6 +8,16 @@ export type CellValue = string | number | null;
 
 export type Row = Record<string, CellValue>;
 
+/**
+ * Declares that `column` in the owning table references
+ * `references.column` in table `references.tableId`. Join keys are always
+ * resolved from this metadata, never hard-coded by callers.
+ */
+export type ForeignKey = {
+  column: string;
+  references: { tableId: string; column: string };
+};
+
 export type Table = {
   id: string;
   columns: string[];
@@ -18,7 +28,12 @@ export type Table = {
    * key.
    */
   columnLabels?: Partial<Record<string, string>>;
+  /** Short SQL alias (e.g. `c`); also prefixes ambiguous result labels. */
+  alias?: string;
+  foreignKeys?: ForeignKey[];
 };
+
+export type JoinType = 'inner' | 'left';
 
 /**
  * Identifies a row by its position within a table rather than by a business

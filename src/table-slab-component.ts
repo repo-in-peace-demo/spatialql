@@ -20,9 +20,20 @@ export const TableSlab = createComponent('TableSlab', {
  * `rowViews` is a `Map<number, RowView>` (see `table-slab-view.ts`) keyed by
  * row index into the source `Table`, ready for a future animation system to
  * look up a specific row's `Container`/`Text` nodes from `JoinResult`
- * lineage.
+ * lineage. `layout` is the full `TableSlabDocument` (sizes, row geometry,
+ * animation signals).
  */
 export const TableSlabRuntime = createComponent('TableSlabRuntime', {
   document: { type: Types.Object, default: undefined },
   rowViews: { type: Types.Object, default: undefined },
+  layout: { type: Types.Object, default: undefined },
 });
+
+/**
+ * Tag: this slab is part of a committed join (docked to its partner).
+ * Placement never moves a slab carrying it, grabbed or not.
+ */
+export const JoinDocked = createComponent('JoinDocked', {});
+
+/** Tag: this slab shows a join result (not a source table). */
+export const JoinResultSlab = createComponent('JoinResultSlab', {});
