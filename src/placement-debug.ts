@@ -26,6 +26,7 @@ import {
   type World,
 } from '@iwsdk/core';
 import type { SurfaceAssessment } from './desk-placement.js';
+import { NATURAL_GAZE_PITCH_DEG, ROW_TEXT_TARGET_DEG, TOUCH_REACH_MAX_METERS } from './view-comfort.js';
 
 export type PlacementKind = 'floating' | 'surface' | 'synthetic' | 'none';
 
@@ -39,6 +40,13 @@ export type SlabReport = {
   topEdgeDeg: number;
   bottomEdgeDeg: number;
   edgesFit: boolean;
+  /** Eye-to-center distance (meters). */
+  eyeDistance: number;
+  /** The lowest-edge view limit this placement used. */
+  maxBelowDeg: number;
+  /** Row font size (cm) and the angle it subtends at `eyeDistance`. */
+  rowFontCm: number;
+  rowTextDeg: number;
 };
 
 export type PlacementReport = {
@@ -161,9 +169,23 @@ export class PlacementDebug {
         topEdgeDeg: fmt(slab.topEdgeDeg, 1),
         bottomEdgeDeg: fmt(slab.bottomEdgeDeg, 1),
         edgesInView: slab.edgesFit,
+        eyeDistM: fmt(slab.eyeDistance),
       })),
     );
     console.groupEnd();
+    // Outside the collapsed group, one line per slab, so the reach readout
+    // is visible (and capturable) without expanding anything.
+    for (const slab of report.slabs) {
+      const withinReach = slab.eyeDistance <= TOUCH_REACH_MAX_METERS + 0.005;
+      console.log(
+        `${LOG_PREFIX} ${slab.name}: center ${fmt(slab.eyeDistance)} m from the eyes ` +
+          `(reach limit ${TOUCH_REACH_MAX_METERS} m, ${withinReach ? 'within reach' : 'BEYOND REACH'}); ` +
+          `row font ${fmt(slab.rowFontCm)} cm = ${fmt(slab.rowTextDeg)}° (target ${ROW_TEXT_TARGET_DEG}°); ` +
+          `edges top ${fmt(slab.topEdgeDeg, 1)}°, bottom ${fmt(slab.bottomEdgeDeg, 1)}° from the natural gaze ` +
+          `(${NATURAL_GAZE_PITCH_DEG}° down; limit -${slab.maxBelowDeg}°)` +
+          `${slab.touched ? '; not moved (grabbed or docked)' : ''}`,
+      );
+    }
     this.drawOutlines(report.candidates, report.chosen, report.synthetic);
   }
 

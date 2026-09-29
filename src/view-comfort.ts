@@ -1,22 +1,71 @@
 /**
  * Comfortable vertical field of view, shared by slab placement and the join
- * result slab. Angles are measured against the head's forward direction
- * (pitch included), so a user already looking down tolerates content lower
- * down. Allocation-free.
+ * result slab. Allocation-free.
+ *
+ * Angles are measured from a *natural seated gaze*: NATURAL_GAZE_PITCH_DEG
+ * below horizontal along the head's yaw, not from the head's actual pitch
+ * at placement time. Seated desk work naturally looks slightly down, and a
+ * fixed gaze keeps placement independent of where the user happened to be
+ * looking when the session started. The whole slab group (source pair,
+ * join-type control, result slab) must fit one vertical window of
+ * GROUP_MAX_VERTICAL_FOV_DEG centered on that gaze.
  */
 
 import { MathUtils, type Object3D, type Vector3 } from '@iwsdk/core';
 
-/** A slab edge may sit at most this far below the head's forward direction. */
-export const FOV_MAX_BELOW_FORWARD_DEG = 40;
-/** ...and at most this far above it. */
-export const FOV_MAX_ABOVE_FORWARD_DEG = 25;
+/** The natural seated gaze: this far below horizontal. Tune on a headset. */
+export const NATURAL_GAZE_PITCH_DEG = 18;
+export const NATURAL_GAZE_PITCH_RAD = MathUtils.degToRad(NATURAL_GAZE_PITCH_DEG);
+
+/** The whole group's vertical extent, centered on the natural gaze. Tune on a headset. */
+export const GROUP_MAX_VERTICAL_FOV_DEG = 80;
+/** Every element's edges stay within this far below / above the natural gaze. */
+export const VIEW_MAX_BELOW_GAZE_DEG = GROUP_MAX_VERTICAL_FOV_DEG / 2;
+export const VIEW_MAX_ABOVE_GAZE_DEG = GROUP_MAX_VERTICAL_FOV_DEG / 2;
+
 /**
- * The join result slab may reach this far above the head's forward
- * direction (seated users read slightly-above-eye content comfortably, like
- * a monitor) before it would have to shrink, which it never does.
+ * Seated reach: every element the user must touch (source slabs, the
+ * join-type control) keeps its center at most this far from the eyes.
+ * Reach wins over the view window.
  */
-export const RESULT_MAX_ABOVE_FORWARD_DEG = 30;
+export const TOUCH_REACH_MAX_METERS = 0.6;
+/** Where touchable content should ideally sit (for the debug readout). */
+export const TOUCH_REACH_IDEAL_METERS = 0.5;
+
+/** Row text on view-only slabs should subtend at least this many degrees. */
+export const MIN_ROW_TEXT_DEG = 1.0;
+
+// --- Text sized by angle ----------------------------------------------------
+// Physical font sizes come from these angular targets at each slab's
+// planned eye distance, so text reads the same wherever a slab sits and
+// slabs aren't physically oversized at arm's length. Tune on a headset.
+/** Row text should subtend this many degrees. */
+export const ROW_TEXT_TARGET_DEG = 1.15;
+/** Header text should subtend this many degrees. */
+export const HEADER_TEXT_TARGET_DEG = 1.3;
+/** Row text is never physically smaller than this (cm). */
+export const MIN_ROW_FONT_CM = 0.9;
+/**
+ * Planned eye distances the fonts are sized for: computed once at startup
+ * (slab documents aren't rebuilt when placed). The placement and join
+ * readouts log the actual distance and resulting angle.
+ */
+export const PLANNED_SOURCE_DISTANCE_METERS = 0.55;
+export const PLANNED_RESULT_DISTANCE_METERS = 0.65;
+export const PLANNED_CONTROL_DISTANCE_METERS = 0.45;
+/** Readouts warn when a slab's actual row text angle is this far off target. */
+export const TEXT_ANGLE_TOLERANCE = 0.15;
+
+/** Physical font size (cm) that subtends `angleDeg` at `distance` meters. */
+export function fontCmForAngle(angleDeg: number, distance: number): number {
+  return 2 * distance * Math.tan(MathUtils.degToRad(angleDeg) / 2) * 100;
+}
+
+/** Row and header font sizes (cm) for a slab `distance` meters from the eyes. */
+export function slabTextSizeAt(distance: number): { rowFontCm: number; headerFontCm: number } {
+  const rowFontCm = Math.max(MIN_ROW_FONT_CM, fontCmForAngle(ROW_TEXT_TARGET_DEG, distance));
+  return { rowFontCm, headerFontCm: Math.max(rowFontCm, fontCmForAngle(HEADER_TEXT_TARGET_DEG, distance)) };
+}
 
 /** Slabs never lie flatter or stand straighter than these (degrees from flat). */
 export const SLAB_MIN_TILT_FROM_FLAT_DEG = 30;
@@ -55,24 +104,22 @@ export function eyeFacingLeanFromBottom(eyeRise: number, forwardDistance: number
 // Small slack so float rounding at exactly the limit doesn't warn.
 const FOV_TOLERANCE_DEG = 0.5;
 
-const FOV_MAX_BELOW_RAD = MathUtils.degToRad(FOV_MAX_BELOW_FORWARD_DEG);
-const FOV_MAX_ABOVE_RAD = MathUtils.degToRad(FOV_MAX_ABOVE_FORWARD_DEG);
-
 /**
  * Smallest horizontal distance from the head at which a point `drop` meters
- * below eye level (negative = above) sits inside the comfortable vertical
- * field of view. `headPitchDownRad` is positive when looking down.
+ * below eye level (negative = above) sits inside the view window around the
+ * gaze. `gazePitchDownRad` is positive when the gaze looks down.
  */
 export function minDistanceForDrop(
   drop: number,
-  headPitchDownRad: number,
-  maxAboveDeg = FOV_MAX_ABOVE_FORWARD_DEG,
+  gazePitchDownRad: number,
+  maxAboveDeg = VIEW_MAX_ABOVE_GAZE_DEG,
+  maxBelowDeg = VIEW_MAX_BELOW_GAZE_DEG,
 ): number {
   if (drop === 0) {
     return 0;
   }
-  const maxAboveRad = maxAboveDeg === FOV_MAX_ABOVE_FORWARD_DEG ? FOV_MAX_ABOVE_RAD : MathUtils.degToRad(maxAboveDeg);
-  const allowed = drop > 0 ? FOV_MAX_BELOW_RAD + headPitchDownRad : maxAboveRad - headPitchDownRad;
+  const allowed =
+    drop > 0 ? MathUtils.degToRad(maxBelowDeg) + gazePitchDownRad : MathUtils.degToRad(maxAboveDeg) - gazePitchDownRad;
   if (allowed >= Math.PI / 2 - 1e-3) {
     return 0;
   }
@@ -82,42 +129,54 @@ export function minDistanceForDrop(
   return Math.abs(drop) / Math.tan(allowed);
 }
 
-/** Signed degrees of `point` relative to the head's forward direction (negative = below). */
-export function degreesFromForward(head: Vector3, headPitchDownRad: number, point: Vector3): number {
+/** Signed degrees of `point` relative to the gaze direction (negative = below). */
+export function degreesFromForward(head: Vector3, gazePitchDownRad: number, point: Vector3): number {
   const dx = point.x - head.x;
   const dz = point.z - head.z;
   const pitchToPoint = Math.atan2(point.y - head.y, Math.sqrt(dx * dx + dz * dz));
-  return MathUtils.radToDeg(pitchToPoint + headPitchDownRad);
+  return MathUtils.radToDeg(pitchToPoint + gazePitchDownRad);
 }
 
-export function degreesFitComfort(degrees: number, maxAboveDeg = FOV_MAX_ABOVE_FORWARD_DEG): boolean {
-  return degrees >= -(FOV_MAX_BELOW_FORWARD_DEG + FOV_TOLERANCE_DEG) && degrees <= maxAboveDeg + FOV_TOLERANCE_DEG;
+export function degreesFitComfort(
+  degrees: number,
+  maxAboveDeg = VIEW_MAX_ABOVE_GAZE_DEG,
+  maxBelowDeg = VIEW_MAX_BELOW_GAZE_DEG,
+): boolean {
+  return degrees >= -(maxBelowDeg + FOV_TOLERANCE_DEG) && degrees <= maxAboveDeg + FOV_TOLERANCE_DEG;
+}
+
+/** Angular height (degrees) of text `heightMeters` tall seen from `distance` meters. */
+export function textAngleDeg(heightMeters: number, distance: number): number {
+  return MathUtils.radToDeg(2 * Math.atan(heightMeters / 2 / Math.max(distance, 1e-3)));
 }
 
 export type SlabEdgeAngles = { topDeg: number; bottomDeg: number; fits: boolean };
 
 /**
- * Measures a placed slab's top and bottom edge midpoints, given their local
- * Y offsets (center-anchored slabs: +h/2 / -h/2; top-anchored: 0 / -h).
- * Writes into `out` and uses `scratch`; allocates nothing.
+ * Measures a placed slab's top and bottom edge midpoints against the gaze,
+ * given their local Y offsets (center-anchored slabs: +h/2 / -h/2;
+ * top-anchored: 0 / -h). Writes into `out` and uses `scratch`; allocates
+ * nothing.
  */
 export function measureSlabEdges(
   head: Vector3,
-  headPitchDownRad: number,
+  gazePitchDownRad: number,
   object: Object3D,
   topLocalY: number,
   bottomLocalY: number,
   scratch: Vector3,
   out: SlabEdgeAngles,
-  maxAboveDeg = FOV_MAX_ABOVE_FORWARD_DEG,
+  maxAboveDeg = VIEW_MAX_ABOVE_GAZE_DEG,
+  maxBelowDeg = VIEW_MAX_BELOW_GAZE_DEG,
 ): SlabEdgeAngles {
   object.updateWorldMatrix(true, false);
   scratch.set(0, topLocalY, 0);
   object.localToWorld(scratch);
-  out.topDeg = degreesFromForward(head, headPitchDownRad, scratch);
+  out.topDeg = degreesFromForward(head, gazePitchDownRad, scratch);
   scratch.set(0, bottomLocalY, 0);
   object.localToWorld(scratch);
-  out.bottomDeg = degreesFromForward(head, headPitchDownRad, scratch);
-  out.fits = degreesFitComfort(out.topDeg, maxAboveDeg) && degreesFitComfort(out.bottomDeg, maxAboveDeg);
+  out.bottomDeg = degreesFromForward(head, gazePitchDownRad, scratch);
+  out.fits =
+    degreesFitComfort(out.topDeg, maxAboveDeg, maxBelowDeg) && degreesFitComfort(out.bottomDeg, maxAboveDeg, maxBelowDeg);
   return out;
 }

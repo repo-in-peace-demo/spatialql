@@ -1,5 +1,5 @@
 /**
- * Dev-only grab readout (`?debug=1`): explains, per hand, why a pinch (hands)
+ * Dev-only grab readout (`debug` flag, see dev-flags.ts): explains, per hand, why a pinch (hands)
  * or squeeze (controllers) did or didn't grab a slab, and shows a dot at each
  * grab sphere's center. Only loaded behind `import.meta.env.DEV`, so it never
  * reaches production builds. Observation only: it changes no grab behavior.
@@ -26,6 +26,7 @@ import {
   InputComponent,
   Mesh,
   MeshBasicMaterial,
+  OneHandGrabbable,
   SphereGeometry,
   Vector3,
   VisibilityState,
@@ -66,7 +67,8 @@ function fmt(v: Vector3): string {
 }
 
 export class GrabDebugSystem extends createSystem({
-  slabs: { required: [TableSlab, TableSlabRuntime] },
+  // Grabbable slabs only: the join result slab is view-only and never grabbable.
+  slabs: { required: [TableSlab, TableSlabRuntime, OneHandGrabbable] },
   held: { required: [TableSlab, Grabbed] },
 }) {
   private grabSystem: GrabSystem | undefined;
