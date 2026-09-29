@@ -443,76 +443,101 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
 }
 
 /**
- * The INNER | LEFT pill, built as its own document so it can live on its
- * own non-grabbable entity (see join-system.ts for why).
+ * The INNER | LEFT join-type control, built as its own document so it can
+ * live on its own non-grabbable entity (see join-system.ts for why). The
+ * document origin is the control's center.
  */
-export type JoinTypePillView = {
+export type JoinTypeControlView = {
   document: UIKitDocument;
   fade: Signal<number>;
   inner: Container;
   left: Container;
   widthMeters: number;
   heightMeters: number;
+  /** Each option's center X in the control's local frame (meters). */
+  innerCenterX: number;
+  leftCenterX: number;
+  /** Size of one option (both are the same size), in meters. */
+  optionWidthMeters: number;
+  optionHeightMeters: number;
 };
 
-// Row-sized text and a ~4.5 cm tall target, so a fingertip poke lands easily.
-const PILL_FONT_SIZE = 1.6;
-const PILL_PADDING_X = 2.0;
-const PILL_PADDING_Y = 1.1;
-const PILL_RADIUS = 1.8;
-const COLOR_PILL_TRACK = '#e2ddd0';
-const COLOR_PILL_SELECTED = '#2f2b24';
-const COLOR_PILL_TEXT_SELECTED = '#f5f3ef';
+/** Fingertip-sized targets: each option is at least this wide and tall (cm). */
+export const CONTROL_OPTION_MIN_WIDTH_CM = 4.0;
+export const CONTROL_OPTION_MIN_HEIGHT_CM = 2.5;
+const CONTROL_FONT_SIZE = 1.6;
+const CONTROL_OPTION_PADDING_X = 1.0;
+const CONTROL_TRACK_PADDING = 0.3;
+const CONTROL_RADIUS = 1.4;
+const COLOR_CONTROL_TRACK = '#e2ddd0';
+const COLOR_CONTROL_SELECTED = '#2f2b24';
+const COLOR_CONTROL_TEXT_SELECTED = '#f5f3ef';
 
-/** Selected/unselected look of one pill option; text inherits `color`. */
-export function pillOptionStyle(selected: boolean): { backgroundColor: string; color: string } {
+/** Selected/unselected look of one control option; text inherits `color`. */
+export function controlOptionStyle(selected: boolean): { backgroundColor: string; color: string } {
   return {
-    backgroundColor: selected ? COLOR_PILL_SELECTED : COLOR_PILL_TRACK,
-    color: selected ? COLOR_PILL_TEXT_SELECTED : COLOR_TEXT,
+    backgroundColor: selected ? COLOR_CONTROL_SELECTED : COLOR_CONTROL_TRACK,
+    color: selected ? COLOR_CONTROL_TEXT_SELECTED : COLOR_TEXT,
   };
 }
 
-export function buildJoinTypePill(): JoinTypePillView {
+export function buildJoinTypeControl(): JoinTypeControlView {
   const fade = signal(1);
+  // Both options share one width, so the control is symmetric about the seam.
+  const optionWidthCm = Math.max(
+    CONTROL_OPTION_MIN_WIDTH_CM,
+    measureTextCm('INNER', HEADER_METRICS, CONTROL_FONT_SIZE) + 2 * CONTROL_OPTION_PADDING_X,
+    measureTextCm('LEFT', HEADER_METRICS, CONTROL_FONT_SIZE) + 2 * CONTROL_OPTION_PADDING_X,
+  );
+  const optionHeightCm = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, CONTROL_FONT_SIZE * LINE_HEIGHT_FACTOR);
+  const inset = CONTROL_TRACK_PADDING + PANEL_BORDER_WIDTH;
+  const widthCm = 2 * optionWidthCm + CONTROL_TRACK_PADDING + 2 * inset;
+  const heightCm = optionHeightCm + 2 * inset;
+
   const root = new UIKit.Container({
     flexDirection: 'row',
-    anchorY: 'bottom',
+    width: widthCm,
+    height: heightCm,
+    anchorX: 'center',
+    anchorY: 'center',
     opacity: fade,
     fontFamilies: FONT_FAMILIES,
-    backgroundColor: COLOR_PILL_TRACK,
+    backgroundColor: COLOR_CONTROL_TRACK,
     borderColor: COLOR_PANEL_BORDER,
     borderTopWidth: PANEL_BORDER_WIDTH,
     borderLeftWidth: PANEL_BORDER_WIDTH,
     borderRightWidth: PANEL_BORDER_WIDTH,
     borderBottomWidth: PANEL_BORDER_WIDTH,
-    borderTopLeftRadius: PILL_RADIUS,
-    borderTopRightRadius: PILL_RADIUS,
-    borderBottomLeftRadius: PILL_RADIUS,
-    borderBottomRightRadius: PILL_RADIUS,
-    paddingTop: 0.3,
-    paddingBottom: 0.3,
-    paddingLeft: 0.3,
-    paddingRight: 0.3,
-    gapColumn: 0.3,
+    borderTopLeftRadius: CONTROL_RADIUS,
+    borderTopRightRadius: CONTROL_RADIUS,
+    borderBottomLeftRadius: CONTROL_RADIUS,
+    borderBottomRightRadius: CONTROL_RADIUS,
+    paddingTop: CONTROL_TRACK_PADDING,
+    paddingBottom: CONTROL_TRACK_PADDING,
+    paddingLeft: CONTROL_TRACK_PADDING,
+    paddingRight: CONTROL_TRACK_PADDING,
+    gapColumn: CONTROL_TRACK_PADDING,
   });
   const option = (label: string, selected: boolean) => {
-    const style = pillOptionStyle(selected);
+    const style = controlOptionStyle(selected);
     const container = new UIKit.Container({
-      paddingLeft: PILL_PADDING_X,
-      paddingRight: PILL_PADDING_X,
-      paddingTop: PILL_PADDING_Y,
-      paddingBottom: PILL_PADDING_Y,
-      borderTopLeftRadius: PILL_RADIUS - 0.3,
-      borderTopRightRadius: PILL_RADIUS - 0.3,
-      borderBottomLeftRadius: PILL_RADIUS - 0.3,
-      borderBottomRightRadius: PILL_RADIUS - 0.3,
+      width: optionWidthCm,
+      minWidth: optionWidthCm,
+      height: optionHeightCm,
+      flexShrink: 0,
+      justifyContent: 'center',
+      alignItems: 'center',
+      borderTopLeftRadius: CONTROL_RADIUS - CONTROL_TRACK_PADDING,
+      borderTopRightRadius: CONTROL_RADIUS - CONTROL_TRACK_PADDING,
+      borderBottomLeftRadius: CONTROL_RADIUS - CONTROL_TRACK_PADDING,
+      borderBottomRightRadius: CONTROL_RADIUS - CONTROL_TRACK_PADDING,
       backgroundColor: style.backgroundColor,
       color: style.color,
     });
     container.add(
       new UIKit.Text({
         text: label,
-        fontSize: PILL_FONT_SIZE,
+        fontSize: CONTROL_FONT_SIZE,
         fontWeight: 'bold',
         wordBreak: 'keep-all',
       }),
@@ -523,11 +548,7 @@ export function buildJoinTypePill(): JoinTypePillView {
   const inner = option('INNER', true);
   const left = option('LEFT', false);
 
-  const optionWidth = (label: string) =>
-    measureTextCm(label, HEADER_METRICS, PILL_FONT_SIZE) + 2 * PILL_PADDING_X;
-  const widthCm = optionWidth('INNER') + optionWidth('LEFT') + 0.3 * 3 + 2 * PANEL_BORDER_WIDTH;
-  const heightCm = PILL_FONT_SIZE * LINE_HEIGHT_FACTOR + 2 * PILL_PADDING_Y + 0.6 + 2 * PANEL_BORDER_WIDTH;
-
+  const optionOffsetCm = (optionWidthCm + CONTROL_TRACK_PADDING) / 2;
   return {
     document: new UIKitDocument(root),
     fade,
@@ -535,5 +556,9 @@ export function buildJoinTypePill(): JoinTypePillView {
     left,
     widthMeters: widthCm / 100,
     heightMeters: heightCm / 100,
+    innerCenterX: -optionOffsetCm / 100,
+    leftCenterX: optionOffsetCm / 100,
+    optionWidthMeters: optionWidthCm / 100,
+    optionHeightMeters: optionHeightCm / 100,
   };
 }

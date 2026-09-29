@@ -9,21 +9,27 @@ import { createSystem, RayInteractable, UIKitMLAsset, VisibilityState } from '@i
 
 const WELCOME_PANEL_NODE_ID = 'welcome-panel';
 
+/**
+ * The welcome panel is the browser entry point (Enter XR). In XR it must not
+ * render at all.
+ *
+ * It's a ScreenSpace panel: ScreenSpaceUISystem moves its UIKit document
+ * under the camera in the browser and back under the panel's own object in
+ * XR. So the ScreenSpace component stays on (removing it at XR entry left
+ * the document stranded under the camera, still drawn), and `update()` keeps
+ * the panel's object hidden while immersive. PanelSystem runs after
+ * ScreenSpaceUISystem, so its hide wins before the frame renders. It only
+ * flips `visible` and never re-parents anything -- detaching the panel each
+ * frame is what flooded the console with "parented under active level root"
+ * warnings before.
+ */
 export class PanelSystem extends createSystem({}) {
   private welcomePanel: UIKitMLAsset | null = null;
 
-  /**
-   * In XR the welcome panel must not render at all. It's a ScreenSpace
-   * panel: ScreenSpaceUISystem reparents it every frame (under the camera in
-   * the browser, back under its entity in XR), so toggling `visible` alone
-   * doesn't reliably hide it. Detaching it each XR frame does: the
-   * ScreenSpace system only re-attaches it on its browser path (to the
-   * camera), which is exactly when it should show again.
-   */
   update(): void {
     const panel = this.welcomePanel;
-    if (panel && panel.parent && this.world.visibilityState.peek() !== VisibilityState.NonImmersive) {
-      panel.removeFromParent();
+    if (panel && panel.visible && this.world.visibilityState.peek() !== VisibilityState.NonImmersive) {
+      panel.visible = false;
     }
   }
 
@@ -66,15 +72,14 @@ export class PanelSystem extends createSystem({}) {
    * session ends. Exiting XR is left to the platform's own exit.
    */
   private setWelcomePanelShown(panel: UIKitMLAsset, shown: boolean): void {
-    panel.visible = shown;
     const entity = this.world.getSceneEntity(WELCOME_PANEL_NODE_ID);
-    if (!entity) {
-      return;
+    if (entity) {
+      if (shown && !entity.hasComponent(RayInteractable)) {
+        entity.addComponent(RayInteractable, {});
+      } else if (!shown && entity.hasComponent(RayInteractable)) {
+        entity.removeComponent(RayInteractable);
+      }
     }
-    if (shown && !entity.hasComponent(RayInteractable)) {
-      entity.addComponent(RayInteractable, {});
-    } else if (!shown && entity.hasComponent(RayInteractable)) {
-      entity.removeComponent(RayInteractable);
-    }
+    panel.visible = shown;
   }
 }

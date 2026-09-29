@@ -11,6 +11,27 @@ import { MathUtils, type Object3D, type Vector3 } from '@iwsdk/core';
 export const FOV_MAX_BELOW_FORWARD_DEG = 40;
 /** ...and at most this far above it. */
 export const FOV_MAX_ABOVE_FORWARD_DEG = 25;
+
+// Reach beats the view limit for content the user must touch: looking down
+// at a desk is natural, so touchable content may sit lower than the general
+// limit above when that's what brings it within reach. Tune on a headset.
+/** Lowest edge of a floating (no surface) source slab. */
+export const FLOATING_MAX_BELOW_FORWARD_DEG = 50;
+/** Lowest edge of a source slab resting on a desk. */
+export const DESK_MAX_BELOW_FORWARD_DEG = 55;
+/** The join-type control: a button you glance down at. */
+export const CONTROL_MAX_BELOW_FORWARD_DEG = 60;
+
+/**
+ * Seated reach: every element the user must touch (source slabs, the
+ * join-type control) keeps its center at most this far from the eyes.
+ */
+export const TOUCH_REACH_MAX_METERS = 0.6;
+/** Where touchable content should ideally sit (for the debug readout). */
+export const TOUCH_REACH_IDEAL_METERS = 0.5;
+
+/** Row text on view-only slabs should subtend at least this many degrees. */
+export const MIN_ROW_TEXT_DEG = 1.0;
 /**
  * The join result slab may reach this far above the head's forward
  * direction (seated users read slightly-above-eye content comfortably, like
@@ -67,12 +88,14 @@ export function minDistanceForDrop(
   drop: number,
   headPitchDownRad: number,
   maxAboveDeg = FOV_MAX_ABOVE_FORWARD_DEG,
+  maxBelowDeg = FOV_MAX_BELOW_FORWARD_DEG,
 ): number {
   if (drop === 0) {
     return 0;
   }
   const maxAboveRad = maxAboveDeg === FOV_MAX_ABOVE_FORWARD_DEG ? FOV_MAX_ABOVE_RAD : MathUtils.degToRad(maxAboveDeg);
-  const allowed = drop > 0 ? FOV_MAX_BELOW_RAD + headPitchDownRad : maxAboveRad - headPitchDownRad;
+  const maxBelowRad = maxBelowDeg === FOV_MAX_BELOW_FORWARD_DEG ? FOV_MAX_BELOW_RAD : MathUtils.degToRad(maxBelowDeg);
+  const allowed = drop > 0 ? maxBelowRad + headPitchDownRad : maxAboveRad - headPitchDownRad;
   if (allowed >= Math.PI / 2 - 1e-3) {
     return 0;
   }
@@ -90,8 +113,17 @@ export function degreesFromForward(head: Vector3, headPitchDownRad: number, poin
   return MathUtils.radToDeg(pitchToPoint + headPitchDownRad);
 }
 
-export function degreesFitComfort(degrees: number, maxAboveDeg = FOV_MAX_ABOVE_FORWARD_DEG): boolean {
-  return degrees >= -(FOV_MAX_BELOW_FORWARD_DEG + FOV_TOLERANCE_DEG) && degrees <= maxAboveDeg + FOV_TOLERANCE_DEG;
+export function degreesFitComfort(
+  degrees: number,
+  maxAboveDeg = FOV_MAX_ABOVE_FORWARD_DEG,
+  maxBelowDeg = FOV_MAX_BELOW_FORWARD_DEG,
+): boolean {
+  return degrees >= -(maxBelowDeg + FOV_TOLERANCE_DEG) && degrees <= maxAboveDeg + FOV_TOLERANCE_DEG;
+}
+
+/** Angular height (degrees) of text `heightMeters` tall seen from `distance` meters. */
+export function textAngleDeg(heightMeters: number, distance: number): number {
+  return MathUtils.radToDeg(2 * Math.atan(heightMeters / 2 / Math.max(distance, 1e-3)));
 }
 
 export type SlabEdgeAngles = { topDeg: number; bottomDeg: number; fits: boolean };
@@ -110,6 +142,7 @@ export function measureSlabEdges(
   scratch: Vector3,
   out: SlabEdgeAngles,
   maxAboveDeg = FOV_MAX_ABOVE_FORWARD_DEG,
+  maxBelowDeg = FOV_MAX_BELOW_FORWARD_DEG,
 ): SlabEdgeAngles {
   object.updateWorldMatrix(true, false);
   scratch.set(0, topLocalY, 0);
@@ -118,6 +151,7 @@ export function measureSlabEdges(
   scratch.set(0, bottomLocalY, 0);
   object.localToWorld(scratch);
   out.bottomDeg = degreesFromForward(head, headPitchDownRad, scratch);
-  out.fits = degreesFitComfort(out.topDeg, maxAboveDeg) && degreesFitComfort(out.bottomDeg, maxAboveDeg);
+  out.fits =
+    degreesFitComfort(out.topDeg, maxAboveDeg, maxBelowDeg) && degreesFitComfort(out.bottomDeg, maxAboveDeg, maxBelowDeg);
   return out;
 }
