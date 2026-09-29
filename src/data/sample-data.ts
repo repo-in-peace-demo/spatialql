@@ -37,6 +37,7 @@ export const CUSTOMERS_TABLE: Table = {
 export const ORDERS_TABLE: Table = {
   id: 'orders',
   columns: ['id', 'customerId', 'product', 'amount'],
+  columnLabels: { customerId: 'Cust ID' },
   rows: [
     { id: 101, customerId: 2, product: 'Notebook Set', amount: 12 },
     { id: 102, customerId: 2, product: 'Water Bottle', amount: 18 },

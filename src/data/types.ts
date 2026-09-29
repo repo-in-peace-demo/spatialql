@@ -12,6 +12,12 @@ export type Table = {
   id: string;
   columns: string[];
   rows: Row[];
+  /**
+   * Optional header text per column key, for presentation only. Column keys
+   * in `columns`/`rows` are unchanged; a column without an entry displays its
+   * key.
+   */
+  columnLabels?: Partial<Record<string, string>>;
 };
 
 /**
