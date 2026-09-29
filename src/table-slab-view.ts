@@ -33,23 +33,74 @@ export const MAX_RESULT_ROWS = 12;
 
 // All numeric sizes below are UIKit units == centimeters (pixelSize
 // defaults to 0.01 in @pmndrs/uikit, i.e. 100 units = 1 meter).
-const FONT_SIZE_HEADER = 1.8;
-const FONT_SIZE_DATA = 1.6;
-// Slightly smaller than row text (1.6), never smaller than this: a caption
-// wider than the columns widens the slab instead of shrinking.
-const FONT_SIZE_CAPTION = 1.4;
-const PANEL_PADDING = 1.2;
-const PANEL_BORDER_WIDTH = 0.15;
-const PANEL_BORDER_RADIUS = 1.2;
-const CELL_PADDING_X = 1.0;
-const CELL_PADDING_Y = 0.6;
-const COLUMN_MIN_WIDTH = 5;
-const COLUMN_MAX_WIDTH = 14;
-const COLUMN_GAP = 0.6;
-const CAPTION_GAP_BELOW = 0.9;
+//
+// Text is sized by angle, not by centimeters: callers pass the row and
+// header font sizes (see `slabTextSizeAt` in view-comfort.ts), and every
+// other layout size scales with the row font. The base layout below was
+// designed at a 1.6 cm row font.
+const BASE_ROW_FONT_CM = 1.6;
+const BASE_HEADER_FONT_CM = 1.8;
+// Slightly smaller than row text, never smaller than this: a caption wider
+// than the columns widens the slab instead of shrinking.
+const BASE_CAPTION_FONT_CM = 1.4;
+const BASE_PANEL_PADDING = 1.2;
+const BASE_PANEL_BORDER_WIDTH = 0.15;
+const BASE_PANEL_BORDER_RADIUS = 1.2;
+const BASE_CELL_PADDING_X = 1.0;
+const BASE_CELL_PADDING_Y = 0.6;
+const BASE_COLUMN_MIN_WIDTH = 5;
+const BASE_COLUMN_MAX_WIDTH = 14;
+const BASE_COLUMN_GAP = 0.6;
+const BASE_CAPTION_GAP_BELOW = 0.9;
 // UIKit's default `lineHeight` is '120%' of fontSize; a single-line Text is
 // exactly one line tall, so every row's height is known before layout.
 const LINE_HEIGHT_FACTOR = 1.2;
+// The control's border (not scaled: it isn't a slab).
+const PANEL_BORDER_WIDTH = BASE_PANEL_BORDER_WIDTH;
+
+/** Physical font sizes (cm) a slab is built with. */
+export type SlabTextSizes = { rowFontCm: number; headerFontCm: number };
+/** The original fixed sizes, for callers that don't size by angle. */
+export const DEFAULT_SLAB_TEXT_SIZES: SlabTextSizes = { rowFontCm: BASE_ROW_FONT_CM, headerFontCm: BASE_HEADER_FONT_CM };
+
+/** Every layout size of one slab, in cm, derived from its font sizes. */
+type SlabMetrics = {
+  rowFont: number;
+  headerFont: number;
+  captionFont: number;
+  panelPadding: number;
+  borderWidth: number;
+  borderRadius: number;
+  cellPaddingX: number;
+  cellPaddingY: number;
+  columnMinWidth: number;
+  columnMaxWidth: number;
+  columnGap: number;
+  captionGapBelow: number;
+  headerRowHeight: number;
+  dataRowHeight: number;
+};
+
+function slabMetrics(text: SlabTextSizes = DEFAULT_SLAB_TEXT_SIZES): SlabMetrics {
+  const s = text.rowFontCm / BASE_ROW_FONT_CM;
+  const cellPaddingY = BASE_CELL_PADDING_Y * s;
+  return {
+    rowFont: text.rowFontCm,
+    headerFont: text.headerFontCm,
+    captionFont: BASE_CAPTION_FONT_CM * s,
+    panelPadding: BASE_PANEL_PADDING * s,
+    borderWidth: BASE_PANEL_BORDER_WIDTH * s,
+    borderRadius: BASE_PANEL_BORDER_RADIUS * s,
+    cellPaddingX: BASE_CELL_PADDING_X * s,
+    cellPaddingY,
+    columnMinWidth: BASE_COLUMN_MIN_WIDTH * s,
+    columnMaxWidth: BASE_COLUMN_MAX_WIDTH * s,
+    columnGap: BASE_COLUMN_GAP * s,
+    captionGapBelow: BASE_CAPTION_GAP_BELOW * s,
+    headerRowHeight: text.headerFontCm * LINE_HEIGHT_FACTOR + 2 * cellPaddingY,
+    dataRowHeight: text.rowFontCm * LINE_HEIGHT_FACTOR + 2 * cellPaddingY,
+  };
+}
 
 // Absorbs float rounding between this measurement and yoga's layout so a
 // string that exactly fills its column isn't truncated.
@@ -133,6 +184,9 @@ export type TableSlabDocument = {
   fade: Signal<number>;
   /** The SQL caption's Text nodes, one per line (empty without a caption). */
   captionLines: Text[];
+  /** Physical font sizes the slab was built with (meters). */
+  rowFontMeters: number;
+  headerFontMeters: number;
 };
 
 export type SlabBuildOptions = {
@@ -147,7 +201,38 @@ export type SlabBuildOptions = {
   caption?: { lines: string[]; fitLines: string[] };
   /** Put the document origin at the panel's top edge instead of its center. */
   anchorTop?: boolean;
+  /**
+   * Pad the panel with empty space at the bottom up to this height, so
+   * slabs of different row counts can share one height (rows stay at the
+   * top, so row geometry is unchanged).
+   */
+  minHeightMeters?: number;
+  /** Physical font sizes; defaults to DEFAULT_SLAB_TEXT_SIZES. */
+  text?: SlabTextSizes;
 };
+
+/** Rows shown for `table` under `maxRows`, and whether a "+N more" row follows. */
+function visibleRowLayout(table: Table, maxRows: number): { visibleRowCount: number; overflow: boolean } {
+  const overflow = table.rows.length > maxRows;
+  return { visibleRowCount: overflow ? maxRows - 1 : table.rows.length, overflow };
+}
+
+function captionHeightCmFor(options: SlabBuildOptions, m: SlabMetrics): number {
+  return options.caption ? options.caption.lines.length * m.captionFont * LINE_HEIGHT_FACTOR + m.captionGapBelow : 0;
+}
+
+/**
+ * Height (meters) a slab for `table` needs with every row displayed, before
+ * any `minHeightMeters` padding. Lets callers match slab heights up front.
+ */
+export function tableSlabNaturalHeightMeters(table: Table, options: SlabBuildOptions = {}): number {
+  const m = slabMetrics(options.text);
+  const { visibleRowCount, overflow } = visibleRowLayout(table, options.maxRows ?? MAX_VISIBLE_ROWS);
+  const firstRowTopCm = m.borderWidth + m.panelPadding + captionHeightCmFor(options, m) + m.headerRowHeight;
+  const heightCm =
+    firstRowTopCm + m.dataRowHeight * (visibleRowCount + (overflow ? 1 : 0)) + m.panelPadding + m.borderWidth;
+  return heightCm / 100;
+}
 
 function displayValue(value: CellValue): string {
   return value === null ? 'NULL' : String(value);
@@ -196,19 +281,19 @@ function truncateToWidth(text: string, metrics: GlyphMetrics, fontSizeCm: number
  * uppercase, header size) and its widest visible cell (data size), plus
  * horizontal cell padding, clamped to the column min/max.
  */
-function computeColumnWidths(table: Table, visibleRows: Row[]): number[] {
+function computeColumnWidths(table: Table, visibleRows: Row[], m: SlabMetrics): number[] {
   return table.columns.map((column) => {
-    let widestCm = measureTextCm(headerLabel(table, column), HEADER_METRICS, FONT_SIZE_HEADER);
+    let widestCm = measureTextCm(headerLabel(table, column), HEADER_METRICS, m.headerFont);
     for (const row of visibleRows) {
-      const cellWidth = measureTextCm(displayValue(row[column]), DATA_METRICS, FONT_SIZE_DATA);
+      const cellWidth = measureTextCm(displayValue(row[column]), DATA_METRICS, m.rowFont);
       widestCm = Math.max(widestCm, cellWidth);
     }
-    const contentWidth = widestCm + 2 * CELL_PADDING_X;
-    return Math.min(COLUMN_MAX_WIDTH, Math.max(COLUMN_MIN_WIDTH, contentWidth));
+    const contentWidth = widestCm + 2 * m.cellPaddingX;
+    return Math.min(m.columnMaxWidth, Math.max(m.columnMinWidth, contentWidth));
   });
 }
 
-function cellContainer(columnWidthCm: number): Container {
+function cellContainer(columnWidthCm: number, m: SlabMetrics): Container {
   // Fixed width with no grow/shrink, so every cell in a column (header
   // included) is exactly the column width and can't drift out of alignment.
   return new UIKit.Container({
@@ -217,17 +302,24 @@ function cellContainer(columnWidthCm: number): Container {
     maxWidth: columnWidthCm,
     flexGrow: 0,
     flexShrink: 0,
-    paddingLeft: CELL_PADDING_X,
-    paddingRight: CELL_PADDING_X,
-    paddingTop: CELL_PADDING_Y,
-    paddingBottom: CELL_PADDING_Y,
+    paddingLeft: m.cellPaddingX,
+    paddingRight: m.cellPaddingX,
+    paddingTop: m.cellPaddingY,
+    paddingBottom: m.cellPaddingY,
     justifyContent: 'flex-start',
     alignItems: 'center',
   });
 }
 
-function buildCell(text: string, fontSizeCm: number, columnWidthCm: number, color: string, bold: boolean): Container {
-  const cell = cellContainer(columnWidthCm);
+function buildCell(
+  text: string,
+  fontSizeCm: number,
+  columnWidthCm: number,
+  color: string,
+  bold: boolean,
+  m: SlabMetrics,
+): Container {
+  const cell = cellContainer(columnWidthCm, m);
   cell.add(
     new UIKit.Text({
       text,
@@ -243,10 +335,10 @@ function buildCell(text: string, fontSizeCm: number, columnWidthCm: number, colo
 }
 
 /** Width of the caption's widest possible line at the (fixed) caption size. */
-function captionWidthCm(fitLines: string[]): number {
+function captionWidthCm(fitLines: string[], m: SlabMetrics): number {
   let widest = 0;
   for (const line of fitLines) {
-    widest = Math.max(widest, measureTextCm(line, MONO_METRICS, FONT_SIZE_CAPTION));
+    widest = Math.max(widest, measureTextCm(line, MONO_METRICS, m.captionFont));
   }
   return widest;
 }
@@ -271,19 +363,21 @@ export function slabBottomLocalY(doc: TableSlabDocument): number {
  * indicator row if the table has more rows than fit).
  */
 export function buildTableSlabDocument(table: Table, options: SlabBuildOptions = {}): TableSlabDocument {
+  const m = slabMetrics(options.text);
   const maxRows = options.maxRows ?? MAX_VISIBLE_ROWS;
-  const overflow = table.rows.length > maxRows;
-  const visibleRowCount = overflow ? maxRows - 1 : table.rows.length;
+  const { visibleRowCount, overflow } = visibleRowLayout(table, maxRows);
   const visibleRows = table.rows.slice(0, visibleRowCount);
+  // Content height plus any bottom padding (see `minHeightMeters`).
+  const heightCm = Math.max(tableSlabNaturalHeightMeters(table, options), options.minHeightMeters ?? 0) * 100;
 
-  const columnWidths = computeColumnWidths(table, visibleRows);
+  const columnWidths = computeColumnWidths(table, visibleRows, m);
   let contentWidthCm =
-    columnWidths.reduce((sum, w) => sum + w, 0) + COLUMN_GAP * Math.max(0, table.columns.length - 1);
+    columnWidths.reduce((sum, w) => sum + w, 0) + m.columnGap * Math.max(0, table.columns.length - 1);
   // The caption never shrinks below its fixed size: if it's wider than the
   // columns, the last column absorbs the difference so rows still span the
   // full slab width.
   if (options.caption && columnWidths.length > 0) {
-    const deficit = captionWidthCm(options.caption.fitLines) + FIT_EPSILON_CM - contentWidthCm;
+    const deficit = captionWidthCm(options.caption.fitLines, m) + FIT_EPSILON_CM - contentWidthCm;
     if (deficit > 0) {
       columnWidths[columnWidths.length - 1] += deficit;
       contentWidthCm += deficit;
@@ -291,39 +385,40 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
   }
   // Yoga sizes are border-box: the root's width must include its border as
   // well as its padding, or the rows get squeezed / spill past the edge.
-  const widthCm = 2 * (PANEL_PADDING + PANEL_BORDER_WIDTH) + contentWidthCm;
+  const widthCm = 2 * (m.panelPadding + m.borderWidth) + contentWidthCm;
 
   const fade = signal(1);
   const anchor = options.anchorTop ? 'top' : 'center';
   const root = new UIKit.Container({
     flexDirection: 'column',
     width: widthCm,
+    minHeight: heightCm,
     anchorY: anchor,
     opacity: fade,
     fontFamilies: FONT_FAMILIES,
     backgroundColor: COLOR_PANEL_BACKGROUND,
     borderColor: COLOR_PANEL_BORDER,
-    borderTopWidth: PANEL_BORDER_WIDTH,
-    borderLeftWidth: PANEL_BORDER_WIDTH,
-    borderRightWidth: PANEL_BORDER_WIDTH,
-    borderBottomWidth: PANEL_BORDER_WIDTH,
-    borderTopLeftRadius: PANEL_BORDER_RADIUS,
-    borderTopRightRadius: PANEL_BORDER_RADIUS,
-    borderBottomLeftRadius: PANEL_BORDER_RADIUS,
-    borderBottomRightRadius: PANEL_BORDER_RADIUS,
-    paddingTop: PANEL_PADDING,
-    paddingBottom: PANEL_PADDING,
-    paddingLeft: PANEL_PADDING,
-    paddingRight: PANEL_PADDING,
+    borderTopWidth: m.borderWidth,
+    borderLeftWidth: m.borderWidth,
+    borderRightWidth: m.borderWidth,
+    borderBottomWidth: m.borderWidth,
+    borderTopLeftRadius: m.borderRadius,
+    borderTopRightRadius: m.borderRadius,
+    borderBottomLeftRadius: m.borderRadius,
+    borderBottomRightRadius: m.borderRadius,
+    paddingTop: m.panelPadding,
+    paddingBottom: m.panelPadding,
+    paddingLeft: m.panelPadding,
+    paddingRight: m.panelPadding,
   });
 
-  let captionHeightCm = 0;
+  const captionHeightCm = captionHeightCmFor(options, m);
   const captionLines: Text[] = [];
   if (options.caption) {
-    const fontSize = FONT_SIZE_CAPTION;
+    const fontSize = m.captionFont;
     const captionBlock = new UIKit.Container({
       flexDirection: 'column',
-      paddingBottom: CAPTION_GAP_BELOW,
+      paddingBottom: m.captionGapBelow,
     });
     for (const line of options.caption.lines) {
       const text = new UIKit.Text({
@@ -338,25 +433,24 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       captionLines.push(text);
     }
     root.add(captionBlock);
-    captionHeightCm = options.caption.lines.length * fontSize * LINE_HEIGHT_FACTOR + CAPTION_GAP_BELOW;
   }
 
   const header = new UIKit.Container({
     flexDirection: 'row',
     backgroundColor: COLOR_HEADER_BACKGROUND,
-    gapColumn: COLUMN_GAP,
-    borderTopLeftRadius: PANEL_BORDER_RADIUS * 0.6,
-    borderTopRightRadius: PANEL_BORDER_RADIUS * 0.6,
+    gapColumn: m.columnGap,
+    borderTopLeftRadius: m.borderRadius * 0.6,
+    borderTopRightRadius: m.borderRadius * 0.6,
   });
   table.columns.forEach((column, columnIndex) => {
     const columnWidth = columnWidths[columnIndex];
     const label = truncateToWidth(
       headerLabel(table, column),
       HEADER_METRICS,
-      FONT_SIZE_HEADER,
-      columnWidth - 2 * CELL_PADDING_X,
+      m.headerFont,
+      columnWidth - 2 * m.cellPaddingX,
     );
-    header.add(buildCell(label, FONT_SIZE_HEADER, columnWidth, COLOR_TEXT, true));
+    header.add(buildCell(label, m.headerFont, columnWidth, COLOR_TEXT, true, m));
   });
   root.add(header);
 
@@ -369,7 +463,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     const rowContainer = new UIKit.Container({
       flexDirection: 'row',
       backgroundColor: rowBackground,
-      gapColumn: COLUMN_GAP,
+      gapColumn: m.columnGap,
       opacity: computed(() => rowOpacity.value * fade.value),
       transformTranslateY: offsetYCm,
       display: options.hiddenRows?.has(rowIndex) ? 'none' : 'flex',
@@ -384,10 +478,10 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       const truncated = truncateToWidth(
         displayValue(raw),
         DATA_METRICS,
-        FONT_SIZE_DATA,
-        columnWidth - 2 * CELL_PADDING_X,
+        m.rowFont,
+        columnWidth - 2 * m.cellPaddingX,
       );
-      const cell = buildCell(truncated, FONT_SIZE_DATA, columnWidth, raw === null ? COLOR_TEXT_NULL : COLOR_TEXT, false);
+      const cell = buildCell(truncated, m.rowFont, columnWidth, raw === null ? COLOR_TEXT_NULL : COLOR_TEXT, false, m);
       rowContainer.add(cell);
       return cell;
     });
@@ -407,24 +501,20 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     const indicator = new UIKit.Container({
       flexDirection: 'row',
       justifyContent: 'center',
-      paddingTop: CELL_PADDING_Y,
-      paddingBottom: CELL_PADDING_Y,
+      paddingTop: m.cellPaddingY,
+      paddingBottom: m.cellPaddingY,
     });
     indicator.add(
       new UIKit.Text({
         text: `+ ${remaining} more row${remaining === 1 ? '' : 's'}`,
-        fontSize: FONT_SIZE_DATA,
+        fontSize: m.rowFont,
         color: COLOR_TEXT_NULL,
       }),
     );
     root.add(indicator);
   }
 
-  const headerRowHeightCm = FONT_SIZE_HEADER * LINE_HEIGHT_FACTOR + 2 * CELL_PADDING_Y;
-  const dataRowHeightCm = FONT_SIZE_DATA * LINE_HEIGHT_FACTOR + 2 * CELL_PADDING_Y;
-  const firstRowTopCm = PANEL_BORDER_WIDTH + PANEL_PADDING + captionHeightCm + headerRowHeightCm;
-  const heightCm =
-    firstRowTopCm + dataRowHeightCm * (visibleRowCount + (overflow ? 1 : 0)) + PANEL_PADDING + PANEL_BORDER_WIDTH;
+  const firstRowTopCm = m.borderWidth + m.panelPadding + captionHeightCm + m.headerRowHeight;
 
   const document = new UIKitDocument(root);
 
@@ -436,9 +526,11 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     heightMeters: heightCm / 100,
     anchor,
     firstRowTopMeters: firstRowTopCm / 100,
-    rowHeightMeters: dataRowHeightCm / 100,
+    rowHeightMeters: m.dataRowHeight / 100,
     fade,
     captionLines,
+    rowFontMeters: m.rowFont / 100,
+    headerFontMeters: m.headerFont / 100,
   };
 }
 
@@ -460,13 +552,18 @@ export type JoinTypeControlView = {
   /** Size of one option (both are the same size), in meters. */
   optionWidthMeters: number;
   optionHeightMeters: number;
+  /** Label font size it was built with (meters). */
+  labelFontMeters: number;
 };
 
-/** Fingertip-sized targets: each option is at least this wide and tall (cm). */
+/**
+ * Fingertip-sized targets: each option is at least this wide and tall (cm).
+ * A touch target, not text, so it doesn't scale with the label font.
+ */
 export const CONTROL_OPTION_MIN_WIDTH_CM = 4.0;
 export const CONTROL_OPTION_MIN_HEIGHT_CM = 2.5;
-const CONTROL_FONT_SIZE = 1.6;
-const CONTROL_OPTION_PADDING_X = 1.0;
+const BASE_CONTROL_FONT_CM = 1.6;
+const BASE_CONTROL_OPTION_PADDING_X = 1.0;
 const CONTROL_TRACK_PADDING = 0.3;
 const CONTROL_RADIUS = 1.4;
 const COLOR_CONTROL_TRACK = '#e2ddd0';
@@ -481,15 +578,17 @@ export function controlOptionStyle(selected: boolean): { backgroundColor: string
   };
 }
 
-export function buildJoinTypeControl(): JoinTypeControlView {
+/** `labelFontCm`: the label's physical font size (sized by angle by the caller). */
+export function buildJoinTypeControl(labelFontCm = BASE_CONTROL_FONT_CM): JoinTypeControlView {
   const fade = signal(1);
+  const paddingX = BASE_CONTROL_OPTION_PADDING_X * (labelFontCm / BASE_CONTROL_FONT_CM);
   // Both options share one width, so the control is symmetric about the seam.
   const optionWidthCm = Math.max(
     CONTROL_OPTION_MIN_WIDTH_CM,
-    measureTextCm('INNER', HEADER_METRICS, CONTROL_FONT_SIZE) + 2 * CONTROL_OPTION_PADDING_X,
-    measureTextCm('LEFT', HEADER_METRICS, CONTROL_FONT_SIZE) + 2 * CONTROL_OPTION_PADDING_X,
+    measureTextCm('INNER', HEADER_METRICS, labelFontCm) + 2 * paddingX,
+    measureTextCm('LEFT', HEADER_METRICS, labelFontCm) + 2 * paddingX,
   );
-  const optionHeightCm = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, CONTROL_FONT_SIZE * LINE_HEIGHT_FACTOR);
+  const optionHeightCm = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, labelFontCm * LINE_HEIGHT_FACTOR);
   const inset = CONTROL_TRACK_PADDING + PANEL_BORDER_WIDTH;
   const widthCm = 2 * optionWidthCm + CONTROL_TRACK_PADDING + 2 * inset;
   const heightCm = optionHeightCm + 2 * inset;
@@ -537,7 +636,7 @@ export function buildJoinTypeControl(): JoinTypeControlView {
     container.add(
       new UIKit.Text({
         text: label,
-        fontSize: CONTROL_FONT_SIZE,
+        fontSize: labelFontCm,
         fontWeight: 'bold',
         wordBreak: 'keep-all',
       }),
@@ -560,5 +659,6 @@ export function buildJoinTypeControl(): JoinTypeControlView {
     leftCenterX: optionOffsetCm / 100,
     optionWidthMeters: optionWidthCm / 100,
     optionHeightMeters: optionHeightCm / 100,
+    labelFontMeters: labelFontCm / 100,
   };
 }

@@ -28,16 +28,22 @@ import { CUSTOMERS_TABLE, ORDERS_TABLE } from './data/sample-data.js';
 import { devFlag } from './dev-flags.js';
 import { PlacementDebug, type PlacementKind, type SlabReport } from './placement-debug.js';
 import { JoinDocked, TableSlab, TableSlabRuntime } from './table-slab-component.js';
-import { buildTableSlabDocument, type TableSlabDocument } from './table-slab-view.js';
+import { buildTableSlabDocument, tableSlabNaturalHeightMeters, type TableSlabDocument } from './table-slab-view.js';
 import {
-  DESK_MAX_BELOW_FORWARD_DEG,
   eyeFacingLean,
   eyeFacingLeanFromBottom,
-  FLOATING_MAX_BELOW_FORWARD_DEG,
-  FOV_MAX_ABOVE_FORWARD_DEG,
   measureSlabEdges,
   minDistanceForDrop,
+  NATURAL_GAZE_PITCH_DEG,
+  NATURAL_GAZE_PITCH_RAD,
+  PLANNED_SOURCE_DISTANCE_METERS,
+  ROW_TEXT_TARGET_DEG,
+  slabTextSizeAt,
+  TEXT_ANGLE_TOLERANCE,
+  textAngleDeg,
   TOUCH_REACH_MAX_METERS,
+  VIEW_MAX_ABOVE_GAZE_DEG,
+  VIEW_MAX_BELOW_GAZE_DEG,
   type SlabEdgeAngles,
 } from './view-comfort.js';
 
@@ -64,7 +70,7 @@ const SURFACE_HEIGHT_BELOW_HEAD = { min: 0.3, max: 0.95 };
 // Floating fallback: slab centers this far ahead of / below the head, which
 // keeps both centers within seated reach (TOUCH_REACH_MAX_METERS).
 const FLOATING_FORWARD_METERS = 0.42;
-const FLOATING_BELOW_HEAD_METERS = 0.25;
+const FLOATING_BELOW_HEAD_METERS = 0.3;
 
 // On a surface: the slabs' bottom edges rest on it, this far ahead of the
 // head (horizontally), propped up to face the eyes.
@@ -72,11 +78,10 @@ const SURFACE_FORWARD_METERS = 0.32;
 // Keeps the bottom edge from z-fighting with the surface it rests on.
 const SURFACE_LIFT_METERS = 0.002;
 
-// Field-of-view guard (limits in view-comfort.ts): every slab's top and
-// bottom edges should sit inside the comfortable vertical field of view
-// (with the relaxed floating/desk bottom limit); if one wouldn't, the slabs
-// move farther forward, but reach wins: never so far that a slab's center
-// passes TOUCH_REACH_MAX_METERS from the eyes.
+// Field-of-view guard (view-comfort.ts): every slab's top and bottom edges
+// should sit inside the group's view window around the natural seated gaze;
+// if one wouldn't, the slabs move farther forward, but reach wins: never so
+// far that a slab's center passes TOUCH_REACH_MAX_METERS from the eyes.
 // Distance and tilt depend on each other; this many alternations settle both.
 const FIT_ITERATIONS = 3;
 
@@ -194,12 +199,20 @@ export class DeskPlacementSystem extends createSystem({
   private _best = createAssessment();
   private _edges: SlabEdgeAngles = { topDeg: 0, bottomDeg: 0, fits: true };
   private _center = new Vector3();
-  /** Lowest-edge view limit of the current placement (floating or desk). */
-  private maxBelowDeg = FLOATING_MAX_BELOW_FORWARD_DEG;
 
   init(): void {
-    this.customersDoc = buildTableSlabDocument(CUSTOMERS_TABLE);
-    this.ordersDoc = buildTableSlabDocument(ORDERS_TABLE);
+    // Both slabs share one height (the shorter is padded at the bottom), so
+    // on a desk both rest on it with their tops -- and rows -- aligned, and
+    // docking needs no vertical move.
+    // Text is sized by angle for the planned seated distance, once: slab
+    // documents aren't rebuilt when placed (the readout logs the real angle).
+    const text = slabTextSizeAt(PLANNED_SOURCE_DISTANCE_METERS);
+    const sharedHeight = Math.max(
+      tableSlabNaturalHeightMeters(CUSTOMERS_TABLE, { text }),
+      tableSlabNaturalHeightMeters(ORDERS_TABLE, { text }),
+    );
+    this.customersDoc = buildTableSlabDocument(CUSTOMERS_TABLE, { minHeightMeters: sharedHeight, text });
+    this.ordersDoc = buildTableSlabDocument(ORDERS_TABLE, { minHeightMeters: sharedHeight, text });
 
     this.customersEntity = this.world.createTransformEntity(this.customersDoc.document);
     this.customersEntity.addComponent(TableSlab, { tableId: CUSTOMERS_TABLE.id });
@@ -529,7 +542,8 @@ export class DeskPlacementSystem extends createSystem({
    * farther away than that reference point, is inside the comfortable view.
    */
   private edgeFitDistance(drop: number, edgeOffset: number): number {
-    return minDistanceForDrop(drop, this._headPitchDown, FOV_MAX_ABOVE_FORWARD_DEG, this.maxBelowDeg) - edgeOffset;
+    // Against the natural seated gaze, not the head's pitch at placement time.
+    return minDistanceForDrop(drop, NATURAL_GAZE_PITCH_RAD) - edgeOffset;
   }
 
   /** Largest horizontal center distance keeping a center `drop` below the eyes within reach. */
@@ -564,7 +578,6 @@ export class DeskPlacementSystem extends createSystem({
    * slab would leave the comfortable view -- but never past seated reach.
    */
   private placeFloating(): void {
-    this.maxBelowDeg = FLOATING_MAX_BELOW_FORWARD_DEG;
     this.setYawAxes(this._headYaw);
     const customersHalf = this.slabHeightMeters(this.customersDoc) / 2;
     const ordersHalf = this.slabHeightMeters(this.ordersDoc) / 2;
@@ -616,7 +629,6 @@ export class DeskPlacementSystem extends createSystem({
    * surface's footprint.
    */
   private placeOnSurface(surfaceY: number, surface: SurfaceAssessment | null): void {
-    this.maxBelowDeg = DESK_MAX_BELOW_FORWARD_DEG;
     this.setYawAxes(this._headYaw);
 
     const customersHeight = this.slabHeightMeters(this.customersDoc);
@@ -717,17 +729,7 @@ export class DeskPlacementSystem extends createSystem({
       return null;
     }
     const half = this.slabHeightMeters(doc) / 2;
-    return measureSlabEdges(
-      this._headPos,
-      this._headPitchDown,
-      object,
-      half,
-      -half,
-      this._local,
-      this._edges,
-      FOV_MAX_ABOVE_FORWARD_DEG,
-      this.maxBelowDeg,
-    );
+    return measureSlabEdges(this._headPos, NATURAL_GAZE_PITCH_RAD, object, half, -half, this._local, this._edges);
   }
 
   /** Eye-to-center distance of a placed slab (NaN without an object). */
@@ -758,12 +760,21 @@ export class DeskPlacementSystem extends createSystem({
     if (edges && !edges.fits) {
       console.warn(
         `[DeskPlacement] ${name} slab edges are outside the comfortable view (top ` +
-          `${edges.topDeg.toFixed(1)}°, bottom ${edges.bottomDeg.toFixed(1)}° from head forward; limits ` +
-          `-${this.maxBelowDeg}°/+${FOV_MAX_ABOVE_FORWARD_DEG}°): reach (${TOUCH_REACH_MAX_METERS} m) wins, ` +
+          `${edges.topDeg.toFixed(1)}°, bottom ${edges.bottomDeg.toFixed(1)}° from the natural gaze ` +
+          `(${NATURAL_GAZE_PITCH_DEG}° down); limits -${VIEW_MAX_BELOW_GAZE_DEG}°/+${VIEW_MAX_ABOVE_GAZE_DEG}°): ` +
+          `reach (${TOUCH_REACH_MAX_METERS} m) wins, ` +
           `or the slab is clamped to the surface edge.`,
       );
     }
     const distance = this.eyeDistance(entity);
+    const textDeg = textAngleDeg(doc.rowFontMeters, distance);
+    if (Math.abs(textDeg / ROW_TEXT_TARGET_DEG - 1) > TEXT_ANGLE_TOLERANCE) {
+      console.warn(
+        `[DeskPlacement] ${name} slab row text is ${textDeg.toFixed(2)}° at ${distance.toFixed(2)} m, more than ` +
+          `${TEXT_ANGLE_TOLERANCE * 100}% off the ${ROW_TEXT_TARGET_DEG}° target (fonts are sized for ` +
+          `${PLANNED_SOURCE_DISTANCE_METERS} m).`,
+      );
+    }
     if (distance > TOUCH_REACH_MAX_METERS + 0.005) {
       console.warn(
         `[DeskPlacement] ${name} slab center is ${distance.toFixed(2)} m from the eyes, ` +
@@ -834,7 +845,9 @@ export class DeskPlacementSystem extends createSystem({
       bottomEdgeDeg: edges ? edges.bottomDeg : NaN,
       edgesFit: edges ? edges.fits : false,
       eyeDistance: this.eyeDistance(entity),
-      maxBelowDeg: this.maxBelowDeg,
+      maxBelowDeg: VIEW_MAX_BELOW_GAZE_DEG,
+      rowFontCm: doc.rowFontMeters * 100,
+      rowTextDeg: textAngleDeg(doc.rowFontMeters, this.eyeDistance(entity)),
     };
   }
 }

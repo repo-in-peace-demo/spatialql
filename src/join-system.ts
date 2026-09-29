@@ -17,8 +17,9 @@
  * grabbable. A join is dismissed by pulling a source slab apart.
  *
  * Grab vs. press: the INNER | LEFT control lives on its own non-grabbable
- * entity at the pair's front (bottom) edge, centered on the seam, floating
- * CONTROL_SLAB_CLEARANCE_METERS off the slab plane toward the eyes. It isn't
+ * entity in the band between the pair's top edge and the result slab,
+ * centered on the seam, floating CONTROL_SLAB_CLEARANCE_METERS off the slab
+ * plane toward the eyes -- right next to the SQL caption it switches. It isn't
  * a child of any slab: UIKit pointer events bubble up the Object3D tree, and
  * IWSDK's grab handles listen for pointer events on the grabbable object, so
  * a control parented under a slab would forward a press to that slab's grab
@@ -69,17 +70,22 @@ import {
 } from './table-slab-view.js';
 import { easeInCubic, easeOutBack, easeOutCubic, TweenPool } from './tween.js';
 import {
-  CONTROL_MAX_BELOW_FORWARD_DEG,
   degreesFromForward,
-  DESK_MAX_BELOW_FORWARD_DEG,
   eyeFacingLeanFromBottom,
-  FOV_MAX_ABOVE_FORWARD_DEG,
-  FOV_MAX_BELOW_FORWARD_DEG,
+  GROUP_MAX_VERTICAL_FOV_DEG,
   measureSlabEdges,
   MIN_ROW_TEXT_DEG,
-  RESULT_MAX_ABOVE_FORWARD_DEG,
+  NATURAL_GAZE_PITCH_DEG,
+  NATURAL_GAZE_PITCH_RAD,
+  PLANNED_CONTROL_DISTANCE_METERS,
+  PLANNED_RESULT_DISTANCE_METERS,
+  ROW_TEXT_TARGET_DEG,
+  slabTextSizeAt,
+  TEXT_ANGLE_TOLERANCE,
   textAngleDeg,
   TOUCH_REACH_MAX_METERS,
+  VIEW_MAX_ABOVE_GAZE_DEG,
+  VIEW_MAX_BELOW_GAZE_DEG,
   type SlabEdgeAngles,
 } from './view-comfort.js';
 
@@ -148,15 +154,15 @@ const GLOW_WIDTH_METERS = 0.008;
 // --- Result slab placement ----------------------------------------------------
 // Bottom edge just above and slightly behind the docked pair's top edge,
 // leaning back only as far as needed to face the eyes.
-const RESULT_GAP_ABOVE_METERS = 0.03;
+// Leaves room for the join-type control in the band below the result slab,
+// and keeps a pinch at the result's bottom edge out of the pair's grab range.
+const RESULT_GAP_ABOVE_METERS = 0.08;
 const RESULT_BEHIND_METERS = 0.02;
 /** Legibility cap: the result slab's center is never farther than this from the eyes. */
 const RESULT_MAX_DISTANCE_METERS = 0.85;
 /** Push-back steps that bring the result slab's top edge inside the view. */
 const RESULT_FIT_ITERATIONS = 6;
 const PARKED_Y = -100;
-// For the debug readout's angular text size.
-const DATA_TEXT_HEIGHT_METERS = 0.016;
 
 // --- Join-type control ----------------------------------------------------------
 /**
@@ -165,7 +171,10 @@ const DATA_TEXT_HEIGHT_METERS = 0.016;
  * the control can't reach a slab's grab surface.
  */
 const CONTROL_SLAB_CLEARANCE_METERS = 0.1;
-/** The control's top edge sits this far below the pair's front edge, in view. */
+/**
+ * In view, the control's bottom edge sits this far above the pair's top
+ * edge, and the result slab's bottom edge this far above the control.
+ */
 const CONTROL_VIEW_GAP_DEG = 1;
 /** A pinch selects an option when its pinch point is this close to it, in plane... */
 const CONTROL_PINCH_MARGIN_METERS = 0.015;
@@ -258,6 +267,7 @@ export class JoinSystem
   private readonly _c = new Vector3();
   private readonly _d = new Vector3();
   private readonly _e = new Vector3();
+  private readonly _f = new Vector3();
   private readonly _viewUp = new Vector3();
   private readonly _pinchA = new Vector3();
   private readonly _pinchB = new Vector3();
@@ -285,7 +295,9 @@ export class JoinSystem
       persistent: true,
     });
 
-    this.control = buildJoinTypeControl();
+    // Bold label sized like header text at the control's distance; the
+    // options keep their fingertip-sized minimum regardless.
+    this.control = buildJoinTypeControl(slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm);
     this.control.fade.value = 0;
     this.control.document.visible = false;
     this.control.document.position.set(0, PARKED_Y, 0);
@@ -482,6 +494,8 @@ export class JoinSystem
       hiddenRows: new Set(ghostRows),
       caption: { lines: [...sql.inner], fitLines: [...sql.inner, ...sql.left] },
       anchorTop: true,
+      // Same angular text size as the source slabs, at the result's own distance.
+      text: slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS),
     });
 
     doc.fade.value = 0;
@@ -976,6 +990,22 @@ export class JoinSystem
       .addScaledVector(this._up, RESULT_GAP_ABOVE_METERS)
       .addScaledVector(this._normal, -RESULT_BEHIND_METERS);
 
+    // The control sits in the band between the pair's top edge and this
+    // slab's bottom edge (next to the SQL caption it switches). Place it
+    // first, then keep this slab's bottom edge above the control in view.
+    this.placeControl(left);
+    this.control.document.updateWorldMatrix(true, false);
+    this._f.set(0, this.control.heightMeters / 2, 0);
+    this.control.document.localToWorld(this._f);
+    const minBottomRad =
+      MathUtils.degToRad(degreesFromForward(this._head, this.headPitchDown, this._f) + CONTROL_VIEW_GAP_DEG) -
+      this.headPitchDown;
+    this._f.subVectors(this._c, this._head);
+    const minBottomY = this._head.y + Math.hypot(this._f.x, this._f.z) * Math.tan(minBottomRad);
+    if (this._c.y < minBottomY) {
+      this._c.y = minBottomY;
+    }
+
     // Shared yaw, and the horizontal "away from the viewer" axis it implies.
     this._euler.setFromQuaternion(this._q1, 'YXZ');
     const yaw = this._euler.y;
@@ -1004,10 +1034,10 @@ export class JoinSystem
       pulled += pull;
     }
 
-    // With the pair now close to the eyes, the slab's top edge can rise past
-    // the result's relaxed view limit: push it back (horizontally) until the
+    // With the pair close to the eyes, the slab's top edge can rise past the
+    // top of the group's view window: push it back (horizontally) until the
     // top edge fits, but never so far that its center passes the cap.
-    const maxAboveRad = MathUtils.degToRad(RESULT_MAX_ABOVE_FORWARD_DEG) - this.headPitchDown;
+    const maxAboveRad = MathUtils.degToRad(VIEW_MAX_ABOVE_GAZE_DEG) - this.headPitchDown;
     for (let i = 0; i < RESULT_FIT_ITERATIONS && maxAboveRad > 0.05; i++) {
       this._a
         .copy(this._c)
@@ -1040,32 +1070,31 @@ export class JoinSystem
     const object = view.object;
     object.quaternion.copy(this._q2);
     object.position.copy(this._c).addScaledVector(this._up, height);
-    this.placeControl(left, right);
   }
 
   /**
-   * The join-type control: centered on the seam at the pair's front
-   * (bottom) edge, lifted CONTROL_SLAB_CLEARANCE_METERS off it toward the
-   * eyes, then lowered in view so its top edge sits just below that edge.
-   * Faces the eyes. Measured with the RIGHT slab at its dock pose.
+   * The join-type control: centered on the seam at the pair's top edge,
+   * lifted CONTROL_SLAB_CLEARANCE_METERS off it toward the eyes, then raised
+   * in view so its bottom edge sits just above that edge -- in the band
+   * below the result slab. Faces the eyes. The RIGHT slab docks with its
+   * top aligned to the LEFT slab's, so the LEFT slab's frame is enough.
+   * Leaves `_c` and `_q1` untouched for `placeResult`.
    */
-  private placeControl(left: SourceSlab, right: SourceSlab): void {
+  private placeControl(left: SourceSlab): void {
     left.object.updateWorldMatrix(true, false);
     const seamX = this.dockSide * (left.doc.widthMeters / 2 + DOCK_GAP_METERS / 2);
-    // Tops are aligned, so the taller slab's bottom edge is the front edge.
-    const leftBottomY = -left.doc.heightMeters / 2;
-    const rightBottomY = left.doc.heightMeters / 2 - right.doc.heightMeters;
-    this._d.set(seamX, Math.min(leftBottomY, rightBottomY), 0);
+    // The RIGHT slab docks with its top aligned to the LEFT slab's.
+    this._d.set(seamX, left.doc.heightMeters / 2, 0);
     left.object.localToWorld(this._d);
 
     const control = this.control.document;
     this._e.subVectors(this._head, this._d).normalize();
     control.position.copy(this._d).addScaledVector(this._e, CONTROL_SLAB_CLEARANCE_METERS);
     this._viewUp.copy(UP).addScaledVector(this._e, -UP.dot(this._e)).normalize();
-    const drop =
+    const lift =
       this.control.heightMeters / 2 +
       control.position.distanceTo(this._head) * Math.tan(MathUtils.degToRad(CONTROL_VIEW_GAP_DEG));
-    control.position.addScaledVector(this._viewUp, -drop);
+    control.position.addScaledVector(this._viewUp, lift);
     control.lookAt(this._head);
 
     // The control faces the eyes, so it's tilted against the slabs' plane
@@ -1076,10 +1105,10 @@ export class JoinSystem
     let minOffPlane = Infinity;
     for (let sx = -1; sx <= 1; sx += 2) {
       for (let sy = -1; sy <= 1; sy += 2) {
-        this._c.set((sx * this.control.widthMeters) / 2, (sy * this.control.heightMeters) / 2, 0);
-        control.localToWorld(this._c);
-        left.object.worldToLocal(this._c);
-        minOffPlane = Math.min(minOffPlane, this._c.z);
+        this._f.set((sx * this.control.widthMeters) / 2, (sy * this.control.heightMeters) / 2, 0);
+        control.localToWorld(this._f);
+        left.object.worldToLocal(this._f);
+        minOffPlane = Math.min(minOffPlane, this._f.z);
       }
     }
     if (minOffPlane < CONTROL_SLAB_CLEARANCE_METERS) {
@@ -1169,29 +1198,58 @@ export class JoinSystem
     }
   }
 
+  /**
+   * Eye position, and the natural seated gaze that every view angle is
+   * measured from (not the head's actual pitch at join time).
+   */
   private readHead(): void {
     this.player.head.updateWorldMatrix(true, false);
     this._head.setFromMatrixPosition(this.player.head.matrixWorld);
-    this._q1.setFromRotationMatrix(this.player.head.matrixWorld);
-    this._euler.setFromQuaternion(this._q1, 'YXZ');
-    this.headPitchDown = -this._euler.x;
+    this.headPitchDown = NATURAL_GAZE_PITCH_RAD;
   }
 
   /**
    * Dev-only (`debug` flag): logs every joined element's eye distance and
-   * view angles -- the source slabs and the control against the seated
-   * reach limit, the result slab against its relaxed top limit and the
-   * minimum text size -- plus the control's clearance from the source slabs'
-   * grab surfaces. Warns on any limit it breaks. Runs once per join, so the
-   * small allocations here are fine.
+   * top/bottom edge angles from the natural gaze -- the source slabs and
+   * the control against the seated reach limit, the result slab against the
+   * minimum text size -- the control's clearance from the source slabs'
+   * grab surfaces, and the whole group's vertical extent against
+   * GROUP_MAX_VERTICAL_FOV_DEG. Warns on any limit it breaks. Runs once per
+   * join, so the small allocations here are fine.
    */
   private warnIfOutOfView(view: ResultView, left: SourceSlab, right: SourceSlab): void {
     if (!import.meta.env.DEV || !this.debug) {
       return;
     }
     const debug = this.debug;
+    const gaze = `from the natural gaze (${NATURAL_GAZE_PITCH_DEG}° down)`;
     const reachNote = (distance: number) =>
       `reach limit ${TOUCH_REACH_MAX_METERS} m, ${distance <= TOUCH_REACH_MAX_METERS + 0.005 ? 'within reach' : 'BEYOND REACH'}`;
+    let groupTop = -Infinity;
+    let groupBottom = Infinity;
+    // Records one element's edges in the group extent; warns if outside the window.
+    const edgeNote = (name: string, topDeg: number, bottomDeg: number) => {
+      groupTop = Math.max(groupTop, topDeg);
+      groupBottom = Math.min(groupBottom, bottomDeg);
+      if (topDeg > VIEW_MAX_ABOVE_GAZE_DEG + 0.5 || bottomDeg < -(VIEW_MAX_BELOW_GAZE_DEG + 0.5)) {
+        debug.warn(
+          `${name} edges outside the view window (top ${topDeg.toFixed(1)}°, bottom ${bottomDeg.toFixed(1)}° ${gaze}; ` +
+            `window -${VIEW_MAX_BELOW_GAZE_DEG}°/+${VIEW_MAX_ABOVE_GAZE_DEG}°)`,
+        );
+      }
+      return `edges top ${topDeg.toFixed(1)}°, bottom ${bottomDeg.toFixed(1)}° ${gaze}`;
+    };
+    // Font size and the angle it subtends; warns when off the angular target.
+    const textNote = (name: string, fontMeters: number, distance: number) => {
+      const deg = textAngleDeg(fontMeters, distance);
+      if (Math.abs(deg / ROW_TEXT_TARGET_DEG - 1) > TEXT_ANGLE_TOLERANCE) {
+        debug.warn(
+          `${name} row text is ${deg.toFixed(2)}° at ${distance.toFixed(2)} m, more than ` +
+            `${TEXT_ANGLE_TOLERANCE * 100}% off the ${ROW_TEXT_TARGET_DEG}° target`,
+        );
+      }
+      return `row font ${cm(fontMeters)} = ${deg.toFixed(2)}° (target ${ROW_TEXT_TARGET_DEG}°)`;
+    };
 
     // The RIGHT slab is still animating into its dock; measure it there.
     const restore = this._c.copy(right.object.position);
@@ -1199,7 +1257,7 @@ export class JoinSystem
     right.object.position.copy(this.dock.toPos);
     right.object.quaternion.copy(this.dock.toQuat);
 
-    // Source slabs: touched, so against the reach limit (and the desk view limit).
+    // Source slabs: touched, so against the reach limit.
     let sourceDistance = 0;
     for (const slab of [left, right]) {
       measureSlabEdges(
@@ -1210,15 +1268,14 @@ export class JoinSystem
         slabBottomLocalY(slab.doc),
         this._a,
         this._edges,
-        FOV_MAX_ABOVE_FORWARD_DEG,
-        DESK_MAX_BELOW_FORWARD_DEG,
       );
+      const edges = edgeNote(`${slab.id} slab`, this._edges.topDeg, this._edges.bottomDeg);
       this._a.setFromMatrixPosition(slab.object.matrixWorld);
       const distance = this._a.distanceTo(this._head);
       sourceDistance = Math.max(sourceDistance, distance);
       debug.note(
         `${slab.id} slab (touch): center ${distance.toFixed(2)} m from the eyes (${reachNote(distance)}); ` +
-          `edges top ${this._edges.topDeg.toFixed(1)}°, bottom ${this._edges.bottomDeg.toFixed(1)}° from head forward`,
+          `${textNote(`${slab.id} slab`, slab.doc.rowFontMeters, distance)}; ${edges}`,
       );
       if (distance > TOUCH_REACH_MAX_METERS + 0.005) {
         debug.warn(`${slab.id} slab is ${distance.toFixed(2)} m from the eyes, beyond the ${TOUCH_REACH_MAX_METERS} m reach limit`);
@@ -1230,7 +1287,6 @@ export class JoinSystem
     control.document.updateWorldMatrix(true, false);
     this._a.setFromMatrixPosition(control.document.matrixWorld);
     const controlDistance = this._a.distanceTo(this._head);
-    const controlDeg = degreesFromForward(this._head, this.headPitchDown, this._a);
     let clearance = Infinity;
     for (const sx of [-1, 0, 1]) {
       for (const sy of [-1, 0, 1]) {
@@ -1239,17 +1295,21 @@ export class JoinSystem
         clearance = Math.min(clearance, distanceToSlab(this._d, left, this._e), distanceToSlab(this._d, right, this._e));
       }
     }
+    this._d.set(0, control.heightMeters / 2, 0);
+    control.document.localToWorld(this._d);
+    this._e.set(0, -control.heightMeters / 2, 0);
+    control.document.localToWorld(this._e);
+    const controlTopDeg = degreesFromForward(this._head, this.headPitchDown, this._d);
+    const controlEdges = edgeNote('join-type control', controlTopDeg, degreesFromForward(this._head, this.headPitchDown, this._e));
     debug.note(
-      `join-type control (touch): center ${controlDistance.toFixed(2)} m from the eyes (${reachNote(controlDistance)}), ` +
-        `${controlDeg.toFixed(1)}° from head forward (limit -${CONTROL_MAX_BELOW_FORWARD_DEG}°); clearance to the nearest ` +
-        `source slab ${cm(clearance)} (palm grab sphere ${cm(GRAB_SPHERE_RADIUS_METERS)}, target >= ` +
-        `${cm(CONTROL_SLAB_CLEARANCE_METERS)}); options ${cm(control.optionWidthMeters)} x ${cm(control.optionHeightMeters)}`,
+      `join-type control (touch): center ${controlDistance.toFixed(2)} m from the eyes (${reachNote(controlDistance)}); ` +
+        `${controlEdges}; clearance to the nearest source slab ${cm(clearance)} (palm grab sphere ` +
+        `${cm(GRAB_SPHERE_RADIUS_METERS)}, target >= ${cm(CONTROL_SLAB_CLEARANCE_METERS)}); ` +
+        `options ${cm(control.optionWidthMeters)} x ${cm(control.optionHeightMeters)}; label font ` +
+        `${cm(control.labelFontMeters)} = ${textAngleDeg(control.labelFontMeters, controlDistance).toFixed(2)}°`,
     );
     if (controlDistance > TOUCH_REACH_MAX_METERS + 0.005) {
       debug.warn(`join-type control is ${controlDistance.toFixed(2)} m from the eyes, beyond the reach limit`);
-    }
-    if (controlDeg < -(CONTROL_MAX_BELOW_FORWARD_DEG + 0.5)) {
-      debug.warn(`join-type control is ${(-controlDeg).toFixed(1)}° below head forward, past its ${CONTROL_MAX_BELOW_FORWARD_DEG}° limit`);
     }
     if (clearance < CONTROL_SLAB_CLEARANCE_METERS - 0.005) {
       debug.warn(`join-type control is only ${cm(clearance)} from a source slab (target ${cm(CONTROL_SLAB_CLEARANCE_METERS)})`);
@@ -1267,31 +1327,38 @@ export class JoinSystem
       slabBottomLocalY(view.doc),
       this._a,
       this._edges,
-      RESULT_MAX_ABOVE_FORWARD_DEG,
-      FOV_MAX_BELOW_FORWARD_DEG,
     );
-    const topDeg = this._edges.topDeg;
-    const bottomDeg = this._edges.bottomDeg;
+    const resultBottomDeg = this._edges.bottomDeg;
+    const resultEdges = edgeNote('result slab', this._edges.topDeg, resultBottomDeg);
     this._a.set(0, -view.doc.heightMeters / 2, 0);
     view.object.localToWorld(this._a);
     const resultDistance = this._a.distanceTo(this._head);
-    const centerDeg = degreesFromForward(this._head, this.headPitchDown, this._a);
-    const resultTextDeg = textAngleDeg(DATA_TEXT_HEIGHT_METERS, resultDistance);
+    const resultTextDeg = textAngleDeg(view.doc.rowFontMeters, resultDistance);
     debug.note(
-      `result slab (view only): ${resultDistance.toFixed(2)} m from the eyes (cap ${RESULT_MAX_DISTANCE_METERS} m), ` +
-        `center ${centerDeg.toFixed(1)}°, top edge ${topDeg.toFixed(1)}°, bottom edge ${bottomDeg.toFixed(1)}° from ` +
-        `head forward; row text ${resultTextDeg.toFixed(2)}° tall (source slabs ` +
-        `${textAngleDeg(DATA_TEXT_HEIGHT_METERS, sourceDistance).toFixed(2)}° at ${sourceDistance.toFixed(2)} m; ` +
-        `minimum ${MIN_ROW_TEXT_DEG.toFixed(2)}°)`,
+      `result slab (view only): ${resultDistance.toFixed(2)} m from the eyes (cap ${RESULT_MAX_DISTANCE_METERS} m); ` +
+        `${textNote('result slab', view.doc.rowFontMeters, resultDistance)} (source slabs ` +
+        `${textAngleDeg(left.doc.rowFontMeters, sourceDistance).toFixed(2)}° at ${sourceDistance.toFixed(2)} m; ` +
+        `minimum ${MIN_ROW_TEXT_DEG.toFixed(2)}°); ${resultEdges}`,
     );
-    if (!this._edges.fits) {
-      debug.warn(
-        `result slab edges outside the comfortable view (top ${topDeg.toFixed(1)}°, bottom ${bottomDeg.toFixed(1)}° ` +
-          `from head forward; limits -${FOV_MAX_BELOW_FORWARD_DEG}°/+${RESULT_MAX_ABOVE_FORWARD_DEG}°)`,
-      );
-    }
     if (resultTextDeg < MIN_ROW_TEXT_DEG) {
       debug.warn(`result slab row text is ${resultTextDeg.toFixed(2)}° tall, below the ${MIN_ROW_TEXT_DEG}° minimum`);
+    }
+    if (resultBottomDeg < controlTopDeg) {
+      debug.warn(
+        `result slab's bottom edge (${resultBottomDeg.toFixed(1)}°) is below the control's top edge ` +
+          `(${controlTopDeg.toFixed(1)}°) in view: they overlap`,
+      );
+    }
+
+    // The whole group against its vertical budget.
+    const extent = groupTop - groupBottom;
+    const fits = extent <= GROUP_MAX_VERTICAL_FOV_DEG + 0.5;
+    debug.note(
+      `group: top ${groupTop.toFixed(1)}°, bottom ${groupBottom.toFixed(1)}° ${gaze}; extent ${extent.toFixed(1)}° ` +
+        `of ${GROUP_MAX_VERTICAL_FOV_DEG}° (${fits ? 'fits' : `OUTSIDE by ${(extent - GROUP_MAX_VERTICAL_FOV_DEG).toFixed(1)}°`})`,
+    );
+    if (!fits) {
+      debug.warn(`slab group spans ${extent.toFixed(1)}°, more than GROUP_MAX_VERTICAL_FOV_DEG (${GROUP_MAX_VERTICAL_FOV_DEG}°)`);
     }
   }
 

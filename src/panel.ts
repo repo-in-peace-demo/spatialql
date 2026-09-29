@@ -38,6 +38,13 @@ export class PanelSystem extends createSystem({}) {
     const xrButton = panel?.getElementById('xr-button');
     const exitButton = panel?.getElementById('exit-button');
     if (panel == null || xrButton == null || exitButton == null) {
+      // Without the panel (or its buttons) nothing here runs -- including the
+      // XR hide -- so say so rather than failing silently.
+      console.warn(
+        `[PanelSystem] welcome panel setup skipped: ` +
+          `${panel == null ? `scene object "${WELCOME_PANEL_NODE_ID}" not found` : 'xr-button / exit-button not found'}. ` +
+          `It won't be hidden in XR.`,
+      );
       return;
     }
     this.welcomePanel = panel;

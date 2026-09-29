@@ -26,7 +26,7 @@ import {
   type World,
 } from '@iwsdk/core';
 import type { SurfaceAssessment } from './desk-placement.js';
-import { TOUCH_REACH_MAX_METERS } from './view-comfort.js';
+import { NATURAL_GAZE_PITCH_DEG, ROW_TEXT_TARGET_DEG, TOUCH_REACH_MAX_METERS } from './view-comfort.js';
 
 export type PlacementKind = 'floating' | 'surface' | 'synthetic' | 'none';
 
@@ -44,6 +44,9 @@ export type SlabReport = {
   eyeDistance: number;
   /** The lowest-edge view limit this placement used. */
   maxBelowDeg: number;
+  /** Row font size (cm) and the angle it subtends at `eyeDistance`. */
+  rowFontCm: number;
+  rowTextDeg: number;
 };
 
 export type PlacementReport = {
@@ -177,8 +180,10 @@ export class PlacementDebug {
       console.log(
         `${LOG_PREFIX} ${slab.name}: center ${fmt(slab.eyeDistance)} m from the eyes ` +
           `(reach limit ${TOUCH_REACH_MAX_METERS} m, ${withinReach ? 'within reach' : 'BEYOND REACH'}); ` +
-          `edges top ${fmt(slab.topEdgeDeg, 1)}°, bottom ${fmt(slab.bottomEdgeDeg, 1)}° ` +
-          `(limit -${slab.maxBelowDeg}°)${slab.touched ? '; not moved (grabbed or docked)' : ''}`,
+          `row font ${fmt(slab.rowFontCm)} cm = ${fmt(slab.rowTextDeg)}° (target ${ROW_TEXT_TARGET_DEG}°); ` +
+          `edges top ${fmt(slab.topEdgeDeg, 1)}°, bottom ${fmt(slab.bottomEdgeDeg, 1)}° from the natural gaze ` +
+          `(${NATURAL_GAZE_PITCH_DEG}° down; limit -${slab.maxBelowDeg}°)` +
+          `${slab.touched ? '; not moved (grabbed or docked)' : ''}`,
       );
     }
     this.drawOutlines(report.candidates, report.chosen, report.synthetic);

@@ -40,16 +40,18 @@ for the general emulator and headset workflow.
 
 ### The join-type control
 
-When the slabs dock, an **INNER | LEFT** control fades in at the pair's front
-(bottom) edge, the edge closest to you, centered on the seam between the two
-slabs. It fades out when they separate.
+When the slabs dock, an **INNER | LEFT** control fades in in the band between
+the pair's top edge and the result slab, centered on the seam between the two
+slabs, right next to the SQL caption it switches. It fades out when they
+separate.
 
 - **Size:** each option is at least 4.0 cm wide and 2.5 cm tall
   (`CONTROL_OPTION_MIN_WIDTH_CM`, `CONTROL_OPTION_MIN_HEIGHT_CM`). The selected
   option is dark with light text; the other is light.
 - **Placement:** it floats `CONTROL_SLAB_CLEARANCE_METERS` (10 cm) off the slabs
-  toward your eyes and sits just below the pair's front edge in view, facing
-  you. It's its own entity, not a child of any slab.
+  toward your eyes and sits just above the pair's top edge in view, facing you.
+  The result slab's bottom edge stays above it in view. It's its own entity,
+  not a child of any slab.
 - **No grab hazard:** every point of the control is at least 10 cm from both
   source slabs, 3 cm more than the 7 cm palm grab sphere. A palm on the control
   can't reach a slab's grab surface, and the result slab isn't grabbable, so
@@ -60,23 +62,37 @@ slabs. It fades out when they separate.
   surface. Selecting the option that's already selected changes nothing.
 - The SQL caption stays on the result slab and updates when you switch.
 
-### Seated reach
+### Seated reach and the natural gaze
 
-Everything you touch is kept within seated reach (constants in
-`src/view-comfort.ts`, meant to be tuned on a headset):
+View angles are measured from a **natural seated gaze**, 18° below horizontal
+along the head's yaw, not from the head's actual pitch when the slabs are
+placed. The whole group (source pair, control, result slab) must fit one
+vertical window centered on that gaze. Everything you touch stays within
+seated reach. Constants are in `src/view-comfort.ts` and meant to be tuned on a
+headset:
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
+| `NATURAL_GAZE_PITCH_DEG` | 18° | The gaze all view angles are measured from |
+| `GROUP_MAX_VERTICAL_FOV_DEG` | 80° | Whole group's vertical extent: 40° below to 40° above the gaze (-58° to +22° from level) |
 | `TOUCH_REACH_MAX_METERS` | 0.60 m | Max eye-to-center distance for source slabs and the control |
-| `FLOATING_MAX_BELOW_FORWARD_DEG` | 50° | Lowest edge of a floating slab, below head forward |
-| `DESK_MAX_BELOW_FORWARD_DEG` | 55° | Lowest edge of a slab resting on a desk |
-| `CONTROL_MAX_BELOW_FORWARD_DEG` | 60° | The control |
-| `RESULT_MAX_ABOVE_FORWARD_DEG` | 30° | Top edge of the result slab (view only) |
 | `MIN_ROW_TEXT_DEG` | 1.0° | Minimum row-text size on the result slab |
+| `ROW_TEXT_TARGET_DEG` / `HEADER_TEXT_TARGET_DEG` | 1.15° / 1.3° | Text is sized by angle: font = 2 × distance × tan(angle / 2) |
+| `MIN_ROW_FONT_CM` | 0.9 cm | Row text is never physically smaller |
+| `PLANNED_SOURCE_DISTANCE_METERS` / `_RESULT_` / `_CONTROL_` | 0.55 / 0.65 / 0.45 m | Distances the fonts are sized for, once at startup |
 
-When the view limit and reach disagree, reach wins and the debug log warns.
+All other slab sizes (padding, row height, column widths) scale with the row
+font; the control keeps its 4 × 2.5 cm fingertip minimum. The placement and
+join logs report each element's font size and the angle it actually
+subtends, and warn if it's more than 15% off target.
+
+When the view window and reach disagree, reach wins and the debug log warns.
 The result slab may sit farther away than touchable content (up to 0.85 m),
-pushed back until its top edge fits.
+pushed back until its top edge fits the window.
+
+Both source slabs share one height: the shorter one (customers) is padded
+with empty space at the bottom. On a desk both rest on it with their tops,
+and rows, aligned, so docking needs no vertical move.
 
 ## 1. Setup
 
@@ -88,7 +104,7 @@ under the dev server (`import.meta.env.DEV`); production builds never read them.
 | Flag | What it does |
 | --- | --- |
 | `forceSurface` | Skips real surface detection. 1 s into the XR session, it places both slabs on a synthetic desk 0.45 m below the head. Slabs you've already grabbed (or that are docked) aren't moved. |
-| `seated` | Lowers the emulated headset to a 1.2 m eye height, at page load and again at each XR session start. Does nothing on a real headset. |
+| `seated` | Lowers the emulated headset to a 1.2 m eye height and pitches it 18° down (the natural seated gaze), at page load and again at each XR session start. Does nothing on a real headset. |
 | `debug` | Registers `GrabDebugSystem`, turns on the join debug keys, join and pinch logs, and the placement readout. |
 
 Each flag is read from two places, in this order:
