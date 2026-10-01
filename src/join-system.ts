@@ -42,6 +42,7 @@ import {
   RayInteractable,
   signal,
   Vector3,
+  VisibilityState,
   type Entity,
   type Object3D,
   type Signal,
@@ -65,10 +66,20 @@ import {
   setRowTint,
   slabBottomLocalY,
   slabTopLocalY,
+  type CellOffset,
   type JoinTypeControlView,
   type TableSlabDocument,
 } from './table-slab-view.js';
-import { easeInCubic, easeOutBack, easeOutCubic, TweenPool } from './tween.js';
+import { sounds } from './sound.js';
+import {
+  BOUNCE_FIRST_IMPACT,
+  easeInCubic,
+  easeInOutCubic,
+  easeOutBackSoft,
+  easeOutBounce,
+  easeOutCubic,
+  TweenPool,
+} from './tween.js';
 import {
   degreesFromForward,
   eyeFacingLeanFromBottom,
@@ -112,6 +123,13 @@ const PREVIEW_ENTER_VERTICAL_METERS = 0.12;
 const PREVIEW_EXIT_VERTICAL_METERS = 0.16;
 const PREVIEW_EXIT_GRACE_SECONDS = 0.15;
 const PREVIEW_HINT_COUNT = 3;
+/**
+ * The "magnet": from this edge gap in, a held slab's approach shows as a
+ * facing-edge glow (and hum) that strengthens until the preview gap.
+ */
+const APPROACH_GAP_METERS = 0.15;
+const APPROACH_GLOW_MIN = 0.12;
+const APPROACH_GLOW_RANGE = 0.35;
 
 // --- Commit / dock -------------------------------------------------------------
 // Room for fan-out lines between the docked slabs. Independent of the preview
@@ -119,27 +137,38 @@ const PREVIEW_HINT_COUNT = 3;
 // the dock gap) and of SEPARATE_DISTANCE_METERS (measured from the dock pose),
 // so widening it needs no threshold changes.
 const DOCK_GAP_METERS = 0.09;
-const DOCK_DURATION_SECONDS = 0.18;
-const REDOCK_DURATION_SECONDS = 0.15;
+// Snaps in with a slight overshoot and settle (easeOutBackSoft).
+const DOCK_DURATION_SECONDS = 0.22;
+const REDOCK_DURATION_SECONDS = 0.18;
 /** Pulling a docked slab farther than this from its dock pose separates. */
 const SEPARATE_DISTANCE_METERS = 0.1;
 /** Debug separate: how far the RIGHT slab slides away. */
 const DEBUG_SEPARATE_SLIDE_METERS = 0.15;
 
-// --- Join animation timeline (seconds after release; total < 1.5 s) ----------
+// --- Join animation timeline (seconds after release; total ~1.3 s) ----------
+// 0 snap | 0-0.22 dock | 0.22+ lines (+0.03 each) | 0.35+ rows fly (+0.05
+// each, 0.35 s flights) | 0.55 unmatched rows drop | last row lands: resolve.
 const LINE_START_SECONDS = DOCK_DURATION_SECONDS;
-const LINE_STAGGER_SECONDS = 0.04;
-const LINE_DRAW_SECONDS = 0.22;
-const RESULT_APPEAR_SECONDS = 0.3;
-const RESULT_FADE_SECONDS = 0.25;
-const ROW_START_SECONDS = 0.45;
+const LINE_STAGGER_SECONDS = 0.03;
+const LINE_DRAW_SECONDS = 0.2;
+const RESULT_APPEAR_SECONDS = 0.15;
+const RESULT_FADE_SECONDS = 0.2;
+const ROW_START_SECONDS = 0.35;
 const ROW_STAGGER_SECONDS = 0.05;
+/** Each result row's cells fly from their source rows for this long. */
+const ROW_FLY_SECONDS = 0.35;
 const ROW_DURATION_SECONDS = 0.22;
 const ROW_SLIDE_CM = 2;
-const DIM_START_SECONDS = 0.6;
-const DIM_DURATION_SECONDS = 0.35;
+const DIM_START_SECONDS = 0.55;
+const DIM_DURATION_SECONDS = 0.45;
 const DIM_OPACITY = 0.35;
-const DIM_DROP_CM = 0.6;
+/**
+ * An excluded row drops by this fraction of its own row height, bounce
+ * included (easeOutBounce never passes its target), so it stays inside its
+ * slot and never overlaps its neighbor. Derived from the row height because
+ * rows scale with the font.
+ */
+const DIM_DROP_ROW_FRACTION = 0.12;
 const TOGGLE_DURATION_SECONDS = 0.3;
 const SEPARATE_DURATION_SECONDS = 0.3;
 
@@ -150,6 +179,12 @@ const LINE_THICKNESS_METERS = 0.0015;
 const LINE_OPACITY = 0.55;
 const LINE_SURFACE_OFFSET_METERS = 0.004;
 const GLOW_WIDTH_METERS = 0.008;
+// A short bright pulse travels along each match line as it draws.
+const COLOR_LINE_PULSE = '#fff2d0';
+const LINE_PULSE_THICKNESS_METERS = 0.003;
+const LINE_PULSE_OPACITY = 0.9;
+/** Pulse length as a fraction of its line. */
+const LINE_PULSE_FRACTION = 0.18;
 
 // --- Result slab placement ----------------------------------------------------
 // Bottom edge just above and slightly behind the docked pair's top edge,
@@ -198,6 +233,9 @@ type ResultView = {
   /** Result row indices, matched rows first; ghost rows are appended. */
   matchedRowCount: number;
   ghostRows: number[];
+  /** Per result row: its LEFT / RIGHT source row index (lineage), or -1 for none. */
+  rowLeftSource: number[];
+  rowRightSource: number[];
   /** One entry per match line: left/right source row index. */
   lineLeftRows: number[];
   lineRightRows: number[];
@@ -239,7 +277,11 @@ export class JoinSystem
   private previewSide = 1;
   private previewExitTimer = 0;
 
-  private readonly tweens = new TweenPool(192);
+  private readonly tweens = new TweenPool(256);
+  /** 0..1 approach of a held slab toward the other (the "magnet"); 0 when none. */
+  private approach = 0;
+  private approachMoving: SourceSlab | null = null;
+  private approachStationary: SourceSlab | null = null;
   private readonly separateClock = signal(0);
   private readonly dock: DockAnimation = {
     active: false,
@@ -254,6 +296,7 @@ export class JoinSystem
 
   private visualsRoot!: Group;
   private lines!: SegmentBatch;
+  private pulses!: SegmentBatch;
   private hints!: SegmentBatch;
   private stationaryGlow!: EdgeGlow;
   private movingGlow!: EdgeGlow;
@@ -287,10 +330,17 @@ export class JoinSystem
     this.visualsRoot = new Group();
     this.visualsRoot.name = 'join-visuals';
     this.lines = new SegmentBatch(MAX_MATCH_LINES, COLOR_MATCH_LINE, LINE_THICKNESS_METERS, LINE_OPACITY);
+    this.pulses = new SegmentBatch(MAX_MATCH_LINES, COLOR_LINE_PULSE, LINE_PULSE_THICKNESS_METERS, LINE_PULSE_OPACITY);
     this.hints = new SegmentBatch(PREVIEW_HINT_COUNT, COLOR_PREVIEW, 0.002, 0.45);
     this.stationaryGlow = new EdgeGlow(GLOW_WIDTH_METERS);
     this.movingGlow = new EdgeGlow(GLOW_WIDTH_METERS);
-    this.visualsRoot.add(this.lines.mesh, this.hints.mesh, this.stationaryGlow.mesh, this.movingGlow.mesh);
+    this.visualsRoot.add(
+      this.lines.mesh,
+      this.pulses.mesh,
+      this.hints.mesh,
+      this.stationaryGlow.mesh,
+      this.movingGlow.mesh,
+    );
     const visualsEntity = this.world.createTransformEntity(this.visualsRoot, {
       parent: this.world.sceneEntity,
       persistent: true,
@@ -311,11 +361,33 @@ export class JoinSystem
 
     this.debug = import.meta.env.DEV && devFlag('debug') ? new JoinDebug(this) : null;
 
+    // Sound: built now (suspended); started by the first user gesture.
+    sounds.init(this.world, { muted: import.meta.env.DEV && devFlag('mute') });
+    if (import.meta.env.DEV && this.debug) {
+      const debug = this.debug;
+      sounds.setHook((name, delay, peakDb) =>
+        debug.note(
+          `sound: ${name} at +${delay.toFixed(2)} s; ` +
+            (peakDb === null
+              ? 'not played (audio not running, or muted)'
+              : `output peak ${Number.isFinite(peakDb) ? peakDb.toFixed(1) : '-inf'} dBFS`),
+        ),
+      );
+    }
+    this.cleanupFuncs.push(
+      this.world.visibilityState.subscribe((state) => {
+        if (state !== VisibilityState.NonImmersive) {
+          sounds.unlock();
+        }
+      }),
+    );
+
     this.cleanupFuncs.push(
       () => this.control.inner.removeEventListener('click', onInner),
       () => this.control.left.removeEventListener('click', onLeft),
       () => {
         this.lines.dispose();
+        this.pulses.dispose();
         this.hints.dispose();
         this.stationaryGlow.dispose();
         this.movingGlow.dispose();
@@ -334,7 +406,10 @@ export class JoinSystem
   update(delta: number): void {
     this.tweens.update(delta);
     this.updateDock(delta);
+    sounds.update();
+    this.unlockSoundOnPinch();
 
+    this.approach = 0;
     switch (this.state.phase) {
       case 'idle':
       case 'previewing':
@@ -352,15 +427,62 @@ export class JoinSystem
     this.updatePinchSelect();
   }
 
-  // --- Public actions (pill, debug keys, and later the wrist gesture) -------
+  /** A pinch is a WebXR user gesture: try to start audio until it runs. */
+  private unlockSoundOnPinch(): void {
+    if (sounds.running) {
+      return;
+    }
+    for (const hand of HANDS) {
+      if (this.input.xr.gamepads[hand]?.getSelectStart()) {
+        sounds.unlock();
+      }
+    }
+  }
+
+  // --- Public actions (control, debug keys, and later the wrist gesture) -------
 
   /** The single entry point for changing the join type, whatever the input. */
   requestJoinType(joinType: JoinType): void {
+    this.clickControl();
     this.applyTransition({ type: 'setJoinType', joinType });
   }
 
   toggleJoinType(): void {
+    this.clickControl();
     this.applyTransition({ type: 'toggleJoinType' });
+  }
+
+  /** Press feedback at the control, whether or not the type changes. */
+  private clickControl(): void {
+    if (this.control.document.visible) {
+      this.control.document.updateWorldMatrix(true, false);
+      this._a.setFromMatrixPosition(this.control.document.matrixWorld);
+      sounds.playClick(this._a);
+    }
+  }
+
+  /** Dev (`R`): replays the join animation and sounds on the docked pair, without separating. */
+  debugReplay(): void {
+    const view = this.active;
+    if (this.state.phase !== 'joined' || !view) {
+      this.debug?.note(`replay ignored in phase "${this.state.phase}"`);
+      return;
+    }
+    const left = this.sources.get(view.leftId);
+    const right = this.sources.get(view.rightId);
+    if (!left || !right) {
+      return;
+    }
+    this.tweens.finishAll();
+    // Back to the pre-join look, then play the sequence again.
+    for (const source of [left, right]) {
+      for (const rowView of source.doc.rowViews.values()) {
+        this.tweens.set(rowView.opacity, 1);
+        this.tweens.set(rowView.offsetYCm, 0);
+        setRowTint(rowView, null);
+      }
+    }
+    this.playJoinSequence(view, left, right, this.state.joinType);
   }
 
   /** Dev: join without grabbing. `reverse` brings customers to orders instead. */
@@ -501,6 +623,9 @@ export class JoinSystem
       // placement still reserves the full LEFT height, so it never grows
       // into the control.
       animatedHeight: true,
+      // Each row's LEFT-table and RIGHT-table cells can fly in separately
+      // from their own source rows.
+      cellSides: result.columns.map((column) => column.source),
     });
 
     doc.fade.value = 0;
@@ -555,6 +680,8 @@ export class JoinSystem
       doc,
       matchedRowCount: result.lineage.length - ghostRows.length,
       ghostRows,
+      rowLeftSource: result.lineage.map((l) => l.left?.rowIndex ?? -1),
+      rowRightSource: result.lineage.map((l) => l.right?.rowIndex ?? -1),
       lineLeftRows: inner.map((p) => p.left!.rowIndex).slice(0, MAX_MATCH_LINES),
       lineRightRows: inner.map((p) => p.right!.rowIndex).slice(0, MAX_MATCH_LINES),
       unmatchedLeftRows,
@@ -603,6 +730,9 @@ export class JoinSystem
       return;
     }
     this.measureProximity(held, stationary);
+    this.approach = this.approachAmount();
+    this.approachMoving = held;
+    this.approachStationary = stationary;
 
     if (previewing && previewing.moving === held.id) {
       if (this.proximityWithin(true)) {
@@ -620,6 +750,28 @@ export class JoinSystem
       this.previewSide = this._prox.side;
       this.applyTransition({ type: 'enterRange', moving: held.id, stationary: stationary.id });
     }
+  }
+
+  /**
+   * How close (0..1) the measured `_prox` is to entering the preview: 0 at
+   * APPROACH_GAP_METERS or farther (or when badly misaligned), 1 at the
+   * preview gap. Only drives feedback; it never moves the held slab.
+   */
+  private approachAmount(): number {
+    const p = this._prox;
+    if (
+      p.depth > PREVIEW_EXIT_DEPTH_METERS ||
+      p.vertical > PREVIEW_EXIT_VERTICAL_METERS ||
+      p.angleDeg > PREVIEW_EXIT_ALIGN_DEG ||
+      p.gap < -PREVIEW_EXIT_OVERLAP_METERS
+    ) {
+      return 0;
+    }
+    return MathUtils.clamp(
+      (APPROACH_GAP_METERS - p.gap) / (APPROACH_GAP_METERS - PREVIEW_ENTER_GAP_METERS),
+      0,
+      1,
+    );
   }
 
   /** Measures `moving` against `stationary` in the stationary slab's frame into `_prox`. */
@@ -726,10 +878,12 @@ export class JoinSystem
       return;
     }
     dock.elapsed += delta;
-    const t = easeOutCubic(Math.min(1, dock.elapsed / dock.duration));
+    // A little physics: overshoots the dock slightly, then settles.
+    const progress = Math.min(1, dock.elapsed / dock.duration);
+    const t = easeOutBackSoft(progress);
     dock.slab.object.position.lerpVectors(dock.fromPos, dock.toPos, t);
     dock.slab.object.quaternion.slerpQuaternions(dock.fromQuat, dock.toQuat, t);
-    if (t >= 1) {
+    if (progress >= 1) {
       dock.active = false;
     }
   }
@@ -749,57 +903,154 @@ export class JoinSystem
     left.entity.addComponent(JoinDocked, {});
     right.entity.addComponent(JoinDocked, {});
 
-    // 1. Snap the brought-over slab into its dock.
+    // 1. Snap the brought-over slab into its dock (overshoot and settle).
     this.computeDockPose(left, right, true, this._a, this._q1);
     this.startDock(right, this._a, this._q1, DOCK_DURATION_SECONDS);
 
-    // 2. Match lines, staggered, fan-out included. Each line is tinted by its
-    //    join key, and lights up its two source rows in that tint as it lands.
-    const lineCount = view.lineLeftRows.length;
-    this.lines.setCount(lineCount);
-    this.lines.fade.value = 1;
-    for (let i = 0; i < lineCount; i++) {
-      this.lines.setColor(i, lineColorForTint(view.lineTints[i], this._color));
-      this.tweens.set(this.lines.progress[i], 0);
-      this.tweens.to(
-        this.lines.progress[i],
-        1,
-        LINE_DRAW_SECONDS,
-        LINE_START_SECONDS + i * LINE_STAGGER_SECONDS,
-        easeOutCubic,
-        () => this.tintLineRows(view, left, right, i),
-      );
-    }
-
-    // 3. Result slab appears behind/above the pair, the control at its front
-    //    edge; rows assemble in pairing order. Both are placed against the
-    //    head pose at join time and only move again when the pair does.
-    this.setCaption(view, joinType);
+    // The result slab appears behind/above the pair, the control between
+    // them. Both are placed against the head pose at join time and only move
+    // again when the pair does.
     this.setControlSelection(joinType);
     this.showResult(view);
     this.readHead();
     this.placeResult(view, left, right);
+
+    this.playJoinSequence(view, left, right, joinType);
+    this.warnIfOutOfView(view, left, right);
+  }
+
+  /**
+   * The join's animation and sound, from the snap to the resolve (~1.3 s):
+   * match lines draw with a traveling pulse and a rising tick each; each
+   * result row's LEFT and RIGHT cells fly in from their own source rows in
+   * pairing order; unmatched source rows drop with a bounce. Expects the
+   * result slab and control already placed. Replayable (`R` in debug).
+   */
+  private playJoinSequence(view: ResultView, left: SourceSlab, right: SourceSlab, joinType: JoinType): void {
+    // RIGHT slab: at its dock pose (it may still be snapping in).
+    const rightDocking = this.dock.active && this.dock.slab === right;
+
+    this.seamPoint(left, right, this._f);
+    sounds.playSnap(this._f);
+
+    // 1. Match lines, staggered, fan-out included. Each line is tinted by its
+    //    join key, ticks as it starts, and lights up its two source rows in
+    //    that tint as it lands. A pulse travels along it while it draws.
+    const lineCount = view.lineLeftRows.length;
+    this.lines.setCount(lineCount);
+    this.pulses.setCount(lineCount);
+    this.lines.fade.value = 1;
+    this.pulses.fade.value = 1;
+    for (let i = 0; i < lineCount; i++) {
+      this.lines.setColor(i, lineColorForTint(view.lineTints[i], this._color));
+      this.tweens.set(this.lines.progress[i], 0);
+      const delay = LINE_START_SECONDS + i * LINE_STAGGER_SECONDS;
+      this.tweens.to(this.lines.progress[i], 1, LINE_DRAW_SECONDS, delay, easeOutCubic, () =>
+        this.tintLineRows(view, left, right, i),
+      );
+      this.sourceRowPoint(left, view.lineLeftRows[i], false, this._a);
+      sounds.playLineTick(this._a, i, lineCount, delay);
+    }
+
+    // 2. The result slab fades in, then its rows assemble in pairing order:
+    //    each row's LEFT cells fly from their LEFT source row and its RIGHT
+    //    cells from their RIGHT source row, landing in its slot. LEFT JOIN's
+    //    unmatched rows fly in their LEFT cells; their NULL cells fade in in place.
+    this.setCaption(view, joinType);
     this.tweens.set(view.doc.fade, 0);
     this.tweens.to(view.doc.fade, 1, RESULT_FADE_SECONDS, RESULT_APPEAR_SECONDS);
     this.tweens.set(this.control.fade, 0);
     this.tweens.to(this.control.fade, 1, RESULT_FADE_SECONDS, RESULT_APPEAR_SECONDS);
-    for (let row = 0; row < view.matchedRowCount; row++) {
+    this.setGhostRowsShown(view, joinType === 'left', false, 0);
+    const rowCount = view.matchedRowCount + (joinType === 'left' ? view.ghostRows.length : 0);
+    view.object.updateWorldMatrix(true, false);
+    for (let row = 0; row < rowCount; row++) {
       const rowView = view.doc.rowViews.get(row);
       if (!rowView) {
         continue;
       }
       const delay = ROW_START_SECONDS + row * ROW_STAGGER_SECONDS;
+      // The row (cells and background) fades in over the first part of the
+      // flight: faint at the source rows, solid well before it lands.
+      this.tweens.set(rowView.offsetYCm, 0);
       this.tweens.set(rowView.opacity, 0);
-      this.tweens.set(rowView.offsetYCm, ROW_SLIDE_CM);
-      this.tweens.to(rowView.opacity, 1, ROW_DURATION_SECONDS, delay);
-      this.tweens.to(rowView.offsetYCm, 0, ROW_DURATION_SECONDS, delay);
+      this.tweens.to(rowView.opacity, 1, ROW_FLY_SECONDS * 0.6, delay);
+      if (rowView.flight) {
+        this.flyCells(view, row, rowView.flight.left, left, view.rowLeftSource[row], false, delay);
+        this.flyCells(view, row, rowView.flight.right, right, view.rowRightSource[row], rightDocking, delay);
+      }
     }
-    this.setGhostRowsShown(view, joinType === 'left', false, 0);
+    const lastLanding = ROW_START_SECONDS + Math.max(0, rowCount - 1) * ROW_STAGGER_SECONDS + ROW_FLY_SECONDS;
+    this._a.set(0, -view.doc.heightMeters / 2, 0);
+    view.object.localToWorld(this._a);
+    sounds.playResolve(this._a, lastLanding);
 
-    // 4. Unmatched source rows dim and drop (INNER) / only unmatched-right (LEFT).
+    // 3. Unmatched source rows drop and dim (INNER), or only unmatched-right
+    //    (LEFT), with a bounce and a tap at the first impact.
     this.applySourceDim(view, left, right, joinType, DIM_START_SECONDS, DIM_DURATION_SECONDS);
 
-    this.warnIfOutOfView(view, left, right);
+    if (import.meta.env.DEV && this.debug) {
+      const linesEnd = LINE_START_SECONDS + Math.max(0, lineCount - 1) * LINE_STAGGER_SECONDS + LINE_DRAW_SECONDS;
+      const end = Math.max(lastLanding, linesEnd, DIM_START_SECONDS + DIM_DURATION_SECONDS);
+      this.debug.note(
+        `join sequence: ${end.toFixed(2)} s (snap at 0, dock ${DOCK_DURATION_SECONDS} s, ${lineCount} lines by ` +
+          `${linesEnd.toFixed(2)} s, ${rowCount} rows land by ${lastLanding.toFixed(2)} s, drops end ` +
+          `${(DIM_START_SECONDS + DIM_DURATION_SECONDS).toFixed(2)} s)`,
+      );
+    }
+  }
+
+  /**
+   * Starts one side's cells of result row `row` at source row `sourceRow`
+   * (in the result slab's frame, cm) and flies them to their slot.
+   * `sourceRow` < 0: no source (NULL cells), so they stay in place.
+   */
+  private flyCells(
+    view: ResultView,
+    row: number,
+    offset: CellOffset,
+    source: SourceSlab,
+    sourceRow: number,
+    atDockPose: boolean,
+    delay: number,
+  ): void {
+    if (sourceRow < 0) {
+      this.tweens.set(offset.x, 0);
+      this.tweens.set(offset.y, 0);
+      this.tweens.set(offset.z, 0);
+      return;
+    }
+    this.sourceRowPoint(source, sourceRow, atDockPose, this._a);
+    view.object.worldToLocal(this._a);
+    const slotY = rowCenterLocalY(view.doc, row);
+    // UIKit offsets are in cm, with +Y pointing down.
+    this.tweens.set(offset.x, this._a.x * 100);
+    this.tweens.set(offset.y, -(this._a.y - slotY) * 100);
+    this.tweens.set(offset.z, this._a.z * 100);
+    this.tweens.to(offset.x, 0, ROW_FLY_SECONDS, delay, easeInOutCubic);
+    this.tweens.to(offset.y, 0, ROW_FLY_SECONDS, delay, easeInOutCubic);
+    this.tweens.to(offset.z, 0, ROW_FLY_SECONDS, delay, easeInOutCubic);
+  }
+
+  /** World center of source row `row` on `source`'s face (optionally at the dock target). */
+  private sourceRowPoint(source: SourceSlab, row: number, atDockPose: boolean, out: Vector3): Vector3 {
+    out.set(0, rowCenterLocalY(source.doc, row), LINE_SURFACE_OFFSET_METERS);
+    if (atDockPose) {
+      return out.applyQuaternion(this.dock.toQuat).add(this.dock.toPos);
+    }
+    source.object.updateWorldMatrix(true, false);
+    return source.object.localToWorld(out);
+  }
+
+  /** World point at the middle of the seam between the docked slabs. */
+  private seamPoint(left: SourceSlab, right: SourceSlab, out: Vector3): Vector3 {
+    left.object.updateWorldMatrix(true, false);
+    out.set(
+      this.dockSide * (left.doc.widthMeters / 2 + DOCK_GAP_METERS / 2),
+      (-left.doc.heightMeters / 2 + pairTopLocalY(left, right)) / 2,
+      0,
+    );
+    return left.object.localToWorld(out);
   }
 
   private applyJoinTypeChange(from: JoinType, to: JoinType): void {
@@ -815,12 +1066,26 @@ export class JoinSystem
     this.setControlSelection(to);
     this.setGhostRowsShown(view, to === 'left', true, 0);
     this.applySourceDim(view, left, right, to, 0, TOGGLE_DURATION_SECONDS);
+    // The LEFT-only rows sliding in or out.
+    const ghost = view.ghostRows[0];
+    if (ghost !== undefined) {
+      view.object.updateWorldMatrix(true, false);
+      this._a.set(0, rowCenterLocalY(view.doc, ghost), 0);
+      view.object.localToWorld(this._a);
+      sounds.playSlide(this._a, to === 'left' ? 'in' : 'out');
+    }
   }
 
   private beginSeparate(): void {
     const view = this.active;
     this.tweens.finishAll();
     this.dock.active = false;
+    // A soft release at the seam: the reverse of the snap.
+    const left = view ? this.sources.get(view.leftId) : null;
+    const right = view ? this.sources.get(view.rightId) : null;
+    if (left && right) {
+      sounds.playRelease(this.seamPoint(left, right, this._f));
+    }
     for (const source of this.sources.values()) {
       if (source.entity.hasComponent(JoinDocked)) {
         source.entity.removeComponent(JoinDocked);
@@ -870,6 +1135,7 @@ export class JoinSystem
     }
     this.active = null;
     this.lines.setCount(0);
+    this.pulses.setCount(0);
     this.applyTransition({ type: 'separated' });
   }
 
@@ -881,31 +1147,77 @@ export class JoinSystem
     delay: number,
     duration: number,
   ): void {
+    // A soft tap where the first row lands, at the first bounce.
+    let tapRow = -1;
+    let tapSlab: SourceSlab | null = null;
+    const leftDropCm = left.doc.rowHeightMeters * 100 * DIM_DROP_ROW_FRACTION;
+    const rightDropCm = right.doc.rowHeightMeters * 100 * DIM_DROP_ROW_FRACTION;
     for (const [row, rowView] of left.doc.rowViews) {
       const dim = joinType === 'inner' && view.unmatchedLeftRows.has(row);
-      this.tweenRowDim(rowView.opacity, rowView.offsetYCm, dim, delay, duration);
+      if (this.tweenRowDim(rowView.opacity, rowView.offsetYCm, dim, leftDropCm, delay, duration) && tapRow < 0) {
+        tapRow = row;
+        tapSlab = left;
+      }
     }
     for (const [row, rowView] of right.doc.rowViews) {
       // Unmatched-right rows are excluded by both INNER and LEFT joins.
-      this.tweenRowDim(rowView.opacity, rowView.offsetYCm, view.unmatchedRightRows.has(row), delay, duration);
+      const dim = view.unmatchedRightRows.has(row);
+      if (this.tweenRowDim(rowView.opacity, rowView.offsetYCm, dim, rightDropCm, delay, duration) && tapRow < 0) {
+        tapRow = row;
+        tapSlab = right;
+      }
+    }
+    if (tapSlab) {
+      const docking = this.dock.active && this.dock.slab === tapSlab;
+      sounds.playDropTap(this.sourceRowPoint(tapSlab, tapRow, docking, this._g), delay + duration * BOUNCE_FIRST_IMPACT);
+    }
+
+    // Dev only: once settled, report where every unmatched source row ended up.
+    if (import.meta.env.DEV && this.debug) {
+      const debug = this.debug;
+      setTimeout(() => {
+        for (const [slab, rows] of [
+          [left, view.unmatchedLeftRows],
+          [right, view.unmatchedRightRows],
+        ] as const) {
+          for (const row of rows) {
+            const rowView = slab.doc.rowViews.get(row);
+            if (!rowView) {
+              continue;
+            }
+            const rowCm = slab.doc.rowHeightMeters * 100;
+            const offset = rowView.offsetYCm.peek();
+            debug.note(
+              `unmatched ${slab.id} row ${row}: offset ${offset.toFixed(3)} cm ` +
+                `(${((offset / rowCm) * 100).toFixed(1)}% of its ${rowCm.toFixed(2)} cm row; limit ` +
+                `${(DIM_DROP_ROW_FRACTION * 100).toFixed(0)}%), opacity ${rowView.opacity.peek().toFixed(2)} ` +
+                `(${joinType.toUpperCase()})`,
+            );
+          }
+        }
+      }, (delay + duration + 0.1) * 1000);
     }
   }
 
+  /** Tweens one source row to dimmed (dropped within its slot) or normal. Returns true if it starts dropping. */
   private tweenRowDim(
     opacity: Signal<number>,
     offsetYCm: Signal<number>,
     dim: boolean,
+    dropCm: number,
     delay: number,
     duration: number,
-  ): void {
+  ): boolean {
     const targetOpacity = dim ? DIM_OPACITY : 1;
-    const targetOffset = dim ? DIM_DROP_CM : 0;
+    const targetOffset = dim ? dropCm : 0;
     if (opacity.peek() === targetOpacity && offsetYCm.peek() === targetOffset) {
-      return;
+      return false;
     }
     this.tweens.to(opacity, targetOpacity, duration, delay);
-    // Dimming "falls" slightly past its resting drop, then settles.
-    this.tweens.to(offsetYCm, targetOffset, duration, delay, dim ? easeOutBack : easeOutCubic);
+    // Dimming falls a little and bounces at the bottom of its slot; restoring
+    // eases back to exactly 0 (absolute targets, so toggles never accumulate).
+    this.tweens.to(offsetYCm, targetOffset, duration, delay, dim ? easeOutBounce : easeOutCubic);
+    return dim;
   }
 
   /** Ghost rows slide in from below / slide out downward. */
@@ -1464,31 +1776,67 @@ export class JoinSystem
     this.movingGlow.hide();
     this.hints.setCount(0);
     this.hints.update();
+    sounds.setPreviewProximity(0, this._head);
   }
 
+  /**
+   * The "magnet": while a held slab approaches (within APPROACH_GAP_METERS),
+   * the facing edges glow faintly, brighter as it nears the preview range,
+   * with a hum that rises to match. In preview range: a full pulsing glow
+   * (faster as the gap closes), hint lines, and the hum at full. The held
+   * slab itself is never moved.
+   */
   private updatePreviewVisuals(): void {
-    if (this.state.phase !== 'previewing') {
+    const previewing = this.state.phase === 'previewing';
+    let moving: SourceSlab | null | undefined = null;
+    let stationary: SourceSlab | null | undefined = null;
+    let side = this.previewSide;
+    if (this.state.phase === 'previewing') {
+      moving = this.sources.get(this.state.moving);
+      stationary = this.sources.get(this.state.stationary);
+    } else if (this.approach > 0) {
+      moving = this.approachMoving;
+      stationary = this.approachStationary;
+      side = this._prox.side;
+    }
+    if (!moving || !stationary) {
       if (this.hints.mesh.count > 0 || this.stationaryGlow.mesh.visible) {
         this.hidePreview();
       }
+      sounds.setPreviewProximity(0, this._head);
       return;
     }
-    const moving = this.sources.get(this.state.moving);
-    const stationary = this.sources.get(this.state.stationary);
-    if (!moving || !stationary) {
-      return;
+
+    const now = this.tweens.now;
+    let glow: number;
+    if (previewing) {
+      const closeness = MathUtils.clamp((PREVIEW_ENTER_GAP_METERS - this._prox.gap) / PREVIEW_ENTER_GAP_METERS, 0, 1);
+      glow = 0.55 + 0.25 * Math.sin(now * (7 + 6 * closeness)) + 0.15 * closeness;
+    } else {
+      glow = APPROACH_GLOW_MIN + APPROACH_GLOW_RANGE * this.approach * (0.85 + 0.15 * Math.sin(now * 5));
     }
-    const side = this.previewSide;
-    const pulse = 0.55 + 0.25 * Math.sin(this.tweens.now * 7);
     this.stationaryGlow.place(
       stationary.object,
       (side * stationary.doc.widthMeters) / 2,
       0,
       stationary.doc.heightMeters,
-      pulse,
+      glow,
     );
-    this.movingGlow.place(moving.object, (-side * moving.doc.widthMeters) / 2, 0, moving.doc.heightMeters, pulse);
+    this.movingGlow.place(moving.object, (-side * moving.doc.widthMeters) / 2, 0, moving.doc.heightMeters, glow);
 
+    // The hum comes from the stationary slab's facing edge.
+    this._c.set((side * stationary.doc.widthMeters) / 2, 0, 0);
+    stationary.object.localToWorld(this._c);
+    sounds.setPreviewProximity(previewing ? 1 : this.approach * 0.8, this._c);
+
+    if (!previewing) {
+      if (this.hints.mesh.count > 0) {
+        this.hints.setCount(0);
+        this.hints.update();
+      }
+      return;
+    }
+    const pulse = glow;
     this.hints.setCount(PREVIEW_HINT_COUNT);
     this.hints.fade.value = pulse;
     for (let i = 0; i < PREVIEW_HINT_COUNT; i++) {
@@ -1510,6 +1858,8 @@ export class JoinSystem
       if (this.lines.mesh.count > 0) {
         this.lines.setCount(0);
         this.lines.update();
+        this.pulses.setCount(0);
+        this.pulses.update();
       }
       return;
     }
@@ -1529,8 +1879,19 @@ export class JoinSystem
       this._b.set(rightEdgeX, rowCenterLocalY(right.doc, view.lineRightRows[i]), LINE_SURFACE_OFFSET_METERS);
       right.object.localToWorld(this._b);
       this.lines.setEndpoints(i, this._a, this._b);
+      // A short bright pulse rides the drawing tip of the line, then goes.
+      const p = this.lines.progress[i].peek();
+      if (p > 0.001 && p < 0.999 && phase === 'joined') {
+        this._c.lerpVectors(this._a, this._b, Math.max(0, p - LINE_PULSE_FRACTION));
+        this._d.lerpVectors(this._a, this._b, p);
+        this.pulses.setEndpoints(i, this._c, this._d);
+        this.pulses.progress[i].value = 1;
+      } else {
+        this.pulses.progress[i].value = 0;
+      }
     }
     this.lines.update();
+    this.pulses.update();
   }
 }
 

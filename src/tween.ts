@@ -18,6 +18,32 @@ export const easeOutBack: Easing = (t) => {
   return 1 + c3 * (t - 1) ** 3 + c1 * (t - 1) ** 2;
 };
 
+/** A gentler overshoot for the dock snap: settles into place, never wobbles. */
+export const easeOutBackSoft: Easing = (t) => {
+  const c1 = 1.15;
+  const c3 = c1 + 1;
+  return 1 + c3 * (t - 1) ** 3 + c1 * (t - 1) ** 2;
+};
+/** A fall that bounces at the bottom: first impact at t ≈ 0.36, then two small hops. */
+export const BOUNCE_FIRST_IMPACT = 1 / 2.75;
+export const easeOutBounce: Easing = (t) => {
+  const n1 = 7.5625;
+  const d1 = 2.75;
+  if (t < 1 / d1) {
+    return n1 * t * t;
+  }
+  if (t < 2 / d1) {
+    const u = t - 1.5 / d1;
+    return n1 * u * u + 0.75;
+  }
+  if (t < 2.5 / d1) {
+    const u = t - 2.25 / d1;
+    return n1 * u * u + 0.9375;
+  }
+  const u = t - 2.625 / d1;
+  return n1 * u * u + 0.984375;
+};
+
 type Slot = {
   active: boolean;
   target: Signal<number> | null;

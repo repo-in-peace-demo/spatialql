@@ -113,7 +113,8 @@ under the dev server (`import.meta.env.DEV`); production builds never read them.
 | --- | --- |
 | `forceSurface` | Skips real surface detection. 1 s into the XR session, it places both slabs on a synthetic desk 0.45 m below the head. Slabs you've already grabbed (or that are docked) aren't moved. |
 | `seated` | Requests a 1.2 m eye height and an 18° downward pitch (the natural seated gaze) for the emulated headset, then checks what the app actually renders from. In the current emulator the request doesn't take, and the log says so: `[seated] the seated pose did NOT take …`. Set it by hand in the headset panel (Pos Y = 1.2, Rot X = -18) or with `npx @iwsdk/cli xr set-transform`, then re-enter XR so the slabs are placed from it; the log then reads `[seated] verified: head at 1.20 m, pitched 18.0° down`. Does nothing on a real headset. |
-| `debug` | Registers `GrabDebugSystem`, turns on the join debug keys, join and pinch logs, and the placement readout. |
+| `debug` | Registers `GrabDebugSystem`, turns on the join debug keys, join and pinch logs, sound-event logs, and the placement readout. |
+| `mute` | Silences every join sound (the animation is unchanged). Sound events still log, as "not played". |
 
 Each flag is read from two places, in this order:
 
@@ -130,6 +131,7 @@ reloads the page:
 | Option+Shift+D | Alt+Shift+D | `debug` |
 | Option+Shift+S | Alt+Shift+S | `seated` |
 | Option+Shift+F | Alt+Shift+F | `forceSurface` |
+| Option+Shift+M | Alt+Shift+M | `mute` |
 
 They match physical keys, so they work even though Option+Shift+letter types a
 special character on a Mac. They're ignored while typing in a text field.
@@ -379,6 +381,50 @@ About 0.3 s later, once the lines retract and the result slab and control fade:
 If you release before 10 cm, there's no `pullApart` line. The slab snaps back
 into its dock and the release line ends in `docked into a join`.
 
+### 2.7 The join's feel: sound and motion
+
+All sounds are synthesized in `src/sound.ts` (no audio files), placed in 3D
+at where the action is, and kept subtle (`MASTER_VOLUME`). Audio starts on the
+Enter XR tap, at session start, or on the first pinch; if it can't start,
+nothing breaks and the animation still carries the feedback.
+
+| Moment | Motion | Sound (log name) |
+| --- | --- | --- |
+| Held slab approaches (< 15 cm) | facing edges glow faintly, brighter as it nears | soft hum, rising (not logged) |
+| Preview range | full pulsing glow, faster as the gap closes, hint lines | hum at full |
+| Release (commit) | slab snaps in with a slight overshoot (0.22 s) | `snap` |
+| Each match line | draws with a bright pulse riding its tip | `lineTick`, rising in pitch |
+| Result rows | each row's LEFT and RIGHT cells fly in from their source rows | (none) |
+| Last row lands | | `resolve` (two notes) |
+| Unmatched rows (INNER) | dim and drop 12% of their row height (`DIM_DROP_ROW_FRACTION`), bouncing within their own slot | `dropTap` |
+| Control press | | `click` |
+| LEFT row in / out | slides in / out as the result grows / shrinks | `slideIn` / `slideOut` |
+| Pull apart | lines retract, result dissolves | `release` |
+
+With `debug`, each sound logs after it plays, with its time from the start
+of its sequence and its measured output peak:
+
+Measured in the emulator (J, INNER):
+
+```
+[Join debug] join sequence: 1.15 s (snap at 0, dock 0.22 s, 10 lines by 0.69 s, 10 rows land by 1.15 s, drops end 1.00 s)
+[Join debug] sound: snap at +0.00 s; output peak -7.0 dBFS
+[Join debug] sound: lineTick at +0.22 s; output peak -27.1 dBFS
+… nine more lineTicks, 0.03 s apart …
+[Join debug] sound: dropTap at +0.71 s; output peak -11.0 dBFS
+[Join debug] sound: resolve at +1.15 s; output peak -20.6 dBFS
+```
+
+A toggle logs `click` then `slideIn` / `slideOut`; a pull-apart logs `release`.
+Peaks are measured with overlapping sounds included, so treat them as
+relative loudness only.
+
+The peak is measured inside the app, so it works even when the browser's
+audio is muted. The CLI-managed Chromium window is likely launched muted. To
+hear the sounds, use a normal browser tab on the dev server, or the headset.
+`not played (audio not running, or muted)` means the audio context hadn't
+started yet (no gesture yet) or the `mute` flag is on.
+
 ## 3. Reading the grab log
 
 Every pinch (hands) or squeeze (controllers) logs a start line. The outcome is
@@ -449,6 +495,7 @@ keys (WASD/QE). None of them need a grab.
 | `Shift+J` | Same, reversed: customers is brought to orders, so orders is LEFT. | idle | `[Join debug] commit: idle -> joined (orders INNER JOIN customers)` plus stats |
 | `T` | Toggles INNER / LEFT, through the same path as the control. | joined | `[Join debug] toggleJoinType: joined (… INNER JOIN …) -> joined (… LEFT JOIN …)` plus stats |
 | `U` | Un-joins: slides the RIGHT slab 15 cm away from the LEFT one and separates them. | joined | `[Join debug] pullApart: …`, then `[Join debug] separated: … -> idle` |
+| `R` | Replays the join animation and its sounds on the docked pair, without separating. For tuning. | joined | `[Join debug] join sequence: …` and the `sound:` lines |
 
 When a key doesn't apply to the current phase:
 

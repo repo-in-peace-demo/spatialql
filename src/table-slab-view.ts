@@ -152,6 +152,9 @@ const MONO_METRICS = buildGlyphMetrics(MONO_FONT_INFO);
 type Container = InstanceType<typeof UIKit.Container>;
 type Text = InstanceType<typeof UIKit.Text>;
 
+/** A transform offset (cm, panel-local; +Y is down, +Z toward the viewer) for a group of cells. */
+export type CellOffset = { x: Signal<number>; y: Signal<number>; z: Signal<number> };
+
 export type RowView = {
   row: Container;
   cells: Container[];
@@ -159,9 +162,18 @@ export type RowView = {
   opacity: Signal<number>;
   /** Vertical offset in cm, positive = down. Doesn't affect layout. */
   offsetYCm: Signal<number>;
+  /**
+   * With `cellSides`: one offset for the row's LEFT-table cells and one for
+   * its RIGHT-table cells, so each group can fly in from its source row.
+   */
+  flight: { left: CellOffset; right: CellOffset } | null;
   /** The row's own (zebra) background, restored when a key tint is cleared. */
   baseBackground: string;
 };
+
+function cellOffset(): CellOffset {
+  return { x: signal(0), y: signal(0), z: signal(0) };
+}
 
 /** Paints a row with a join-key tint, or restores its own background. */
 export function setRowTint(rowView: RowView, tint: string | null): void {
@@ -213,6 +225,12 @@ export type SlabBuildOptions = {
    * callers can animate it as rows are shown or hidden.
    */
   animatedHeight?: boolean;
+  /**
+   * Which source table each column came from (join results). Gives every
+   * row a `flight` offset per side, bound to its cells' transforms. Built
+   * once with the slab, so animating it needs no new objects or layout.
+   */
+  cellSides?: ReadonlyArray<'left' | 'right'>;
 };
 
 /** Rows shown for `table` under `maxRows`, and whether a "+N more" row follows. */
@@ -324,8 +342,16 @@ function buildCell(
   color: string,
   bold: boolean,
   m: SlabMetrics,
+  offset: CellOffset | null = null,
 ): Container {
   const cell = cellContainer(columnWidthCm, m);
+  if (offset) {
+    cell.setProperties({
+      transformTranslateX: offset.x,
+      transformTranslateY: offset.y,
+      transformTranslateZ: offset.z,
+    });
+  }
   cell.add(
     new UIKit.Text({
       text,
@@ -470,6 +496,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     const rowBackground = rowIndex % 2 === 0 ? COLOR_ROW_BACKGROUND_EVEN : COLOR_ROW_BACKGROUND_ODD;
     const rowOpacity = signal(1);
     const offsetYCm = signal(0);
+    const flight = options.cellSides ? { left: cellOffset(), right: cellOffset() } : null;
     const rowContainer = new UIKit.Container({
       flexDirection: 'row',
       backgroundColor: rowBackground,
@@ -491,7 +518,10 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
         m.rowFont,
         columnWidth - 2 * m.cellPaddingX,
       );
-      const cell = buildCell(truncated, m.rowFont, columnWidth, raw === null ? COLOR_TEXT_NULL : COLOR_TEXT, false, m);
+      const side = options.cellSides?.[columnIndex];
+      const offset = flight && side ? flight[side] : null;
+      const color = raw === null ? COLOR_TEXT_NULL : COLOR_TEXT;
+      const cell = buildCell(truncated, m.rowFont, columnWidth, color, false, m, offset);
       rowContainer.add(cell);
       return cell;
     });
@@ -502,6 +532,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       cells,
       opacity: rowOpacity,
       offsetYCm,
+      flight,
       baseBackground: rowBackground,
     });
   });

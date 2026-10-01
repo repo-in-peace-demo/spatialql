@@ -22,6 +22,7 @@ export interface JoinDebugHost {
   debugJoin(reverse: boolean): void;
   toggleJoinType(): void;
   debugSeparate(): void;
+  debugReplay(): void;
 }
 
 const LOG_PREFIX = '[Join debug]';
@@ -32,6 +33,7 @@ const KEY_HELP = [
   'Shift+J  join: bring customers to orders  (orders is LEFT)',
   'T        toggle INNER / LEFT',
   'U        un-join: slide the RIGHT slab away and separate',
+  'R        replay the join animation and sounds (while joined)',
 ];
 
 function describe(state: JoinState): string {
@@ -96,6 +98,9 @@ export class JoinDebug {
         break;
       case 'u':
         this.host.debugSeparate();
+        break;
+      case 'r':
+        this.host.debugReplay();
         break;
     }
   };
