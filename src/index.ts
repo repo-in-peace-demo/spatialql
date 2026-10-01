@@ -11,6 +11,12 @@ import { DeskPlacementSystem } from './desk-placement.js';
 import { devFlag, installDevFlagHotkeys } from './dev-flags.js';
 import { JoinSystem } from './join-system.js';
 import { PanelSystem } from './panel.js';
+import { installXrSupportNotice } from './xr-support.js';
+
+// Plain-DOM notice for browsers that can't run SpatialQL (or aren't the
+// Quest Browser); independent of the 3D scene, so it shows even if WebXR
+// is missing entirely.
+void installXrSupportNotice();
 
 World.create(
   document.getElementById('scene-container') as HTMLDivElement,
