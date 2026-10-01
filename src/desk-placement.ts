@@ -28,7 +28,7 @@ import { CUSTOMERS_TABLE, ORDERS_TABLE } from './data/sample-data.js';
 import { devFlag } from './dev-flags.js';
 import { PlacementDebug, type PlacementKind, type SlabReport } from './placement-debug.js';
 import { JoinDocked, TableSlab, TableSlabRuntime } from './table-slab-component.js';
-import { buildTableSlabDocument, tableSlabNaturalHeightMeters, type TableSlabDocument } from './table-slab-view.js';
+import { buildTableSlabDocument, type TableSlabDocument } from './table-slab-view.js';
 import {
   eyeFacingLean,
   eyeFacingLeanFromBottom,
@@ -197,18 +197,13 @@ export class DeskPlacementSystem extends createSystem({
   private _center = new Vector3();
 
   init(): void {
-    // Both slabs share one height (the shorter is padded at the bottom), so
-    // on a desk both rest on it with their tops -- and rows -- aligned, and
-    // docking needs no vertical move.
+    // Each slab keeps its natural height; their bottom edges share one line
+    // (on a desk, both rest on it), like two sheets of different lengths.
     // Text is sized by angle for the planned seated distance, once: slab
     // documents aren't rebuilt when placed (the readout logs the real angle).
     const text = slabTextSizeAt(PLANNED_SOURCE_DISTANCE_METERS);
-    const sharedHeight = Math.max(
-      tableSlabNaturalHeightMeters(CUSTOMERS_TABLE, { text }),
-      tableSlabNaturalHeightMeters(ORDERS_TABLE, { text }),
-    );
-    this.customersDoc = buildTableSlabDocument(CUSTOMERS_TABLE, { minHeightMeters: sharedHeight, text });
-    this.ordersDoc = buildTableSlabDocument(ORDERS_TABLE, { minHeightMeters: sharedHeight, text });
+    this.customersDoc = buildTableSlabDocument(CUSTOMERS_TABLE, { text });
+    this.ordersDoc = buildTableSlabDocument(ORDERS_TABLE, { text });
 
     this.customersEntity = this.world.createTransformEntity(this.customersDoc.document);
     this.customersEntity.addComponent(TableSlab, { tableId: CUSTOMERS_TABLE.id });
@@ -569,9 +564,10 @@ export class DeskPlacementSystem extends createSystem({
   }
 
   /**
-   * Floating fallback: both slab centers on one line ahead of and below the
-   * head, sharing the head's yaw, pushed forward if either edge of either
-   * slab would leave the comfortable view -- but never past seated reach.
+   * Floating fallback: ahead of and below the head, sharing the head's yaw
+   * and lean, with both slabs' bottom edges on one line (the taller slab's
+   * center at FLOATING_BELOW_HEAD_METERS), pushed forward if either edge of
+   * either slab would leave the comfortable view -- but never past reach.
    */
   private placeFloating(): void {
     this.setYawAxes(this._headYaw);
@@ -602,15 +598,26 @@ export class DeskPlacementSystem extends createSystem({
       );
       lean = eyeFacingLean(FLOATING_BELOW_HEAD_METERS, forward);
     }
+    // `_anchor` is the taller slab's center; each slab's center sits its own
+    // half-height up the leaning plane from the shared bottom line.
     this._anchor.copy(this._headPos).addScaledVector(this._forward, forward);
     this._anchor.y = this._headPos.y - FLOATING_BELOW_HEAD_METERS;
+    const tallerHalf = Math.max(customersHalf, ordersHalf);
+    // Up along a slab leaning back by `lean`: up, and away from the viewer.
+    this._local.set(0, Math.cos(lean), 0).addScaledVector(this._forward, Math.sin(lean));
 
     if (!this.isFrozen(this.customersEntity, this.touchedCustomers)) {
-      this._slabCenter.copy(this._anchor).addScaledVector(this._right, -leftOffset);
+      this._slabCenter
+        .copy(this._anchor)
+        .addScaledVector(this._right, -leftOffset)
+        .addScaledVector(this._local, customersHalf - tallerHalf);
       this.applySlabTransform(this.customersEntity, this._slabCenter, lean);
     }
     if (!this.isFrozen(this.ordersEntity, this.touchedOrders)) {
-      this._slabCenter.copy(this._anchor).addScaledVector(this._right, rightOffset);
+      this._slabCenter
+        .copy(this._anchor)
+        .addScaledVector(this._right, rightOffset)
+        .addScaledVector(this._local, ordersHalf - tallerHalf);
       this.applySlabTransform(this.ordersEntity, this._slabCenter, lean);
     }
     this.warnIfOutOfView();

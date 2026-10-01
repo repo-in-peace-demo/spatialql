@@ -90,9 +90,17 @@ When the view window and reach disagree, reach wins and the debug log warns.
 The result slab may sit farther away than touchable content (up to 0.85 m),
 pushed back until its top edge fits the window.
 
-Both source slabs share one height: the shorter one (customers) is padded
-with empty space at the bottom. On a desk both rest on it with their tops,
-and rows, aligned, so docking needs no vertical move.
+Each source slab keeps its natural height, and their **bottom edges are
+aligned**: on a desk both rest on it, so their tops sit at different heights,
+like two sheets of paper of different lengths. Docking also aligns bottoms,
+so it needs no vertical move. Rows don't need to line up across the two
+tables: matches are shown by key color and match lines. The result slab and
+the control sit above the pair's higher top edge.
+
+The result slab is only as tall as the rows it shows. Switching INNER → LEFT
+grows it downward over 0.3 s as the extra row slides in; LEFT → INNER shrinks
+it after that row slides out. Its top edge stays fixed, and placement
+reserves the full LEFT height, so it never grows into the control.
 
 ## 1. Setup
 
@@ -104,7 +112,7 @@ under the dev server (`import.meta.env.DEV`); production builds never read them.
 | Flag | What it does |
 | --- | --- |
 | `forceSurface` | Skips real surface detection. 1 s into the XR session, it places both slabs on a synthetic desk 0.45 m below the head. Slabs you've already grabbed (or that are docked) aren't moved. |
-| `seated` | Lowers the emulated headset to a 1.2 m eye height and pitches it 18° down (the natural seated gaze), at page load and again at each XR session start. Does nothing on a real headset. |
+| `seated` | Requests a 1.2 m eye height and an 18° downward pitch (the natural seated gaze) for the emulated headset, then checks what the app actually renders from. In the current emulator the request doesn't take, and the log says so: `[seated] the seated pose did NOT take …`. Set it by hand in the headset panel (Pos Y = 1.2, Rot X = -18) or with `npx @iwsdk/cli xr set-transform`, then re-enter XR so the slabs are placed from it; the log then reads `[seated] verified: head at 1.20 m, pitched 18.0° down`. Does nothing on a real headset. |
 | `debug` | Registers `GrabDebugSystem`, turns on the join debug keys, join and pinch logs, and the placement readout. |
 
 Each flag is read from two places, in this order:
@@ -156,9 +164,10 @@ With all three flags on:
 [Grab debug] active. Grab sphere: 7.0 cm radius around each palm (grip pose). Hand pinch-to-grab: ON.
 ```
 
-- If the `[seated]` line is a warning ("couldn't reach the emulated headset …"),
-  lower the headset to about 1.2 m by hand with the emulator's headset controls,
-  or with `npx @iwsdk/cli xr --help`.
+- If a `[seated]` line is a warning ("the seated pose did NOT take …" or
+  "couldn't reach the emulated headset …"), set the headset by hand: headset
+  panel Pos Y = 1.2, Rot X = -18, or `npx @iwsdk/cli xr set-transform` as the
+  warning shows. Then exit and re-enter XR so the slabs are placed from it.
 - If the grab line ends with `OFF (useHandPinchForGrab is false)`, hand pinches
   won't grab anything. Check `iwsdk.config.json`.
 
@@ -168,19 +177,17 @@ Each time the slabs are placed (cold start, session start, and when the surface
 search ends), the placement readout prints a collapsed group plus one line per
 slab:
 
-Measured in the emulator at a 1.2 m eye height, floating and then on the
-`forceSurface` desk:
-
 ```
-[DeskPlacement debug] customers: center 0.54 m from the eyes (reach limit 0.6 m, within reach); edges top -14.9°, bottom -39.7° (limit -50°)
-[DeskPlacement debug] orders: center 0.56 m from the eyes (reach limit 0.6 m, within reach); edges top -11.5°, bottom -41.0° (limit -50°)
-[DeskPlacement debug] customers: center 0.59 m from the eyes (reach limit 0.6 m, within reach); edges top -25.9°, bottom -48.3° (limit -55°)
-[DeskPlacement debug] orders: center 0.60 m from the eyes (reach limit 0.6 m, within reach); edges top -19.3°, bottom -46.5° (limit -55°)
+[DeskPlacement debug] customers: center x.xx m from the eyes (reach limit 0.6 m, within reach); row font 1.10 cm = x.xx° (target 1.15°); edges top x.x°, bottom x.x° from the natural gaze (18° down; limit -40°)
+[DeskPlacement debug] orders: center x.xx m from the eyes (reach limit 0.6 m, within reach); row font 1.10 cm = x.xx° (target 1.15°); edges top x.x°, bottom x.x° from the natural gaze (18° down; limit -40°)
 ```
 
-The limit is -50° for floating slabs and -55° on a desk, including the
-`forceSurface` desk. A slab beyond reach logs
-`[DeskPlacement] <slab> slab center is x.xx m from the eyes, beyond the 0.6 m seated reach limit.`
+Angles are from the natural gaze (18° below horizontal); the window is 40°
+below to 40° above it. Warnings follow when a slab is out of that window
+(`[DeskPlacement] <slab> slab edges are outside the comfortable view …`), its
+text is more than 15% off the angle target (`… slab row text is …`), or it's
+beyond reach (`… slab center is x.xx m from the eyes, beyond the 0.6 m seated
+reach limit.`).
 
 ### On-screen dots
 
@@ -235,7 +242,7 @@ If instead you get `[Grab debug] <hand> pinch: no grab - …`, see section 3.
    starts when all of these hold, measured in the customers slab's frame:
    - the edge gap is 6 cm or less (or the slabs overlap by up to 8 cm);
    - the out-of-plane distance is 8 cm or less;
-   - the vertical offset from tops-aligned is 12 cm or less;
+   - the vertical offset from bottoms-aligned is 12 cm or less;
    - the rotation difference is 30° or less.
 
    Expected when the preview shows:
@@ -246,17 +253,25 @@ If instead you get `[Grab debug] <hand> pinch: no grab - …`, see section 3.
 
 2. Set Pinch to 0. The join commits on release, not on contact.
 
-Expected:
+Expected (measured in the emulator: seated head, `forceSurface` desk, J):
 
 ```
+[Join debug] customers slab (touch): center 0.58 m from the eyes (reach limit 0.6 m, within reach); row font 1.1 cm = 1.10° (target 1.15°); edges top -16.3°, bottom -32.4° from the natural gaze (18° down)
+[Join debug] orders slab (touch): center 0.57 m from the eyes (reach limit 0.6 m, within reach); row font 1.1 cm = 1.12° (target 1.15°); edges top -12.9°, bottom -33.5° from the natural gaze (18° down)
+[Join debug] join-type control (touch): center 0.46 m from the eyes (reach limit 0.6 m, within reach); edges top -8.9°, bottom -13.1° from the natural gaze (18° down); clearance to the nearest source slab 10.0 cm (palm grab sphere 7.0 cm, target >= 10.0 cm); options 4.4 cm x 2.5 cm; label font 1.0 cm = 1.28°; roll 0.0°, yaw vs pair 0.0°
+[Join debug] result slab (view only): 0.58 m from the eyes (cap 0.85 m); row font 1.1 cm = 1.11° (target 1.15°) (source slabs 1.10° at 0.58 m; minimum 1.00°); edges top 23.0°, bottom -7.2° from the natural gaze (18° down)
+[Join debug] layout gaps in view: pair top -> control bottom 1.0°, control top -> result bottom 1.7° (result bottom at its full LEFT height; INNER sits higher)
+[Join debug] group: top 23.0°, bottom -33.5° from the natural gaze (18° down); extent 56.5° of 80° (fits)
 [Join debug] release: previewing (orders -> customers) -> joined (customers INNER JOIN orders)
-  pairings: N matched, N unmatched-left, N unmatched-right; result rows (INNER): N
-[Join debug] customers slab (touch): center x.xx m from the eyes (reach limit 0.6 m, within reach); edges top x.x°, bottom x.x° from head forward
-[Join debug] orders slab (touch): center x.xx m from the eyes (reach limit 0.6 m, within reach); edges top x.x°, bottom x.x° from head forward
-[Join debug] join-type control (touch): center x.xx m from the eyes (reach limit 0.6 m, within reach), x.x° from head forward (limit -60°); clearance to the nearest source slab x.x cm (palm grab sphere 7.0 cm, target >= 10.0 cm); options x.x cm x x.x cm
-[Join debug] result slab (view only): x.xx m from the eyes (cap 0.85 m), center x.x°, top edge x.x°, bottom edge x.x° from head forward; row text x.xx° tall (source slabs x.xx° at x.xx m; minimum 1.00°)
+  pairings: 10 matched, 1 unmatched-left, 1 unmatched-right; result rows (INNER): 10
 [Grab debug] <hand> hand released orders: docked into a join
 ```
+
+(With the J key the last state line reads `commit: idle -> joined …` instead of
+`release: previewing …`.) The control's `roll` and `yaw vs pair` should both
+be 0.0°; a warning follows if either is over 0.5°. Warnings also follow if
+the control overlaps the pair or the result slab in view, or if the group
+spans more than 80°.
 
 The slab that stayed put (customers) is LEFT; the one you brought over (orders)
 is RIGHT. The join type always starts as INNER. Warnings follow any line whose

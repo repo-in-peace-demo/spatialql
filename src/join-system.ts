@@ -268,6 +268,7 @@ export class JoinSystem
   private readonly _d = new Vector3();
   private readonly _e = new Vector3();
   private readonly _f = new Vector3();
+  private readonly _g = new Vector3();
   private readonly _viewUp = new Vector3();
   private readonly _pinchA = new Vector3();
   private readonly _pinchB = new Vector3();
@@ -496,6 +497,10 @@ export class JoinSystem
       anchorTop: true,
       // Same angular text size as the source slabs, at the result's own distance.
       text: slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS),
+      // Height follows the rows shown (INNER hides the trailing ghost rows);
+      // placement still reserves the full LEFT height, so it never grows
+      // into the control.
+      animatedHeight: true,
     });
 
     doc.fade.value = 0;
@@ -624,11 +629,12 @@ export class JoinSystem
     this._a.setFromMatrixPosition(moving.object.matrixWorld);
     stationary.object.worldToLocal(this._a);
     const halfWidths = (moving.doc.widthMeters + stationary.doc.widthMeters) / 2;
-    const topAlignedY = stationary.doc.heightMeters / 2 - moving.doc.heightMeters / 2;
+    // Docked slabs align their bottom edges (see computeDockPose).
+    const bottomAlignedY = -stationary.doc.heightMeters / 2 + moving.doc.heightMeters / 2;
     this._prox.side = this._a.x >= 0 ? 1 : -1;
     this._prox.gap = Math.abs(this._a.x) - halfWidths;
     this._prox.depth = Math.abs(this._a.z);
-    this._prox.vertical = Math.abs(this._a.y - topAlignedY);
+    this._prox.vertical = Math.abs(this._a.y - bottomAlignedY);
     moving.object.getWorldQuaternion(this._q1);
     stationary.object.getWorldQuaternion(this._q2);
     this._prox.angleDeg = (this._q1.angleTo(this._q2) * 180) / Math.PI;
@@ -674,9 +680,11 @@ export class JoinSystem
 
   /**
    * Dock pose of `mover` next to `anchor`: same orientation, edge to edge
-   * with DOCK_GAP_METERS between, tops aligned (so rows line up). `moverIsRight`
-   * says whether `mover` is the RIGHT table; `dockSide` is defined as the
-   * RIGHT slab's side of the LEFT slab.
+   * with DOCK_GAP_METERS between, bottom edges aligned -- so on a desk both
+   * keep resting on it and docking needs no vertical move. (Rows don't
+   * correspond across tables; matches are shown by tint and lines.)
+   * `moverIsRight` says whether `mover` is the RIGHT table; `dockSide` is
+   * defined as the RIGHT slab's side of the LEFT slab.
    */
   private computeDockPose(
     anchor: SourceSlab,
@@ -690,7 +698,7 @@ export class JoinSystem
     const side = moverIsRight ? this.dockSide : -this.dockSide;
     outPos.set(
       side * (anchor.doc.widthMeters / 2 + DOCK_GAP_METERS + mover.doc.widthMeters / 2),
-      anchor.doc.heightMeters / 2 - mover.doc.heightMeters / 2,
+      -anchor.doc.heightMeters / 2 + mover.doc.heightMeters / 2,
       0,
     );
     anchor.object.localToWorld(outPos);
@@ -924,6 +932,23 @@ export class JoinSystem
         rowView.row.setProperties({ display: 'none' });
       }
     });
+
+    // The panel's height follows the rows shown. Its origin is its top edge,
+    // so it grows and shrinks at the bottom: it grows as the incoming rows
+    // slide in, and shrinks once the outgoing rows have slid out.
+    const panelHeight = view.doc.panelHeightCm;
+    if (panelHeight) {
+      const rows = view.matchedRowCount + (shown ? view.ghostRows.length : 0);
+      const targetCm = view.doc.heightForRowsMeters(rows) * 100;
+      if (!animate) {
+        this.tweens.set(panelHeight, targetCm);
+      } else if (shown) {
+        this.tweens.to(panelHeight, targetCm, TOGGLE_DURATION_SECONDS, delay, easeOutCubic);
+      } else {
+        const rowsGone = delay + TOGGLE_DURATION_SECONDS + Math.max(0, view.ghostRows.length - 1) * ROW_STAGGER_SECONDS;
+        this.tweens.to(panelHeight, targetCm, TOGGLE_DURATION_SECONDS * 0.6, rowsGone, easeOutCubic);
+      }
+    }
   }
 
   private setCaption(view: ResultView, joinType: JoinType): void {
@@ -978,22 +1003,18 @@ export class JoinSystem
     this._up.copy(UP).applyQuaternion(this._q1);
     this._normal.set(0, 0, 1).applyQuaternion(this._q1);
 
-    // Top-edge midpoints of both slabs, with the right one at its dock pose.
-    this._a.set(0, left.doc.heightMeters / 2, 0);
-    left.object.localToWorld(this._a);
-    this.computeDockPose(left, right, true, this._b, this._q2);
-    this._b.addScaledVector(this._up, right.doc.heightMeters / 2);
-    // Bottom-edge midpoint of the result slab.
-    this._c
-      .addVectors(this._a, this._b)
-      .multiplyScalar(0.5)
-      .addScaledVector(this._up, RESULT_GAP_ABOVE_METERS)
-      .addScaledVector(this._normal, -RESULT_BEHIND_METERS);
+    // Bottom-edge midpoint of the result slab: centered between the two
+    // slabs (the RIGHT one at its dock pose), above the pair's higher top
+    // edge -- tops differ, since docked slabs align their bottoms.
+    const rightX = this.dockSide * (left.doc.widthMeters / 2 + DOCK_GAP_METERS + right.doc.widthMeters / 2);
+    this._c.set(rightX / 2, pairTopLocalY(left, right), 0);
+    left.object.localToWorld(this._c);
+    this._c.addScaledVector(this._up, RESULT_GAP_ABOVE_METERS).addScaledVector(this._normal, -RESULT_BEHIND_METERS);
 
     // The control sits in the band between the pair's top edge and this
     // slab's bottom edge (next to the SQL caption it switches). Place it
     // first, then keep this slab's bottom edge above the control in view.
-    this.placeControl(left);
+    this.placeControl(left, right);
     this.control.document.updateWorldMatrix(true, false);
     this._f.set(0, this.control.heightMeters / 2, 0);
     this.control.document.localToWorld(this._f);
@@ -1073,18 +1094,19 @@ export class JoinSystem
   }
 
   /**
-   * The join-type control: centered on the seam at the pair's top edge,
-   * lifted CONTROL_SLAB_CLEARANCE_METERS off it toward the eyes, then raised
-   * in view so its bottom edge sits just above that edge -- in the band
-   * below the result slab. Faces the eyes. The RIGHT slab docks with its
-   * top aligned to the LEFT slab's, so the LEFT slab's frame is enough.
-   * Leaves `_c` and `_q1` untouched for `placeResult`.
+   * The join-type control: centered on the seam at the pair's (higher) top
+   * edge, lifted CONTROL_SLAB_CLEARANCE_METERS off it toward the eyes, then
+   * raised in view so its bottom edge sits just above that edge -- in the
+   * band below the result slab. Oriented from the pair alone: the pair's
+   * yaw, a lean that faces the eyes, zero roll. (Turning it to face the eye
+   * point instead twisted it against the slabs whenever the seam sat off to
+   * one side, e.g. after Shift+J.) Leaves `_c` and `_q1` untouched for
+   * `placeResult`.
    */
-  private placeControl(left: SourceSlab): void {
+  private placeControl(left: SourceSlab, right: SourceSlab): void {
     left.object.updateWorldMatrix(true, false);
     const seamX = this.dockSide * (left.doc.widthMeters / 2 + DOCK_GAP_METERS / 2);
-    // The RIGHT slab docks with its top aligned to the LEFT slab's.
-    this._d.set(seamX, left.doc.heightMeters / 2, 0);
+    this._d.set(seamX, pairTopLocalY(left, right), 0);
     left.object.localToWorld(this._d);
 
     const control = this.control.document;
@@ -1095,7 +1117,17 @@ export class JoinSystem
       this.control.heightMeters / 2 +
       control.position.distanceTo(this._head) * Math.tan(MathUtils.degToRad(CONTROL_VIEW_GAP_DEG));
     control.position.addScaledVector(this._viewUp, lift);
-    control.lookAt(this._head);
+
+    // The pair's yaw; lean back by the eye line's elevation in the pair's
+    // vertical plane; no roll.
+    left.object.getWorldQuaternion(this._q2);
+    this._euler.setFromQuaternion(this._q2, 'YXZ');
+    const yaw = this._euler.y;
+    this._g.set(0, 0, -1).applyAxisAngle(UP, yaw);
+    this._f.subVectors(control.position, this._head);
+    const lean = Math.atan2(this._head.y - control.position.y, Math.max(this._f.dot(this._g), 1e-3));
+    this._euler.set(-lean, yaw, 0, 'YXZ');
+    control.quaternion.setFromEuler(this._euler);
 
     // The control faces the eyes, so it's tilted against the slabs' plane
     // (both docked slabs share it) and the sight line isn't the plane's
@@ -1282,6 +1314,12 @@ export class JoinSystem
       }
     }
 
+    // The pair's top edge where the control sits: at the seam (the same
+    // point placeControl works from), not at the slabs' centers.
+    this._d.set(this.dockSide * (left.doc.widthMeters / 2 + DOCK_GAP_METERS / 2), pairTopLocalY(left, right), 0);
+    left.object.localToWorld(this._d);
+    const pairTopDeg = degreesFromForward(this._head, this.headPitchDown, this._d);
+
     // Control: touched, so against the reach limit; plus its grab clearance.
     const control = this.control;
     control.document.updateWorldMatrix(true, false);
@@ -1300,14 +1338,27 @@ export class JoinSystem
     this._e.set(0, -control.heightMeters / 2, 0);
     control.document.localToWorld(this._e);
     const controlTopDeg = degreesFromForward(this._head, this.headPitchDown, this._d);
-    const controlEdges = edgeNote('join-type control', controlTopDeg, degreesFromForward(this._head, this.headPitchDown, this._e));
+    const controlBottomDeg = degreesFromForward(this._head, this.headPitchDown, this._e);
+    const controlEdges = edgeNote('join-type control', controlTopDeg, controlBottomDeg);
+    // Orientation against the pair (roll and relative yaw should be 0).
+    control.document.getWorldQuaternion(this._q1);
+    this._euler.setFromQuaternion(this._q1, 'YXZ');
+    const controlYawDeg = MathUtils.radToDeg(this._euler.y);
+    const controlRollDeg = MathUtils.radToDeg(this._euler.z);
+    left.object.getWorldQuaternion(this._q1);
+    this._euler.setFromQuaternion(this._q1, 'YXZ');
+    const relativeYawDeg = controlYawDeg - MathUtils.radToDeg(this._euler.y);
     debug.note(
       `join-type control (touch): center ${controlDistance.toFixed(2)} m from the eyes (${reachNote(controlDistance)}); ` +
         `${controlEdges}; clearance to the nearest source slab ${cm(clearance)} (palm grab sphere ` +
         `${cm(GRAB_SPHERE_RADIUS_METERS)}, target >= ${cm(CONTROL_SLAB_CLEARANCE_METERS)}); ` +
         `options ${cm(control.optionWidthMeters)} x ${cm(control.optionHeightMeters)}; label font ` +
-        `${cm(control.labelFontMeters)} = ${textAngleDeg(control.labelFontMeters, controlDistance).toFixed(2)}°`,
+        `${cm(control.labelFontMeters)} = ${textAngleDeg(control.labelFontMeters, controlDistance).toFixed(2)}°; ` +
+        `roll ${controlRollDeg.toFixed(1)}°, yaw vs pair ${relativeYawDeg.toFixed(1)}°`,
     );
+    if (Math.abs(controlRollDeg) > 0.5 || Math.abs(relativeYawDeg) > 0.5) {
+      debug.warn(`join-type control isn't parallel to the pair (roll ${controlRollDeg.toFixed(1)}°, yaw vs pair ${relativeYawDeg.toFixed(1)}°)`);
+    }
     if (controlDistance > TOUCH_REACH_MAX_METERS + 0.005) {
       debug.warn(`join-type control is ${controlDistance.toFixed(2)} m from the eyes, beyond the reach limit`);
     }
@@ -1342,6 +1393,17 @@ export class JoinSystem
     );
     if (resultTextDeg < MIN_ROW_TEXT_DEG) {
       debug.warn(`result slab row text is ${resultTextDeg.toFixed(2)}° tall, below the ${MIN_ROW_TEXT_DEG}° minimum`);
+    }
+    debug.note(
+      `layout gaps in view: pair top -> control bottom ${(controlBottomDeg - pairTopDeg).toFixed(1)}°, ` +
+        `control top -> result bottom ${(resultBottomDeg - controlTopDeg).toFixed(1)}° (result bottom at its full ` +
+        `LEFT height; INNER sits higher)`,
+    );
+    if (controlBottomDeg < pairTopDeg) {
+      debug.warn(
+        `join-type control's bottom edge (${controlBottomDeg.toFixed(1)}°) is below the pair's top edge ` +
+          `(${pairTopDeg.toFixed(1)}°) in view: they overlap`,
+      );
     }
     if (resultBottomDeg < controlTopDeg) {
       debug.warn(
@@ -1474,6 +1536,14 @@ export class JoinSystem
 
 function resultKey(leftId: string, rightId: string): string {
   return `${leftId}>${rightId}`;
+}
+
+/**
+ * Local Y (in the LEFT slab's frame) of the docked pair's higher top edge.
+ * Docked slabs align their bottom edges, so the taller slab's top is higher.
+ */
+function pairTopLocalY(left: SourceSlab, right: SourceSlab): number {
+  return Math.max(left.doc.heightMeters / 2, -left.doc.heightMeters / 2 + right.doc.heightMeters);
 }
 
 function cm(meters: number): string {
