@@ -51,7 +51,8 @@ export const MIN_ROW_FONT_CM = 0.9;
  * readouts log the actual distance and resulting angle.
  */
 export const PLANNED_SOURCE_DISTANCE_METERS = 0.55;
-export const PLANNED_RESULT_DISTANCE_METERS = 0.65;
+// Measured at join in the emulator (seated, desk); 0.65 m gave 1.33° text.
+export const PLANNED_RESULT_DISTANCE_METERS = 0.56;
 export const PLANNED_CONTROL_DISTANCE_METERS = 0.45;
 /** Readouts warn when a slab's actual row text angle is this far off target. */
 export const TEXT_ANGLE_TOLERANCE = 0.15;

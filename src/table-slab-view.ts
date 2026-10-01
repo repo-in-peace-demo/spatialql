@@ -187,6 +187,10 @@ export type TableSlabDocument = {
   /** Physical font sizes the slab was built with (meters). */
   rowFontMeters: number;
   headerFontMeters: number;
+  /** Panel height in cm when built with `animatedHeight` (null otherwise). */
+  panelHeightCm: Signal<number> | null;
+  /** Panel height (meters) with `visibleRows` data rows displayed. */
+  heightForRowsMeters: (visibleRows: number) => number;
 };
 
 export type SlabBuildOptions = {
@@ -201,14 +205,14 @@ export type SlabBuildOptions = {
   caption?: { lines: string[]; fitLines: string[] };
   /** Put the document origin at the panel's top edge instead of its center. */
   anchorTop?: boolean;
-  /**
-   * Pad the panel with empty space at the bottom up to this height, so
-   * slabs of different row counts can share one height (rows stay at the
-   * top, so row geometry is unchanged).
-   */
-  minHeightMeters?: number;
   /** Physical font sizes; defaults to DEFAULT_SLAB_TEXT_SIZES. */
   text?: SlabTextSizes;
+  /**
+   * Drive the panel's height from `TableSlabDocument.panelHeightCm` (sized
+   * to the rows currently shown) instead of letting it fit its content, so
+   * callers can animate it as rows are shown or hidden.
+   */
+  animatedHeight?: boolean;
 };
 
 /** Rows shown for `table` under `maxRows`, and whether a "+N more" row follows. */
@@ -226,12 +230,14 @@ function captionHeightCmFor(options: SlabBuildOptions, m: SlabMetrics): number {
  * any `minHeightMeters` padding. Lets callers match slab heights up front.
  */
 export function tableSlabNaturalHeightMeters(table: Table, options: SlabBuildOptions = {}): number {
-  const m = slabMetrics(options.text);
   const { visibleRowCount, overflow } = visibleRowLayout(table, options.maxRows ?? MAX_VISIBLE_ROWS);
+  return panelHeightCm(options, slabMetrics(options.text), visibleRowCount, overflow) / 100;
+}
+
+/** Panel height (cm) with `rows` data rows (plus the "+N more" row if `overflow`). */
+function panelHeightCm(options: SlabBuildOptions, m: SlabMetrics, rows: number, overflow: boolean): number {
   const firstRowTopCm = m.borderWidth + m.panelPadding + captionHeightCmFor(options, m) + m.headerRowHeight;
-  const heightCm =
-    firstRowTopCm + m.dataRowHeight * (visibleRowCount + (overflow ? 1 : 0)) + m.panelPadding + m.borderWidth;
-  return heightCm / 100;
+  return firstRowTopCm + m.dataRowHeight * (rows + (overflow ? 1 : 0)) + m.panelPadding + m.borderWidth;
 }
 
 function displayValue(value: CellValue): string {
@@ -367,8 +373,12 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
   const maxRows = options.maxRows ?? MAX_VISIBLE_ROWS;
   const { visibleRowCount, overflow } = visibleRowLayout(table, maxRows);
   const visibleRows = table.rows.slice(0, visibleRowCount);
-  // Content height plus any bottom padding (see `minHeightMeters`).
-  const heightCm = Math.max(tableSlabNaturalHeightMeters(table, options), options.minHeightMeters ?? 0) * 100;
+  // Height with every row displayed (hidden rows included): what placement reserves.
+  const heightCm = panelHeightCm(options, m, visibleRowCount, overflow);
+  const heightForRowsMeters = (rows: number) => panelHeightCm(options, m, rows, overflow) / 100;
+  // With `animatedHeight`, the panel starts at the height of the rows shown now.
+  const shownRows = visibleRows.filter((_, rowIndex) => !options.hiddenRows?.has(rowIndex)).length;
+  const panelHeight = options.animatedHeight ? signal(heightForRowsMeters(shownRows) * 100) : null;
 
   const columnWidths = computeColumnWidths(table, visibleRows, m);
   let contentWidthCm =
@@ -392,7 +402,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
   const root = new UIKit.Container({
     flexDirection: 'column',
     width: widthCm,
-    minHeight: heightCm,
+    ...(panelHeight ? { height: panelHeight } : {}),
     anchorY: anchor,
     opacity: fade,
     fontFamilies: FONT_FAMILIES,
@@ -531,6 +541,8 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     captionLines,
     rowFontMeters: m.rowFont / 100,
     headerFontMeters: m.headerFont / 100,
+    panelHeightCm: panelHeight,
+    heightForRowsMeters,
   };
 }
 
