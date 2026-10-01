@@ -34,15 +34,11 @@ import {
   eyeFacingLeanFromBottom,
   measureSlabEdges,
   minDistanceForDrop,
-  NATURAL_GAZE_PITCH_DEG,
   NATURAL_GAZE_PITCH_RAD,
   PLANNED_SOURCE_DISTANCE_METERS,
-  ROW_TEXT_TARGET_DEG,
   slabTextSizeAt,
-  TEXT_ANGLE_TOLERANCE,
   textAngleDeg,
   TOUCH_REACH_MAX_METERS,
-  VIEW_MAX_ABOVE_GAZE_DEG,
   VIEW_MAX_BELOW_GAZE_DEG,
   type SlabEdgeAngles,
 } from './view-comfort.js';
@@ -743,44 +739,19 @@ export class DeskPlacementSystem extends createSystem({
     return this._center.distanceTo(this._headPos);
   }
 
-  /** Dev-only (`?debug=1`): warns when a placed slab's edge is still out of view. */
+  /**
+   * Dev-only (`debug` flag): warns when a placed slab is out of view, off its
+   * text-angle target, or beyond reach. The warnings live in PlacementDebug,
+   * a dev-only module, so none of their text ships in production builds.
+   */
   private warnIfOutOfView(): void {
     if (!import.meta.env.DEV || !this.debug) {
       return;
     }
-    this.warnSlabOutOfView(this.customersEntity, this.customersDoc, this.touchedCustomers, 'customers');
-    this.warnSlabOutOfView(this.ordersEntity, this.ordersDoc, this.touchedOrders, 'orders');
-  }
-
-  private warnSlabOutOfView(entity: Entity, doc: TableSlabDocument, touched: boolean, name: string): void {
-    if (this.isFrozen(entity, touched)) {
-      return;
-    }
-    const edges = this.measureEdges(entity, doc);
-    if (edges && !edges.fits) {
-      console.warn(
-        `[DeskPlacement] ${name} slab edges are outside the comfortable view (top ` +
-          `${edges.topDeg.toFixed(1)}°, bottom ${edges.bottomDeg.toFixed(1)}° from the natural gaze ` +
-          `(${NATURAL_GAZE_PITCH_DEG}° down); limits -${VIEW_MAX_BELOW_GAZE_DEG}°/+${VIEW_MAX_ABOVE_GAZE_DEG}°): ` +
-          `reach (${TOUCH_REACH_MAX_METERS} m) wins, ` +
-          `or the slab is clamped to the surface edge.`,
-      );
-    }
-    const distance = this.eyeDistance(entity);
-    const textDeg = textAngleDeg(doc.rowFontMeters, distance);
-    if (Math.abs(textDeg / ROW_TEXT_TARGET_DEG - 1) > TEXT_ANGLE_TOLERANCE) {
-      console.warn(
-        `[DeskPlacement] ${name} slab row text is ${textDeg.toFixed(2)}° at ${distance.toFixed(2)} m, more than ` +
-          `${TEXT_ANGLE_TOLERANCE * 100}% off the ${ROW_TEXT_TARGET_DEG}° target (fonts are sized for ` +
-          `${PLANNED_SOURCE_DISTANCE_METERS} m).`,
-      );
-    }
-    if (distance > TOUCH_REACH_MAX_METERS + 0.005) {
-      console.warn(
-        `[DeskPlacement] ${name} slab center is ${distance.toFixed(2)} m from the eyes, ` +
-          `beyond the ${TOUCH_REACH_MAX_METERS} m seated reach limit.`,
-      );
-    }
+    this.debug.warnOutOfView([
+      this.slabReport('customers', this.customersEntity, this.customersDoc, this.touchedCustomers),
+      this.slabReport('orders', this.ordersEntity, this.ordersDoc, this.touchedOrders),
+    ]);
   }
 
   /** Dev-only: evaluates every current candidate into fresh records. */

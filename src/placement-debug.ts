@@ -26,7 +26,15 @@ import {
   type World,
 } from '@iwsdk/core';
 import type { SurfaceAssessment } from './desk-placement.js';
-import { NATURAL_GAZE_PITCH_DEG, ROW_TEXT_TARGET_DEG, TOUCH_REACH_MAX_METERS } from './view-comfort.js';
+import {
+  NATURAL_GAZE_PITCH_DEG,
+  PLANNED_SOURCE_DISTANCE_METERS,
+  ROW_TEXT_TARGET_DEG,
+  TEXT_ANGLE_TOLERANCE,
+  TOUCH_REACH_MAX_METERS,
+  VIEW_MAX_ABOVE_GAZE_DEG,
+  VIEW_MAX_BELOW_GAZE_DEG,
+} from './view-comfort.js';
 
 export type PlacementKind = 'floating' | 'surface' | 'synthetic' | 'none';
 
@@ -187,6 +195,39 @@ export class PlacementDebug {
       );
     }
     this.drawOutlines(report.candidates, report.chosen, report.synthetic);
+  }
+
+  /**
+   * Warns, per slab placement didn't freeze, when its edges are out of view,
+   * its row text is off the angular target, or its center is beyond reach.
+   */
+  warnOutOfView(slabs: SlabReport[]): void {
+    for (const slab of slabs) {
+      if (slab.touched) {
+        continue;
+      }
+      if (!slab.edgesFit) {
+        console.warn(
+          `[DeskPlacement] ${slab.name} slab edges are outside the comfortable view (top ` +
+            `${fmt(slab.topEdgeDeg, 1)}°, bottom ${fmt(slab.bottomEdgeDeg, 1)}° from the natural gaze ` +
+            `(${NATURAL_GAZE_PITCH_DEG}° down); limits -${VIEW_MAX_BELOW_GAZE_DEG}°/+${VIEW_MAX_ABOVE_GAZE_DEG}°): ` +
+            `reach (${TOUCH_REACH_MAX_METERS} m) wins, or the slab is clamped to the surface edge.`,
+        );
+      }
+      if (Math.abs(slab.rowTextDeg / ROW_TEXT_TARGET_DEG - 1) > TEXT_ANGLE_TOLERANCE) {
+        console.warn(
+          `[DeskPlacement] ${slab.name} slab row text is ${fmt(slab.rowTextDeg)}° at ${fmt(slab.eyeDistance)} m, ` +
+            `more than ${TEXT_ANGLE_TOLERANCE * 100}% off the ${ROW_TEXT_TARGET_DEG}° target (fonts are sized for ` +
+            `${PLANNED_SOURCE_DISTANCE_METERS} m).`,
+        );
+      }
+      if (slab.eyeDistance > TOUCH_REACH_MAX_METERS + 0.005) {
+        console.warn(
+          `[DeskPlacement] ${slab.name} slab center is ${fmt(slab.eyeDistance)} m from the eyes, ` +
+            `beyond the ${TOUCH_REACH_MAX_METERS} m seated reach limit.`,
+        );
+      }
+    }
   }
 
   logChosenChange(headPosition: Vector3, candidates: SurfaceAssessment[], chosen: Entity | null): void {
