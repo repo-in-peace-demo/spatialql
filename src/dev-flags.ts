@@ -1,5 +1,5 @@
 /**
- * Dev-only feature flags: `debug`, `seated`, `forceSurface`.
+ * Dev-only feature flags: `debug`, `seated`, `forceSurface`, `mute`.
  *
  * Read from the URL query first (`?debug=1`; `?debug=0` turns it off), then
  * from `localStorage` (`spatialql.debug = '1'`), so they also work in the
@@ -7,21 +7,22 @@
  * false outside `import.meta.env.DEV`, so production builds never read them.
  *
  * `installDevFlagHotkeys()` toggles the stored value with Option+Shift+D / S /
- * F (Alt+Shift on Windows/Linux) and reloads. It matches physical keys
+ * F / M (Alt+Shift on Windows/Linux) and reloads. It matches physical keys
  * (`event.code`), because Option+Shift+letter types a special character on
  * macOS.
  */
 
-export type DevFlag = 'debug' | 'seated' | 'forceSurface';
+export type DevFlag = 'debug' | 'seated' | 'forceSurface' | 'mute';
 
 export const DEV_FLAG_STORAGE_PREFIX = 'spatialql.';
 
 const LOG_PREFIX = '[dev flags]';
-const ALL_FLAGS: readonly DevFlag[] = ['debug', 'seated', 'forceSurface'];
+const ALL_FLAGS: readonly DevFlag[] = ['debug', 'seated', 'forceSurface', 'mute'];
 const HOTKEY_CODES: Record<string, DevFlag> = {
   KeyD: 'debug',
   KeyS: 'seated',
   KeyF: 'forceSurface',
+  KeyM: 'mute',
 };
 
 type ReadableStorage = Pick<Storage, 'getItem'>;
@@ -65,7 +66,7 @@ export function installDevFlagHotkeys(): void {
     return;
   }
   const states = ALL_FLAGS.map((flag) => `${flag}=${devFlag(flag) ? 'on' : 'off'}`).join(', ');
-  console.info(`${LOG_PREFIX} ${states}. Toggle with Option+Shift+D / S / F (Alt+Shift on Windows/Linux).`);
+  console.info(`${LOG_PREFIX} ${states}. Toggle with Option+Shift+D / S / F / M (Alt+Shift on Windows/Linux).`);
 
   window.addEventListener('keydown', (event: KeyboardEvent) => {
     if (!event.altKey || !event.shiftKey || event.ctrlKey || event.metaKey || event.repeat) {

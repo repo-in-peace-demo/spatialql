@@ -6,6 +6,7 @@
  */
 
 import { createSystem, RayInteractable, UIKitMLAsset, VisibilityState } from '@iwsdk/core';
+import { sounds } from './sound.js';
 
 const WELCOME_PANEL_NODE_ID = 'welcome-panel';
 
@@ -54,7 +55,11 @@ export class PanelSystem extends createSystem({}) {
       return;
     }
 
-    const launchXR = () => this.world.launchXR();
+    // The Enter XR tap is a user gesture: the moment browsers allow audio to start.
+    const launchXR = () => {
+      sounds.unlock();
+      this.world.launchXR();
+    };
     const exitXR = () => this.world.exitXR();
     xrButton.addEventListener('click', launchXR);
     exitButton.addEventListener('click', exitXR);
