@@ -37,6 +37,14 @@ type Hum = {
   level: number;
 };
 
+// Per-sound peak gains, balanced against the snap (measured output peaks
+// with MASTER_VOLUME and the limiter: snap ~-7 dBFS; ticks ~10-14 dB and the
+// resolve ~8-10 dB below it).
+const SNAP_GAIN = 0.9;
+const TICK_GAIN = 0.5;
+/** Later (higher) ticks measure quieter; this extra gain at the last tick evens the fan-out. */
+const TICK_RISE_GAIN = 0.35;
+const RESOLVE_GAIN = 0.42;
 const HUM_MAX_GAIN = 0.12;
 const HUM_BASE_HZ = 160;
 const HUM_RISE_HZ = 100;
@@ -186,7 +194,7 @@ class JoinSounds {
       osc.type = 'sine';
       osc.frequency.setValueAtTime(150, t);
       osc.frequency.exponentialRampToValueAtTime(55, t + 0.09);
-      envelope(ctx, osc, out, t, 0.9, 0.003, 0.14);
+      envelope(ctx, osc, out, t, SNAP_GAIN, 0.003, 0.14);
       this.noiseBurst(ctx, out, t, 'bandpass', 1800, 0.8, 0.25, 0.03);
     });
   }
@@ -208,8 +216,9 @@ class JoinSounds {
     this.oneShot('lineTick', at, delay, (ctx, out, t) => {
       const osc = ctx.createOscillator();
       osc.type = 'sine';
-      osc.frequency.value = 1600 + 800 * (count > 1 ? index / (count - 1) : 0);
-      envelope(ctx, osc, out, t, 0.18, 0.002, 0.03);
+      const along = count > 1 ? index / (count - 1) : 0;
+      osc.frequency.value = 1600 + 800 * along;
+      envelope(ctx, osc, out, t, TICK_GAIN * (1 + TICK_RISE_GAIN * along), 0.002, 0.03);
     });
   }
 
@@ -227,7 +236,7 @@ class JoinSounds {
         const osc = ctx.createOscillator();
         osc.type = 'triangle';
         osc.frequency.value = freq;
-        envelope(ctx, osc, filter, t + offset, 0.25, 0.005, 0.22);
+        envelope(ctx, osc, filter, t + offset, RESOLVE_GAIN, 0.005, 0.22);
       }
     });
   }

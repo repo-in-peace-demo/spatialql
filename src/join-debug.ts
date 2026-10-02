@@ -50,11 +50,30 @@ function describe(state: JoinState): string {
 
 export class JoinDebug {
   private readonly host: JoinDebugHost;
+  private longTasks: PerformanceObserver | null = null;
+  private joinStartMs = -1;
 
   constructor(host: JoinDebugHost) {
     this.host = host;
     window.addEventListener('keydown', this.onKeyDown);
     console.info(`${LOG_PREFIX} keyboard shortcuts:\n  ${KEY_HELP.join('\n  ')}`);
+    // Main-thread stalls over 50 ms, timed against the last join start.
+    try {
+      this.longTasks = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const since = this.joinStartMs < 0 ? '' : ` at +${((entry.startTime - this.joinStartMs) / 1000).toFixed(3)} s from join start`;
+          console.warn(`${LOG_PREFIX} long task: ${entry.duration.toFixed(0)} ms${since}`);
+        }
+      });
+      this.longTasks.observe({ type: 'longtask', buffered: false });
+    } catch {
+      this.longTasks = null;
+    }
+  }
+
+  /** Marks the start of a join (or replay) for the long-task readout. */
+  markJoinStart(): void {
+    this.joinStartMs = performance.now();
   }
 
   logTransition(event: JoinEvent, prev: JoinState, next: JoinState, stats: JoinStats | null): void {
@@ -79,6 +98,7 @@ export class JoinDebug {
 
   dispose(): void {
     window.removeEventListener('keydown', this.onKeyDown);
+    this.longTasks?.disconnect();
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {

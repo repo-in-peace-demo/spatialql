@@ -4,8 +4,9 @@ Goal: make the join satisfying. It opens the demo video and drives the "Best
 First Five Minutes" award. Hands give no physical feedback, so sound and
 motion carry it.
 
-Status: implemented; emulator-tested (see "Results" below). Not yet tried on a
-headset.
+Status: planned and approved, then implemented and emulator-tested (see
+"Results" below), including the addendum (section 3) and the follow-ups
+(section 4). Not yet tried on a headset.
 
 ## Constraints
 
@@ -66,11 +67,12 @@ and moves the listener each frame.
   docked pair without separating; the log prints a `join sequence: …`
   breakdown.
 
-### Deviation
+### Deviation (resolved in section 4)
 
 The row background was meant to fade in as cells land (`backgroundOpacity`),
-but UIKit has no such property. Instead each row's opacity fades in over the
-first 60% of its flight.
+but UIKit has no such property. At first each row's opacity faded in over the
+first 60% of its flight (backgrounds showed before the cells); section 4
+replaced that with a separate background layer.
 
 ## 3. Addendum: unmatched rows stay in their own slot
 
@@ -104,19 +106,63 @@ its own slot empty.
 - Five INNER ↔ LEFT toggles: the row's final offset matches its original.
 - Screenshots of the customers slab for J + LEFT and Shift+J + LEFT.
 
+## 4. Follow-ups (planned, approved, then implemented)
+
+1. **Addendum re-test** (no code).
+2. **Sound balance:** per-sound peak gains as named constants (`SNAP_GAIN`,
+   `TICK_GAIN` + `TICK_RISE_GAIN`, `RESOLVE_GAIN`); ticks 10–14 dB and the
+   resolve 8–10 dB below the snap; `MASTER_VOLUME` and the limiter unchanged.
+3. **Row backgrounds wait for their cells:** UIKit has no
+   `backgroundOpacity`, and a row's `opacity` also fades its cells, so each
+   result row paints its background on its own absolutely positioned layer
+   behind the cells, with its own fade. Cells are visible from the start of
+   their flight; the background fades in over the last 30% of it
+   (`ROW_BACKGROUND_LANDING_FRACTION`). Key tints recolor that layer.
+4. **The 112 ms long task:** measure first (dev-only long-task observer timed
+   from join start, and a breakdown of the join-start work), then pre-warm
+   only what the measurement implicates.
+
 ## Results (emulator)
 
-- Sound order, J INNER: `snap` +0.00 s (-7.0 dBFS), 10 × `lineTick` +0.22 →
-  +0.49 s (-27 to -33), `dropTap` +0.71 s (-11.0), `resolve` +1.15 s (-20.6).
-  Shift+J the same. Toggle: `click` then `slideIn`. Pull apart: `release`.
+- Sound order, J INNER: `snap` +0.00 s, 10 × `lineTick` +0.22 → +0.49 s,
+  `dropTap` +0.71 s, `resolve` +1.15 s. Shift+J the same. Toggle: `click` then
+  `slideIn`. Pull apart: `release`.
+- Sound levels (output peak, dBFS):
+
+  | Sound | Before | After | Below the snap |
+  | --- | --- | --- | --- |
+  | snap | -7.0 | -6.9 | — |
+  | lineTick ×10 | -27.1 to -32.7 | -18.3 to -21.4 | 11.4–14.5 dB (target 10–14) |
+  | resolve | -20.6 | -16.1 | 9.2 dB (target 8–10) |
+  | dropTap | -11.0 | -11.0 | 4.1 dB (unchanged) |
+
 - Join sequence: 1.15 s (INNER), 1.20 s (LEFT, 11 rows).
+- Row backgrounds: mid-flight, landed cells show without their background
+  until the fade; no empty tinted strips.
 - Frame time during a replay (desktop, uncalibrated): p50 8.3 ms, p95 9.0 ms,
-  max 9.4 ms, no dropped frames; one 112 ms long task (cause not traced).
-- Addendum: pending re-test.
+  max 9.4 ms, no dropped frames.
+- Long task: **not reproduced.** No long tasks on a cold first join after a
+  page load, an `R` replay, or a second join. Join-start work: 0.3–0.4 ms
+  setup and placement, 1.9–3.2 ms sequence, 0.4–0.5 ms debug readout. The
+  earlier 112 ms was recorded while the browser profiler was running, its
+  likeliest source. No pre-warming added (nothing implicated); the dev
+  readout stays in place to catch it on a headset.
+- Addendum (unmatched rows, 2.15 cm rows, limit 12%):
+
+  | Case | Row | INNER | LEFT |
+  | --- | --- | --- | --- |
+  | J | Odalys (customers row 4) | 0.258 cm, opacity 0.35 | 0.000 cm, opacity 1.00 |
+  | J | order 108 (orders row 7) | 0.258 cm, 0.35 | 0.258 cm, 0.35 |
+  | Shift+J | order 108 | 0.258 cm, 0.35 | 0.000 cm, 1.00 |
+  | Shift+J | Odalys | 0.258 cm, 0.35 | 0.258 cm, 0.35 |
+
+  Five INNER ↔ LEFT toggles (J): INNER 0.258 cm and LEFT 0.000 cm every
+  time; Odalys ends at exactly 0.000 cm. Screenshots: J + LEFT, Odalys fully
+  restored; Shift+J + LEFT, Odalys dimmed inside her own slot, clear of Jun
+  Park.
 
 ## Open (headset)
 
-- Balance the snap (-7 dBFS) against the ticks (~-30 dBFS).
-- Row backgrounds appear before their cells arrive; consider delaying them.
+- Judge the sound levels by ear (the emulator window is muted).
 - Check the approach glow and hum by moving a slab by hand.
-- Watch for the 112 ms long task at join start.
+- Watch the dev long-task readout at join start on a Quest.

@@ -31,7 +31,7 @@ events and logged state; nothing has been tested on a real Quest yet.
 | Result slab | View only; above the pair; sized to its rows, grows/shrinks downward on INNER ↔ LEFT. | Emulator: J and Shift+J, INNER and LEFT, screenshots |
 | Join-type control | Between the pair and the result slab; level with the pair (roll 0°); ≥ 10 cm from the slabs. | Emulator: pinch and ray select; clearance 10.0–10.1 cm; roll 0.0°, yaw vs pair 0.0° |
 | Pull apart | Dragging a docked slab > 10 cm separates. | Emulator |
-| Feel | Approach glow and hum, dock snap with overshoot, line ticks and pulses, rows flying in from their source rows, unmatched rows dropping within their slot, resolve; ~1.15–1.2 s. Synthesized spatial sound (`src/sound.ts`). | Emulator: sound order and output levels from the log, mid-flight screenshots, frame times. Approach glow/hum and the within-slot drop not yet re-tested. |
+| Feel | Approach glow and hum, dock snap with overshoot, line ticks and pulses, rows flying in from their source rows (row backgrounds fade in only as the cells land), unmatched rows dropping 12% of a row within their slot, resolve; ~1.15–1.2 s. Synthesized spatial sound (`src/sound.ts`), balanced: ticks 11–14 dB and the resolve ~9 dB below the snap. | Emulator: sound order and output peaks from the log; drop offsets for J / Shift+J, INNER / LEFT and five toggles (no drift); mid-flight screenshots; frame times; no long tasks at join start. Approach glow/hum not yet tried by hand. |
 | Browser support | "Open in the Meta Quest Browser" message on non-AR browsers; dismissible note on AR browsers that aren't the Quest Browser. | Unit test for detection; production preview |
 | Welcome panel | Browser entry point (Enter XR); hidden in XR, back after exit. | Emulator: screenshots in and after XR |
 | Production build | No dev-only code. | Grep of `dist/` and of the deployed bundle |
@@ -55,16 +55,16 @@ events and logged state; nothing has been tested on a real Quest yet.
 - Hand-tracking feel of the grab, the preview "magnet", and release drift.
 - Reach and view constants (0.60 m, 18° gaze, 80° window) at a real desk.
 - Text size at the 1.15° / 1.3° targets.
-- Sound: overall level, and balance (the snap peaks around -7 dBFS, about
-  20 dB above the line ticks).
-- The join's motion: row flights, the drop within the slot, total ~1.2 s.
-- A 112 ms long task seen once on desktop during a join replay; check for a
-  hitch at join start.
+- Sound, by ear: overall level and balance (measured: snap -6.9 dBFS, ticks
+  -18.3 to -21.4, resolve -16.1, drop tap -11.0).
+- The join's motion: row flights, background fade on landing, the drop within
+  the slot, total ~1.2 s.
+- A hitch at join start: a 112 ms long task seen once on desktop (while the
+  profiler ran) didn't reproduce; the dev long-task readout will show one on
+  a Quest.
 - Poking the control (pinch and ray are verified; poke needs a real pointing
   hand).
 - The approach glow and hum, by moving a slab by hand.
-- Result row backgrounds appear before their cells arrive; decide whether to
-  delay them.
 
 ## Known limitations
 

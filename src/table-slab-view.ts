@@ -167,6 +167,14 @@ export type RowView = {
    * its RIGHT-table cells, so each group can fly in from its source row.
    */
   flight: { left: CellOffset; right: CellOffset } | null;
+  /**
+   * The element painting the row's background: the row itself, or (with
+   * `cellSides`) a separate layer behind its cells, so the background can
+   * fade on its own (`backgroundFade`) while the cells stay visible.
+   */
+  background: Container;
+  /** Opacity of the background layer alone (1 when there's no separate layer). */
+  backgroundFade: Signal<number>;
   /** The row's own (zebra) background, restored when a key tint is cleared. */
   baseBackground: string;
 };
@@ -177,7 +185,7 @@ function cellOffset(): CellOffset {
 
 /** Paints a row with a join-key tint, or restores its own background. */
 export function setRowTint(rowView: RowView, tint: string | null): void {
-  rowView.row.setProperties({ backgroundColor: tint ?? rowView.baseBackground });
+  rowView.background.setProperties({ backgroundColor: tint ?? rowView.baseBackground });
 }
 
 export type TableSlabDocument = {
@@ -497,14 +505,32 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     const rowOpacity = signal(1);
     const offsetYCm = signal(0);
     const flight = options.cellSides ? { left: cellOffset(), right: cellOffset() } : null;
+    const backgroundFade = signal(1);
     const rowContainer = new UIKit.Container({
       flexDirection: 'row',
-      backgroundColor: rowBackground,
+      // Join results paint the background on a separate layer (below).
+      ...(flight ? {} : { backgroundColor: rowBackground }),
       gapColumn: m.columnGap,
       opacity: computed(() => rowOpacity.value * fade.value),
       transformTranslateY: offsetYCm,
       display: options.hiddenRows?.has(rowIndex) ? 'none' : 'flex',
     });
+    // A background layer filling the row, behind its cells, with its own
+    // fade: lets a join result's row background appear only as its flying
+    // cells land, while the cells stay fully visible in flight.
+    let background = rowContainer;
+    if (flight) {
+      background = new UIKit.Container({
+        positionType: 'absolute',
+        positionTop: 0,
+        positionLeft: 0,
+        positionRight: 0,
+        positionBottom: 0,
+        backgroundColor: rowBackground,
+        opacity: backgroundFade,
+      });
+      rowContainer.add(background);
+    }
 
     // Cells of an unmatched LEFT JOIN row hold `null` and render as `NULL`,
     // exactly as a database would show them. The data layer's lineage still
@@ -533,6 +559,8 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       opacity: rowOpacity,
       offsetYCm,
       flight,
+      background,
+      backgroundFade,
       baseBackground: rowBackground,
     });
   });

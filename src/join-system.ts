@@ -157,6 +157,8 @@ const ROW_START_SECONDS = 0.35;
 const ROW_STAGGER_SECONDS = 0.05;
 /** Each result row's cells fly from their source rows for this long. */
 const ROW_FLY_SECONDS = 0.35;
+/** A row's background fades in over this last fraction of its flight, as its cells land. */
+const ROW_BACKGROUND_LANDING_FRACTION = 0.3;
 const ROW_DURATION_SECONDS = 0.22;
 const ROW_SLIDE_CM = 2;
 const DIM_START_SECONDS = 0.55;
@@ -474,6 +476,7 @@ export class JoinSystem
       return;
     }
     this.tweens.finishAll();
+    this.debug?.markJoinStart();
     // Back to the pre-join look, then play the sequence again.
     for (const source of [left, right]) {
       for (const rowView of source.doc.rowViews.values()) {
@@ -903,6 +906,11 @@ export class JoinSystem
     left.entity.addComponent(JoinDocked, {});
     right.entity.addComponent(JoinDocked, {});
 
+    const t0 = import.meta.env.DEV ? performance.now() : 0;
+    if (import.meta.env.DEV) {
+      this.debug?.markJoinStart();
+    }
+
     // 1. Snap the brought-over slab into its dock (overshoot and settle).
     this.computeDockPose(left, right, true, this._a, this._q1);
     this.startDock(right, this._a, this._q1, DOCK_DURATION_SECONDS);
@@ -914,9 +922,19 @@ export class JoinSystem
     this.showResult(view);
     this.readHead();
     this.placeResult(view, left, right);
+    const t1 = import.meta.env.DEV ? performance.now() : 0;
 
     this.playJoinSequence(view, left, right, joinType);
+    const t2 = import.meta.env.DEV ? performance.now() : 0;
     this.warnIfOutOfView(view, left, right);
+
+    if (import.meta.env.DEV && this.debug) {
+      const t3 = performance.now();
+      this.debug.note(
+        `join start work: setup+placement ${(t1 - t0).toFixed(1)} ms, sequence ${(t2 - t1).toFixed(1)} ms, ` +
+          `debug readout ${(t3 - t2).toFixed(1)} ms`,
+      );
+    }
   }
 
   /**
@@ -970,11 +988,19 @@ export class JoinSystem
         continue;
       }
       const delay = ROW_START_SECONDS + row * ROW_STAGGER_SECONDS;
-      // The row (cells and background) fades in over the first part of the
-      // flight: faint at the source rows, solid well before it lands.
+      // Cells are visible as soon as they leave their source rows; the row's
+      // background (its own layer) fades in only over the last part of the
+      // flight, as the cells land, so the rows visibly assemble.
       this.tweens.set(rowView.offsetYCm, 0);
       this.tweens.set(rowView.opacity, 0);
-      this.tweens.to(rowView.opacity, 1, ROW_FLY_SECONDS * 0.6, delay);
+      this.tweens.to(rowView.opacity, 1, 0.06, delay);
+      this.tweens.set(rowView.backgroundFade, 0);
+      this.tweens.to(
+        rowView.backgroundFade,
+        1,
+        ROW_FLY_SECONDS * ROW_BACKGROUND_LANDING_FRACTION,
+        delay + ROW_FLY_SECONDS * (1 - ROW_BACKGROUND_LANDING_FRACTION),
+      );
       if (rowView.flight) {
         this.flyCells(view, row, rowView.flight.left, left, view.rowLeftSource[row], false, delay);
         this.flyCells(view, row, rowView.flight.right, right, view.rowRightSource[row], rightDocking, delay);
