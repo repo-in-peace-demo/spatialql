@@ -66,6 +66,18 @@ events and logged state; nothing has been tested on a real Quest yet.
   hand).
 - The approach glow and hum, by moving a slab by hand.
 
+## In progress: challenge mode
+
+Daily and practice puzzles over four small datasets; design and phases in
+[`plans/challenge-mode.md`](plans/challenge-mode.md). Phase 1 (pure data
+layer and tests: datasets, 20 puzzles, query and NULL filter, result
+comparison and diff, daily selection, streak, progress, copy) is written.
+
+## Future
+
+- **Three-table datasets** (e.g. borrowers, books and loans): more puzzle
+  variety and a longer daily cycle than 20 days; needs a three-slab layout.
+
 ## Known limitations
 
 - **`iwsdk-reference` doesn't connect** in Claude Code sessions, so its docs

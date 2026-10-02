@@ -1,0 +1,85 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`the trickier puzzles > records every solving state, for review when content changes 1`] = `
+{
+  "cafe-every-ticket": [
+    "tickets <- drinks LEFT",
+  ],
+  "cafe-menu": [
+    "drinks <- tickets LEFT",
+  ],
+  "cafe-missing-drink": [
+    "tickets <- drinks LEFT WHERE drinks.id IS NULL",
+    "tickets <- drinks LEFT WHERE drinks.drink IS NULL",
+    "tickets <- drinks LEFT WHERE drinks.price IS NULL",
+  ],
+  "cafe-never-ordered": [
+    "drinks <- tickets LEFT WHERE tickets.id IS NULL",
+  ],
+  "cafe-no-milk": [
+    "drinks <- tickets INNER WHERE tickets.milk IS NULL",
+    "tickets <- drinks INNER WHERE tickets.milk IS NULL",
+    "tickets <- drinks LEFT WHERE tickets.milk IS NULL",
+  ],
+  "library-every-book": [
+    "books <- borrowers LEFT",
+  ],
+  "library-fanout": [
+    "borrowers <- books INNER",
+    "books <- borrowers INNER",
+  ],
+  "library-no-due": [
+    "borrowers <- books INNER WHERE books.due IS NULL",
+    "books <- borrowers INNER WHERE books.due IS NULL",
+  ],
+  "library-nothing-out": [
+    "borrowers <- books LEFT WHERE books.id IS NULL",
+    "borrowers <- books LEFT WHERE books.title IS NULL",
+  ],
+  "library-on-shelf": [
+    "books <- borrowers LEFT WHERE borrowers.id IS NULL",
+    "books <- borrowers LEFT WHERE borrowers.name IS NULL",
+    "books <- borrowers LEFT WHERE borrowers.branch IS NULL",
+  ],
+  "school-empty-club": [
+    "clubs <- students LEFT WHERE students.id IS NULL",
+    "clubs <- students LEFT WHERE students.name IS NULL",
+    "clubs <- students LEFT WHERE students.grade IS NULL",
+  ],
+  "school-every-club": [
+    "clubs <- students LEFT",
+  ],
+  "school-every-student": [
+    "students <- clubs LEFT",
+  ],
+  "school-no-club": [
+    "students <- clubs LEFT WHERE clubs.id IS NULL",
+    "students <- clubs LEFT WHERE clubs.club IS NULL",
+    "students <- clubs LEFT WHERE clubs.room IS NULL",
+  ],
+  "school-twice": [
+    "clubs <- students INNER",
+    "students <- clubs INNER",
+  ],
+  "shop-every-customer": [
+    "customers <- orders LEFT",
+  ],
+  "shop-every-order": [
+    "orders <- customers LEFT",
+  ],
+  "shop-match": [
+    "customers <- orders INNER",
+    "orders <- customers INNER",
+  ],
+  "shop-never-ordered": [
+    "customers <- orders LEFT WHERE orders.id IS NULL",
+    "customers <- orders LEFT WHERE orders.product IS NULL",
+    "customers <- orders LEFT WHERE orders.amount IS NULL",
+  ],
+  "shop-no-customer": [
+    "orders <- customers LEFT WHERE customers.id IS NULL",
+    "orders <- customers LEFT WHERE customers.name IS NULL",
+    "orders <- customers LEFT WHERE customers.city IS NULL",
+  ],
+}
+`;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildJoinSql } from './join-sql.js';
+import { buildJoinSql, buildWhereSql } from './join-sql.js';
 import { CUSTOMERS_TABLE, ORDERS_TABLE } from './sample-data.js';
 
 describe('buildJoinSql', () => {
@@ -23,5 +23,20 @@ describe('buildJoinSql', () => {
       'SELECT o.id, o.product, o.amount, c.* FROM orders o',
       'INNER JOIN customers c ON o.customerId = c.id',
     ]);
+  });
+});
+
+describe('buildWhereSql', () => {
+  it('names the filtered column by alias and source column, on either side', () => {
+    expect(buildWhereSql(CUSTOMERS_TABLE, ORDERS_TABLE, { tableId: 'orders', column: 'id' })).toBe(
+      'WHERE o.id IS NULL',
+    );
+    expect(buildWhereSql(ORDERS_TABLE, CUSTOMERS_TABLE, { tableId: 'customers', column: 'name' })).toBe(
+      'WHERE c.name IS NULL',
+    );
+  });
+
+  it('rejects a filter on neither table', () => {
+    expect(() => buildWhereSql(CUSTOMERS_TABLE, ORDERS_TABLE, { tableId: 'books', column: 'id' })).toThrow();
   });
 });

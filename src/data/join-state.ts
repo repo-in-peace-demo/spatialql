@@ -7,7 +7,13 @@
  *   previewing --exitRange--> idle
  *   idle --commit--> joined                     (programmatic / debug join)
  *   joined --setJoinType / toggleJoinType--> joined
+ *   joined --setFilter / clearFilter--> joined
  *   joined --pullApart--> separating --separated--> idle
+ *
+ * The NULL filter (`WHERE ... IS NULL`, challenge mode) lives on `joined`
+ * only: changing the join type keeps it (INNER + an anti-join filter is a
+ * valid, empty query), and pulling apart drops it. The field is absent, not
+ * null, when there's no filter.
  *
  * LEFT/RIGHT RULE: the slab that stayed put is the LEFT table; the slab the
  * user brought over (the one held and released) is the RIGHT table. So
@@ -18,7 +24,7 @@
  * unchanged, so callers can detect "no transition" by identity.
  */
 
-import type { JoinType } from './types.js';
+import type { JoinType, NullFilter } from './types.js';
 
 export type SlabId = string;
 
@@ -27,7 +33,7 @@ export const DEFAULT_JOIN_TYPE: JoinType = 'inner';
 export type JoinState =
   | { phase: 'idle' }
   | { phase: 'previewing'; moving: SlabId; stationary: SlabId }
-  | { phase: 'joined'; left: SlabId; right: SlabId; joinType: JoinType }
+  | { phase: 'joined'; left: SlabId; right: SlabId; joinType: JoinType; filter?: NullFilter }
   | { phase: 'separating'; left: SlabId; right: SlabId; joinType: JoinType };
 
 export type JoinEvent =
@@ -37,6 +43,8 @@ export type JoinEvent =
   | { type: 'commit'; left: SlabId; right: SlabId }
   | { type: 'setJoinType'; joinType: JoinType }
   | { type: 'toggleJoinType' }
+  | { type: 'setFilter'; filter: NullFilter }
+  | { type: 'clearFilter' }
   | { type: 'pullApart' }
   | { type: 'separated' };
 
@@ -75,6 +83,17 @@ export function transition(state: JoinState, event: JoinEvent): JoinState {
       }
       if (event.type === 'toggleJoinType') {
         return { ...state, joinType: state.joinType === 'inner' ? 'left' : 'inner' };
+      }
+      if (event.type === 'setFilter') {
+        const current = state.filter;
+        if (current && current.tableId === event.filter.tableId && current.column === event.filter.column) {
+          return state;
+        }
+        return { ...state, filter: { tableId: event.filter.tableId, column: event.filter.column } };
+      }
+      if (event.type === 'clearFilter' && state.filter) {
+        const { filter: _cleared, ...rest } = state;
+        return rest;
       }
       if (event.type === 'pullApart') {
         return { phase: 'separating', left: state.left, right: state.right, joinType: state.joinType };

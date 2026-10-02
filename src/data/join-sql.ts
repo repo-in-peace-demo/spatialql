@@ -4,7 +4,7 @@
  */
 
 import { requireJoinKeys, tableAlias } from './join-result.js';
-import type { JoinType, Table } from './types.js';
+import type { JoinType, NullFilter, Table } from './types.js';
 
 export function joinKeyword(joinType: JoinType): string {
   return joinType === 'inner' ? 'INNER JOIN' : 'LEFT JOIN';
@@ -52,4 +52,17 @@ export function buildJoinSql(left: Table, right: Table, joinType: JoinType): [st
     `SELECT ${select} FROM ${left.id} ${leftAlias}`,
     `${joinKeyword(joinType)} ${right.id} ${rightAlias} ON ${fk.alias}.${fk.column} = ${referenced.alias}.${referenced.column}`,
   ];
+}
+
+/**
+ * The optional third caption line for a NULL filter, e.g.
+ * `WHERE o.id IS NULL`. It names the source column (not its display label),
+ * like the lines above. Throws if the filter names neither table.
+ */
+export function buildWhereSql(left: Table, right: Table, filter: NullFilter): string {
+  const table = filter.tableId === left.id ? left : filter.tableId === right.id ? right : null;
+  if (!table) {
+    throw new Error(`Filter table "${filter.tableId}" is not "${left.id}" or "${right.id}"`);
+  }
+  return `WHERE ${tableAlias(table)}.${filter.column} IS NULL`;
 }

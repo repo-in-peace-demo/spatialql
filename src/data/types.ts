@@ -36,6 +36,16 @@ export type Table = {
 export type JoinType = 'inner' | 'left';
 
 /**
+ * `WHERE <table>.<column> IS NULL` on a join result. Names the source table
+ * and column (not a LEFT/RIGHT position), so it means the same thing in
+ * either join direction.
+ */
+export type NullFilter = {
+  tableId: string;
+  column: string;
+};
+
+/**
  * Identifies a row by its position within a table rather than by a business
  * key, since a table's key column is not guaranteed unique (the sample data
  * deliberately has a duplicate customer id to exercise fan-out).

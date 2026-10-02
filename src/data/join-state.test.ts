@@ -78,6 +78,29 @@ describe('join state machine', () => {
     expect(rejoined).toEqual({ phase: 'joined', left: 'customers', right: 'orders', joinType: 'inner' });
   });
 
+  it('sets and clears a NULL filter only while joined; a toggle keeps it, pulling apart drops it', () => {
+    const filter = { tableId: 'orders', column: 'id' };
+    expect(transition(INITIAL_JOIN_STATE, { type: 'setFilter', filter })).toBe(INITIAL_JOIN_STATE);
+
+    const joined = run([{ type: 'commit', left: 'customers', right: 'orders' }]);
+    expect(transition(joined, { type: 'clearFilter' })).toBe(joined);
+
+    const filtered = run([{ type: 'setJoinType', joinType: 'left' }, { type: 'setFilter', filter }], joined);
+    expect(filtered).toEqual({ phase: 'joined', left: 'customers', right: 'orders', joinType: 'left', filter });
+    expect(transition(filtered, { type: 'setFilter', filter: { ...filter } })).toBe(filtered);
+    expect(transition(filtered, { type: 'toggleJoinType' })).toMatchObject({ joinType: 'inner', filter });
+    expect(transition(filtered, { type: 'setFilter', filter: { tableId: 'orders', column: 'product' } })).toMatchObject({
+      filter: { tableId: 'orders', column: 'product' },
+    });
+
+    const cleared = transition(filtered, { type: 'clearFilter' });
+    expect(cleared).toEqual({ phase: 'joined', left: 'customers', right: 'orders', joinType: 'left' });
+    expect('filter' in cleared).toBe(false);
+
+    const separating = transition(filtered, { type: 'pullApart' });
+    expect(separating).toEqual({ phase: 'separating', left: 'customers', right: 'orders', joinType: 'left' });
+  });
+
   it('rejects degenerate self-joins', () => {
     expect(
       transition(INITIAL_JOIN_STATE, { type: 'enterRange', moving: 'orders', stationary: 'orders' }),
