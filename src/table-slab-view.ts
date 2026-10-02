@@ -24,6 +24,7 @@
 import { computed, signal, UIKit, UIKitDocument, type Signal } from '@iwsdk/core';
 import { firaCode } from '@pmndrs/msdfonts/firaCode';
 import { inter } from '@pmndrs/msdfonts/inter';
+import { columnHeaderText } from './data/join-result.js';
 import type { CellValue, Row, Table } from './data/types.js';
 
 /** Source slabs show at most this many rows (the last becomes "+N more"). */
@@ -271,7 +272,7 @@ function displayValue(value: CellValue): string {
 }
 
 function headerLabel(table: Table, column: string): string {
-  return (table.columnLabels?.[column] ?? column).toUpperCase();
+  return columnHeaderText(table, column);
 }
 
 /**

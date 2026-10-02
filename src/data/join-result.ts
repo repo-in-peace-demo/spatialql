@@ -44,6 +44,16 @@ export function tableAlias(table: Table): string {
   return table.alias ?? table.id;
 }
 
+/**
+ * A column's header exactly as a slab displays it: its label (or key),
+ * uppercased. Works for source tables and for join result tables (whose
+ * `columnLabels` hold the result labels, e.g. `o.id`). Hints name columns
+ * through this, so they can't drift from the headers.
+ */
+export function columnHeaderText(table: Table, column: string): string {
+  return (table.columnLabels?.[column] ?? column).toUpperCase();
+}
+
 /** Finds the foreign-key relationship between two tables, in either direction. */
 export function findJoinKeys(left: Table, right: Table): JoinKeys | null {
   for (const fk of right.foreignKeys ?? []) {

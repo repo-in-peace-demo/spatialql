@@ -10,6 +10,14 @@
  * - Goals fit the card's two lines: at most 72 characters (tested).
  * - Hints: tier 1 nudges, tier 2 names the action, tier 3 is the full
  *   answer. Using them never blocks winning.
+ * - Tables are named as tables: "the customers table".
+ * - Columns are never written by hand. Puzzle text names a column with a
+ *   placeholder that `puzzle-text.ts` replaces with the header the player
+ *   sees, from the same metadata the slabs use:
+ *   - `{orders.id}`: the join result's header (`O.ID`), for "poke the NULL
+ *     under ...";
+ *   - `{source:students.clubId}`: a source slab's header (`CLUB ID`), e.g.
+ *     for a foreign-key column, which the result doesn't show.
  */
 
 import type { DatasetId } from './datasets.js';
@@ -36,7 +44,7 @@ export const CONCEPT_INTROS: Readonly<Record<Concept, string>> = {
   antijoin: "New: poke a NULL to keep only the rows where it's NULL.",
   fanout: 'New: one row can match several rows.',
   direction: 'New: which table stays put decides what LEFT keeps.',
-  nullfk: 'New: a row can point to nothing.',
+  nullfk: "New: some rows point to nothing, or to something that isn't there.",
   nullvalue: 'New: NULL can be stored in a table, too.',
 };
 
@@ -47,9 +55,9 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   'shop-match': {
     goal: 'Match each order to the customer who placed it.',
     hints: [
-      'Pinch a table, bring it to the other one, and let go.',
+      'Bring the two tables together.',
       'Any join works here. INNER keeps the rows that match on both sides.',
-      'Bring orders over to customers (or customers to orders) and let go.',
+      'Bring the orders table over to the customers table (or the other way) and let go.',
     ],
   },
   'shop-every-customer': {
@@ -57,7 +65,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     hints: [
       'One customer has no orders. Which join keeps every customer?',
       'Try LEFT. It keeps every row of the table that stayed put.',
-      'Leave customers where it is, bring orders over, let go, and choose LEFT.',
+      'Leave the customers table where it is, bring the orders table over, let go, and choose LEFT.',
     ],
   },
   'shop-never-ordered': {
@@ -65,15 +73,15 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     hints: [
       'A LEFT join fills in NULL where nothing matched.',
       'Join with LEFT, then poke a NULL to keep only the rows with no match.',
-      'Leave customers where it is, bring orders over, choose LEFT, then poke a NULL under the order ID.',
+      'Leave the customers table where it is, bring the orders table over, choose LEFT, then poke the NULL under {orders.id}.',
     ],
   },
   'library-fanout': {
     goal: 'Show each borrower next to every book they have out.',
     hints: [
-      'Bring one table to the other. Count the rows: more than 5 borrowers?',
+      'Count the rows: are there more than 5?',
       'Any join with INNER works. Watch who appears twice.',
-      'Bring books over to borrowers (or the other way) and let go.',
+      'Bring the books table over to the borrowers table (or the other way) and let go.',
     ],
     winNote:
       'Wren and Mirela each have two books out, so each appears twice. A join repeats a row once per match.',
@@ -82,129 +90,129 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     goal: 'Show every order and who placed it, even an order with no customer.',
     hints: [
       'LEFT keeps every row of the table that stayed put. Which one should stay?',
-      'This time, leave orders where it is and bring customers over.',
-      'Leave orders where it is, bring customers over, let go, and choose LEFT.',
+      'This time, leave the orders table where it is and bring the customers table over.',
+      'Leave the orders table where it is, bring the customers table over, let go, and choose LEFT.',
     ],
   },
   'library-on-shelf': {
     goal: 'Which books are still on the shelf?',
     hints: [
       'A book on the shelf has no borrower.',
-      'Keep books still, bring borrowers over, choose LEFT, and look for NULL borrowers.',
-      'Leave books where it is, bring borrowers over, choose LEFT, then poke a NULL under the borrower ID.',
+      'Keep the books table still, bring the borrowers table over, choose LEFT, and look for NULL borrowers.',
+      'Leave the books table where it is, bring the borrowers table over, choose LEFT, then poke the NULL under {borrowers.id}.',
     ],
   },
   'library-nothing-out': {
     goal: 'Which borrower has nothing checked out?',
     hints: [
       'A LEFT join fills in NULL where nothing matched.',
-      'Keep borrowers still, choose LEFT, then poke a NULL in a book column.',
-      'Leave borrowers where it is, bring books over, choose LEFT, then poke a NULL under the book ID.',
+      'Keep the borrowers table still, choose LEFT, then poke a NULL in a book column.',
+      'Leave the borrowers table where it is, bring the books table over, choose LEFT, then poke the NULL under {books.id}.',
     ],
   },
   'school-twice': {
     goal: 'Pair each student with their club. One student shows up twice: why?',
     hints: [
       'Bring one table to the other, then count the rows.',
-      'Any join with INNER works. Then look at the club IDs.',
-      'Bring students over to clubs (or the other way) and let go.',
+      'Any join with INNER works. Then look at the {source:clubs.id} column of the clubs table.',
+      'Bring the students table over to the clubs table (or the other way) and let go.',
     ],
-    winNote: 'Choir and Drama share club id 3, so Ines appears twice. A data-entry mistake makes a join multiply rows.',
+    winNote: 'Choir and Drama share club ID 3, so Ines appears twice. A duplicated ID makes a join repeat rows.',
   },
   'library-every-book': {
     goal: 'List every book, and who has it, if anyone.',
     hints: [
       'Some books have no borrower. Which table should stay put?',
-      'Leave books where it is and choose LEFT.',
-      'Leave books where it is, bring borrowers over, let go, and choose LEFT.',
+      'Leave the books table where it is and choose LEFT.',
+      'Leave the books table where it is, bring the borrowers table over, let go, and choose LEFT.',
     ],
   },
   'library-no-due': {
     goal: 'Which borrowed book has no due date?',
     hints: [
-      'NULL can be stored in a table, too. Look at the due dates.',
-      'INNER keeps only borrowed books. Then poke the NULL due date.',
-      'Join with INNER (either way), then poke the NULL under Due.',
+      'NULL can be stored in a table, too. Look at the {books.due} column.',
+      'INNER keeps only borrowed books. Then poke the NULL under {books.due}.',
+      'Bring either table to the other, keep INNER, then poke the NULL under {books.due}.',
     ],
   },
   'shop-no-customer': {
     goal: 'Which order has no customer on file?',
     hints: [
       'One order points to no customer.',
-      'Keep orders still, choose LEFT, then poke a NULL in a customer column.',
-      'Leave orders where it is, bring customers over, choose LEFT, then poke a NULL under the customer ID.',
+      'Keep the orders table still, choose LEFT, then poke a NULL in a customer column.',
+      'Leave the orders table where it is, bring the customers table over, choose LEFT, then poke the NULL under {customers.id}.',
     ],
   },
   'school-every-club': {
     goal: 'Show every club with its members, including empty clubs.',
     hints: [
       'One club has no members. Which join keeps every club?',
-      'Leave clubs where it is and choose LEFT.',
-      'Leave clubs where it is, bring students over, let go, and choose LEFT.',
+      'Leave the clubs table where it is and choose LEFT.',
+      'Leave the clubs table where it is, bring the students table over, let go, and choose LEFT.',
     ],
   },
   'school-empty-club': {
     goal: 'Which club has no members yet?',
     hints: [
       'A LEFT join fills in NULL where nothing matched.',
-      'Keep clubs still, choose LEFT, then poke a NULL in a student column.',
-      'Leave clubs where it is, bring students over, choose LEFT, then poke a NULL under the student ID.',
+      'Keep the clubs table still, choose LEFT, then poke a NULL in a student column.',
+      'Leave the clubs table where it is, bring the students table over, choose LEFT, then poke the NULL under {students.id}.',
     ],
   },
   'school-every-student': {
     goal: 'Show every student and their club, even students without one.',
     hints: [
       'Some students have no club. Which table should stay put?',
-      'Leave students where it is and choose LEFT.',
-      'Leave students where it is, bring clubs over, let go, and choose LEFT.',
+      'Leave the students table where it is and choose LEFT.',
+      'Leave the students table where it is, bring the clubs table over, let go, and choose LEFT.',
     ],
   },
   'school-no-club': {
     goal: "Which students aren't in any club we know of?",
     hints: [
-      "Look at the club IDs: one is empty, and one points to a club that doesn't exist.",
-      'Keep students still, choose LEFT, then poke a NULL in a club column.',
-      'Leave students where it is, bring clubs over, choose LEFT, then poke a NULL under the club ID.',
+      "Look at the {source:students.clubId} column: one is empty, and one points to a club that doesn't exist.",
+      'Keep the students table still, choose LEFT, then poke a NULL in a club column.',
+      'Leave the students table where it is, bring the clubs table over, choose LEFT, then poke the NULL under {clubs.id}.',
     ],
   },
   'cafe-menu': {
     goal: 'Show the whole menu with its tickets, including drinks nobody ordered.',
     hints: [
       'Nobody ordered one of the drinks. Which join keeps every drink?',
-      'Leave drinks where it is and choose LEFT.',
-      'Leave drinks where it is, bring tickets over, let go, and choose LEFT.',
+      'Leave the drinks table where it is and choose LEFT.',
+      'Leave the drinks table where it is, bring the tickets table over, let go, and choose LEFT.',
     ],
   },
   'cafe-missing-drink': {
     goal: 'Which ticket is missing its drink?',
     hints: [
       'One ticket points to no drink.',
-      'Keep tickets still, choose LEFT, then poke a NULL in a drink column.',
-      'Leave tickets where it is, bring drinks over, choose LEFT, then poke a NULL under the drink ID.',
+      'Keep the tickets table still, choose LEFT, then poke a NULL in a drink column.',
+      'Leave the tickets table where it is, bring the drinks table over, choose LEFT, then poke the NULL under {drinks.id}.',
     ],
   },
   'cafe-no-milk': {
     goal: 'Which tickets were made without milk?',
     hints: [
-      'NULL can be stored in a table, too. Look at the milk column.',
-      'Join, then poke a NULL under Milk.',
-      'Join with INNER (either way), then poke a NULL under Milk.',
+      'NULL can be stored in a table, too. Look at the {tickets.milk} column.',
+      'Join with INNER, then poke a NULL under {tickets.milk}.',
+      'Bring either table to the other, keep INNER, then poke a NULL under {tickets.milk}.',
     ],
   },
   'cafe-every-ticket': {
     goal: 'Show every ticket and its drink, even one with no drink recorded.',
     hints: [
       'One ticket has no drink. Which table should stay put?',
-      'Leave tickets where it is and choose LEFT.',
-      'Leave tickets where it is, bring drinks over, let go, and choose LEFT.',
+      'Leave the tickets table where it is and choose LEFT.',
+      'Leave the tickets table where it is, bring the drinks table over, let go, and choose LEFT.',
     ],
   },
   'cafe-never-ordered': {
     goal: 'Which drink has never been ordered?',
     hints: [
-      'A LEFT join fills in NULL where nothing matched. But milk can be NULL, too.',
-      'Keep drinks still, choose LEFT, then poke a NULL ticket ID, not a NULL milk.',
-      'Leave drinks where it is, bring tickets over, choose LEFT, then poke the NULL under the ticket ID.',
+      'A LEFT join fills in NULL where nothing matched. But {tickets.milk} can be NULL, too.',
+      'Keep the drinks table still, choose LEFT, then poke the NULL under {tickets.id}, not one under {tickets.milk}.',
+      'Leave the drinks table where it is, bring the tickets table over, choose LEFT, then poke the NULL under {tickets.id}.',
     ],
   },
 };

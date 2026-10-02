@@ -21,7 +21,13 @@ and its tests) is written; phases 2-5 aren't started.
   panel.
 - Streak: daily only, local calendar day, no freeze.
 - All player-facing text lives in `src/data/copy.ts`, for review before
-  phase 3.
+  phase 3. Copy rules (from the copy review): hints name tables as tables
+  ("the customers table"), and never spell out a column. They use a
+  placeholder (`{orders.id}`, or `{source:students.clubId}` for a source-slab
+  header) that `src/data/puzzle-text.ts` resolves to the header the player
+  sees (`O.ID`, `CLUB ID`), from the same `columnHeaderText` the slabs
+  render with. Tests check that every placeholder resolves and every "poke
+  the NULL under X" names a displayed result header.
 - Phase 2's readout covers the bar's clearance and pinch distances, as it
   does for the control.
 - **Phase 2 is a checkpoint:** stop and report after shop puzzles 1-3, for
@@ -574,6 +580,99 @@ nothing; their row count is the clue.
 If phase 3 runs late, the fallback is a plain fade between datasets instead of
 the sink and rise. If even that slips, ship the 5 shop puzzles plus the daily
 (shop only), so the daily would repeat every 5 days.
+
+## Phase 2 plan: smallest playable (awaiting approval)
+
+Scope: shop puzzles 1–3 on the existing tables, so no table switching. It
+ends at a checkpoint for hands-on play. Fan-out highlighting, other datasets,
+the daily and the welcome panel come in later phases.
+
+**New code**
+
+| Where | What |
+| --- | --- |
+| `src/data/puzzle-session.ts` (pure, tested) | The session for one puzzle: hints shown (0–3), solved, and solved with the full answer. Events: `load`, `showHint`, `evaluate(comparison)`, `next`. A win is recorded on the first matching evaluation and kept. |
+| `src/join-bridge.ts` | A narrow link between the join and challenge systems, so neither imports the other. The join system publishes its query state (`QuerySpec`, or none) and a "settled" pulse after each join sequence, toggle or filter animation. The challenge system calls `setFilter`, `clearFilter` and `reset`. |
+| `src/challenge-system.ts` | Loads the puzzle, owns the card, bar and silhouette, evaluates on each settle (`compareToTarget`), applies the diff markers, handles Hint and Next, and saves progress (`progress.ts`, guarded localStorage). |
+| `src/challenge-view.ts` | UIKit builders, sized by angle like the slabs: the **card** (title, a 2-line goal, a 2-line status line for the intro, diff summary or win line), the **bar** (Hint, Next and the filter chip `WHERE o.id IS NULL  Clear`, each ≥ 3 × 2 cm), and the **silhouette** (the target's headers and outline rows, with `revealRow` filled). |
+
+**Changes to existing code**
+
+- **`join-system.ts`:**
+  - Handles the `setFilter` / `clearFilter` transitions. Filtered rows fade
+    out (0.2 s). The rows that remain slide up to close the gaps and the
+    height animates.
+  - That takes one relayout per filter change: `display: none`, then the
+    moved rows are offset back to where they were and tweened to 0. It's the
+    same kind of discrete relayout the INNER/LEFT toggle already does, never
+    one per frame.
+  - Publishes state to the bridge, and a reset on Next. A reset separates;
+    then the slabs glide back to their start poses through a new placement
+    hook, `replaceSlabs()`, from the desk surface already found.
+  - NULL cells become targets: a UIKit `click` from poke and ray (the result
+    entity gets `PokeInteractable` / `RayInteractable`), plus pinch hit tests
+    in `updatePinchSelect`, beside the control's. A poke on any cell of a
+    ghost row uses the column under the finger.
+- **`table-slab-view.ts`:**
+  - A per-row diff gutter (`+`, opacity 0.55 for extra rows).
+  - Prebuilt placeholder rows (dashed outline, `?`), up to the 12-row cap,
+    shown by signal.
+  - A reserved third caption line for `WHERE`.
+  - The cell geometry the pinch hit test needs.
+- **`desk-placement.ts`:** `replaceSlabs()`, as above.
+- **`sound.ts`:** `playWin` (a rising three-note arpeggio, at the resolve
+  level) and `playHint` (a soft chime). The filter reuses `click` + `slide`.
+- **The win:**
+  - The result slab's edge glows and the SQL caption brightens.
+  - The card shows "You just wrote this query.", or "That's this query:" if
+    the answer hint was shown.
+  - Next pulses.
+- **Coach (puzzle 3):** when a LEFT result first shows NULLs, the card shows
+  the antijoin intro and the NULL explainer, and the ghost-row cells pulse
+  once.
+- **Debug** (with `debug`):
+  - keys: `H` hint, `F` filter on the first NULL column (a simulated poke),
+    `N` next, `I` print the diff (row labels and statuses);
+  - flags: `puzzle=<id>`, `resetProgress`, `mode=free`.
+- **Readout** (extending the join readout):
+  - the card's and bar's edges against the 80° window;
+  - the bar's distance and slab clearance;
+  - pinch distances to each bar button;
+  - palm-to-slab distance when pinching the lowest NULL row (the §4 risk).
+
+**Verify (emulator, seated head)**
+
+1. `typecheck` and `test` pass, including the new `puzzle-session.test.ts`.
+2. Play 1 → 3 by hand: pinch-grab joins, the control, Hint, Next, and a NULL
+   poke by ray and by pinch. Repeat with debug keys.
+3. Screenshots:
+   - the silhouette before the join;
+   - puzzle 2's diff after an INNER join (1 missing);
+   - puzzle 2 won;
+   - puzzle 3 with LEFT (10 extra);
+   - puzzle 3 filtered and won.
+4. Readout within 80° and 0.60 m. The bar and NULL-row clearances are
+   logged, with the fallback (a taller band) if a NULL-row pinch is within
+   grab range.
+   - The 2-line status line makes the card ~9.6 cm tall, not the 6.8 cm in
+     §5: about +2.7°, so the estimated total is ≈ 73° of 80°.
+5. No long tasks at join start, at a filter change, or at Next.
+6. A reload resumes at the last puzzle; `resetProgress` starts over.
+7. Free play (`mode=free`) is unchanged from today.
+
+Then stop and report.
+
+**Decisions for you**
+
+1. **Production during phases 2–3:** I recommend keeping today's sandbox in
+   production and turning challenge mode on only in dev (`mode=free` gives
+   the sandbox in dev). Production switches over in phase 4, when the
+   welcome panel gets Start and Free play. That way a push in between never
+   ships a 3-puzzle game.
+2. **Next on the same tables:** the slabs glide back to their start poses
+   (recommended, a clean start), or stay where the player left them.
+3. **After puzzle 3, phase 2 only:** the card says "More puzzles soon", and
+   Next does nothing.
 
 ## 10. Risks and open questions for you
 
