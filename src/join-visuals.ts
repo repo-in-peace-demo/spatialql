@@ -150,9 +150,9 @@ export class EdgeGlow {
   private readonly _local = new Vector3();
   private readonly _quat = new Quaternion();
 
-  constructor(width: number) {
+  constructor(width: number, color: string = COLOR_PREVIEW) {
     this.material = new MeshBasicMaterial({
-      color: new Color(COLOR_PREVIEW),
+      color: new Color(color),
       transparent: true,
       opacity: 0,
       depthWrite: false,

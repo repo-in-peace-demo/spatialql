@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { columnHeaderText } from './join-result.js';
 import { getPuzzle, PUZZLES, runPuzzleQuery, type Puzzle } from './puzzles.js';
-import { puzzleText, renderPuzzleText, resultHeaders } from './puzzle-text.js';
+import {
+  FANOUT_TAKEAWAY_MAX_CHARS,
+  puzzleText,
+  renderPuzzleText,
+  resultHeaders,
+  TAKEAWAY_MAX_CHARS,
+} from './puzzle-text.js';
 
 const allText = (puzzle: Puzzle): string[] => {
   const text = puzzleText(puzzle);
-  return [text.goal, ...text.hints, text.winNote ?? ''];
+  return [text.goal, ...text.hints, text.takeaway];
 };
 
 describe('puzzle text', () => {
@@ -30,6 +36,20 @@ describe('puzzle text', () => {
       }
     },
   );
+
+  it.each(PUZZLES.map((puzzle): [string, Puzzle] => [puzzle.id, puzzle]))(
+    '%s: the takeaway fits the card (one line; two for fan-out)',
+    (_id, puzzle) => {
+      const { takeaway } = puzzleText(puzzle);
+      const limit = puzzle.concept === 'fanout' ? FANOUT_TAKEAWAY_MAX_CHARS : TAKEAWAY_MAX_CHARS;
+      expect(takeaway.length).toBeGreaterThan(0);
+      expect(takeaway.length, takeaway).toBeLessThanOrEqual(limit);
+    },
+  );
+
+  it('the trap puzzle names its columns as shown', () => {
+    expect(puzzleText(getPuzzle('cafe-never-ordered')).takeaway).toBe('Testing T.ID, not MILK, ignores stored NULLs.');
+  });
 
   it('result headers are the same in either join direction', () => {
     for (const puzzle of PUZZLES) {

@@ -22,7 +22,17 @@ import { Quaternion, Vector3, type World } from '@iwsdk/core';
 /** Overall loudness. Subtle by design; a limiter keeps peaks soft. */
 export const MASTER_VOLUME = 0.3;
 
-export type SoundName = 'snap' | 'lineTick' | 'resolve' | 'dropTap' | 'click' | 'slideIn' | 'slideOut' | 'release';
+export type SoundName =
+  | 'snap'
+  | 'lineTick'
+  | 'resolve'
+  | 'dropTap'
+  | 'click'
+  | 'slideIn'
+  | 'slideOut'
+  | 'release'
+  | 'win'
+  | 'hint';
 
 /** Dev-only observer: name, scheduled delay (s), measured peak (dBFS, or null if not measurable). */
 export type SoundHook = (name: SoundName, delaySeconds: number, peakDb: number | null) => void;
@@ -45,6 +55,10 @@ const TICK_GAIN = 0.5;
 /** Later (higher) ticks measure quieter; this extra gain at the last tick evens the fan-out. */
 const TICK_RISE_GAIN = 0.35;
 const RESOLVE_GAIN = 0.42;
+/** Challenge win: a rising arpeggio at about the resolve's level. */
+const WIN_GAIN = 0.4;
+/** Hint: a soft chime, quieter than the win. */
+const HINT_GAIN = 0.22;
 const HUM_MAX_GAIN = 0.12;
 const HUM_BASE_HZ = 160;
 const HUM_RISE_HZ = 100;
@@ -237,6 +251,41 @@ class JoinSounds {
         osc.type = 'triangle';
         osc.frequency.value = freq;
         envelope(ctx, osc, filter, t + offset, RESOLVE_GAIN, 0.005, 0.22);
+      }
+    });
+  }
+
+  /** Challenge solved: three rising notes (a major triad), brighter than the resolve. */
+  playWin(at: Position, delay = 0): void {
+    this.oneShot('win', at, delay, (ctx, out, t) => {
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 4000;
+      filter.connect(out);
+      for (const [freq, offset] of [
+        [523.25, 0],
+        [659.25, 0.1],
+        [783.99, 0.2],
+      ] as const) {
+        const osc = ctx.createOscillator();
+        osc.type = 'triangle';
+        osc.frequency.value = freq;
+        envelope(ctx, osc, filter, t + offset, WIN_GAIN, 0.006, 0.35);
+      }
+    });
+  }
+
+  /** Hint shown: one soft, bell-like chime. */
+  playHint(at: Position, delay = 0): void {
+    this.oneShot('hint', at, delay, (ctx, out, t) => {
+      for (const [freq, gain] of [
+        [880, HINT_GAIN],
+        [1760, HINT_GAIN * 0.3],
+      ] as const) {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        envelope(ctx, osc, out, t, gain, 0.004, 0.4);
       }
     });
   }

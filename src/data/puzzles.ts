@@ -359,6 +359,30 @@ export function getPuzzle(id: PuzzleId): Puzzle {
   return puzzle;
 }
 
+/**
+ * Whether `puzzle` plays on exactly the tables on the desk (`tableIds`, in
+ * any order). A puzzle may only become active, and a result may only be
+ * evaluated against it, when this holds: its target means nothing on other
+ * tables.
+ */
+export function puzzleMatchesTables(puzzle: Puzzle, tableIds: readonly string[]): boolean {
+  return (
+    tableIds.length === puzzle.tables.length &&
+    puzzle.tables.every((id) => tableIds.includes(id)) &&
+    tableIds.every((id) => puzzle.tables.includes(id))
+  );
+}
+
+/**
+ * Whether `id` may become the active puzzle: it's in the playable range
+ * (phase 2: the first three practice puzzles) and its tables are the ones on
+ * the desk. Every load goes through this, whatever asked for it (Next, a
+ * debug key, saved progress, later the daily).
+ */
+export function canActivatePuzzle(id: string, playable: readonly PuzzleId[], deskTableIds: readonly string[]): boolean {
+  return isPuzzleId(id) && playable.includes(id) && puzzleMatchesTables(getPuzzle(id), deskTableIds);
+}
+
 /** The first puzzle in practice order with this concept: where its intro shows. */
 export function introducesConcept(puzzle: Puzzle): boolean {
   return PUZZLES.find((candidate) => candidate.concept === puzzle.concept) === puzzle;

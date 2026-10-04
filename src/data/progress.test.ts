@@ -13,6 +13,7 @@ import {
   practiceSolvedCount,
   PROGRESS_STORAGE_KEY,
   recordDailySolve,
+  sanitizeProgress,
   saveProgress,
   serializeProgress,
   type DailyProgress,
@@ -91,6 +92,36 @@ describe('solving and unlocking', () => {
     const seen = markConceptSeen(emptyProgress(), 'left');
     expect(markConceptSeen(seen, 'left')).toBe(seen);
     expect(seen.seenConcepts).toEqual(['left']);
+  });
+});
+
+describe('sanitizeProgress', () => {
+  const PHASE_2 = PRACTICE_ORDER.slice(0, 3);
+
+  it('keeps consistent progress unchanged', () => {
+    let progress = markSolved(emptyProgress(), PRACTICE_ORDER[0], DAY, 0);
+    progress = { ...markSolved(progress, PRACTICE_ORDER[1], DAY, 1), lastPuzzle: PRACTICE_ORDER[2] };
+    expect(sanitizeProgress(progress, PHASE_2, PRACTICE_ORDER, true)).toBe(progress);
+  });
+
+  it('drops solves beyond the playable range, and a resume point there', () => {
+    let progress = markSolved(emptyProgress(), PRACTICE_ORDER[0], DAY, 0);
+    progress = markSolved(progress, PRACTICE_ORDER[1], DAY, 0);
+    progress = markSolved(progress, PRACTICE_ORDER[2], DAY, 0);
+    progress = { ...markSolved(progress, PRACTICE_ORDER[3], DAY, 0), lastPuzzle: PRACTICE_ORDER[3] };
+    const clean = sanitizeProgress(progress, PHASE_2, PRACTICE_ORDER, true);
+    expect(Object.keys(clean.solved).sort()).toEqual([...PHASE_2].sort());
+    expect(clean.lastPuzzle).toBeNull();
+    expect(nextPracticePuzzle(clean, PHASE_2)).toBeNull();
+  });
+
+  it('with in-order-only progress, drops solves after the first unsolved puzzle', () => {
+    let progress = markSolved(emptyProgress(), PRACTICE_ORDER[0], DAY, 0);
+    progress = markSolved(progress, PRACTICE_ORDER[2], DAY, 0);
+    const clean = sanitizeProgress(progress, PHASE_2, PRACTICE_ORDER, true);
+    expect(Object.keys(clean.solved)).toEqual([PRACTICE_ORDER[0]]);
+    // With dailies, an out-of-order solve is legitimate and kept.
+    expect(sanitizeProgress(progress, PRACTICE_ORDER, PRACTICE_ORDER, false)).toBe(progress);
   });
 });
 

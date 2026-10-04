@@ -47,23 +47,37 @@ import {
   type Object3D,
   type Signal,
 } from '@iwsdk/core';
-import { buildJoinResultTable, fullJoinPairings, joinTables, requireJoinKeys } from './data/join-result.js';
-import { buildJoinSql } from './data/join-sql.js';
+import { CHALLENGE_MODE } from './challenge-mode.js';
+import type { RowStatus } from './data/compare.js';
+import {
+  buildJoinResultTable,
+  fullJoinPairings,
+  joinTables,
+  requireJoinKeys,
+  type JoinResultTable,
+} from './data/join-result.js';
+import { buildJoinSql, buildWhereSql } from './data/join-sql.js';
 import { INITIAL_JOIN_STATE, transition, type JoinEvent, type JoinState } from './data/join-state.js';
 import { assignKeyTints } from './data/key-tints.js';
+import { RESULT_ROW_CAP } from './data/puzzles.js';
+import { filterForColumn, nullFilterMask, sameFilter } from './data/query.js';
 import { CUSTOMERS_TABLE, ORDERS_TABLE } from './data/sample-data.js';
-import type { CellValue, JoinType, Table } from './data/types.js';
+import type { CellValue, JoinType, NullFilter, Table } from './data/types.js';
 import { devFlag } from './dev-flags.js';
+import { joinBridge, type ChallengeLayout, type JoinControls, type PlacedElement } from './join-bridge.js';
 import { JoinDebug, type JoinDebugHost, type JoinStats } from './join-debug.js';
 import { COLOR_MATCH_LINE, COLOR_PREVIEW, EdgeGlow, lineColorForTint, SegmentBatch } from './join-visuals.js';
+import { readJointsPoint, readPinchPoint, readWristPoint } from './pinch.js';
 import { JoinDocked, JoinResultSlab, TableSlab, TableSlabRuntime } from './table-slab-component.js';
 import {
   buildJoinTypeControl,
   buildTableSlabDocument,
+  captionColor,
   controlOptionStyle,
   MAX_RESULT_ROWS,
   rowCenterLocalY,
   setRowTint,
+  slabBorderColor,
   slabBottomLocalY,
   slabTopLocalY,
   type CellOffset,
@@ -220,6 +234,30 @@ const CONTROL_PINCH_DEPTH_METERS = 0.03;
 /** Grab sphere radius of IWSDK's grab pointer, for the clearance readout. */
 const GRAB_SPHERE_RADIUS_METERS = 0.07;
 
+// --- Challenge mode ------------------------------------------------------------------
+/** Clear gap between the join-type control and the puzzle bar, side by side in the band (never less). */
+const BAR_CONTROL_GAP_METERS = 0.015;
+/** Gap between the result slot's top edge and the puzzle card. */
+const CARD_GAP_METERS = 0.015;
+/** A filter change: leaving rows fade out, then the rest slide to their new slots. */
+const FILTER_FADE_SECONDS = 0.2;
+const FILTER_SLIDE_SECONDS = 0.25;
+/** Rows the answer doesn't have: dimmed, with a `+` marker. */
+const DIFF_EXTRA_OPACITY = 0.55;
+const DIFF_FADE_SECONDS = 0.2;
+/** A poke and a ray select (or a pinch) on the same NULL cell count once. */
+const NULL_ACTIVATION_DEBOUNCE_SECONDS = 0.3;
+/** A pinch selects a NULL cell within this of it in plane (and CONTROL_PINCH_DEPTH_METERS off it). */
+const NULL_PINCH_MARGIN_METERS = 0.01;
+/** A ray hit or fingertip counts as on a NULL cell within this of its rectangle. */
+const NULL_RAY_TOLERANCE_METERS = 0.003;
+/** A fingertip pokes when it crosses to within this of the result slab's surface. */
+const NULL_POKE_DEPTH_METERS = 0.01;
+const INDEX_TIP: readonly XRHandJoint[] = ['index-finger-tip'];
+/** Home glide on Next: both slabs return to where they started. */
+const HOME_GLIDE_SECONDS = 0.45;
+const COLOR_WIN_GLOW = '#f0b43c';
+
 const UP = new Vector3(0, 1, 0);
 const HANDS = ['left', 'right'] as const;
 
@@ -249,6 +287,18 @@ type ResultView = {
   rightRowTints: Map<number, string>;
   sql: Record<JoinType, [string, string]>;
   stats: Omit<JoinStats, 'resultRows' | 'joinType'> & { innerRows: number; leftRows: number };
+  /** The full LEFT JOIN result the slab shows (INNER and the NULL filter hide rows of it). */
+  result: JoinResultTable;
+  leftTable: Table;
+  rightTable: Table;
+  /** Per result row: currently displayed. */
+  rowShown: boolean[];
+  /** Per result row: its display slot (0 = top), or -1 while hidden. */
+  rowSlot: number[];
+  /** Per result row: the indices of its columns holding NULL. */
+  nullColumns: number[][];
+  /** Challenge mode: placeholder rows shown for rows the answer still needs. */
+  placeholdersShown: number;
 };
 
 type DockAnimation = {
@@ -262,12 +312,28 @@ type DockAnimation = {
   duration: number;
 };
 
+function dockAnimation(duration: number): DockAnimation {
+  return {
+    active: false,
+    slab: null,
+    fromPos: new Vector3(),
+    fromQuat: new Quaternion(),
+    toPos: new Vector3(),
+    toQuat: new Quaternion(),
+    elapsed: 0,
+    duration,
+  };
+}
+
+/** Where a slab sat before this puzzle's first grab or join (challenge mode's home glide). */
+type HomePose = { pos: Vector3; quat: Quaternion; set: boolean };
+
 export class JoinSystem
   extends createSystem({
     sources: { required: [TableSlab, TableSlabRuntime], excluded: [JoinResultSlab] },
     held: { required: [TableSlab, Grabbed] },
   })
-  implements JoinDebugHost
+  implements JoinDebugHost, JoinControls
 {
   private state: JoinState = INITIAL_JOIN_STATE;
   private readonly sources = new Map<string, SourceSlab>();
@@ -285,16 +351,30 @@ export class JoinSystem
   private approachMoving: SourceSlab | null = null;
   private approachStationary: SourceSlab | null = null;
   private readonly separateClock = signal(0);
-  private readonly dock: DockAnimation = {
-    active: false,
-    slab: null,
-    fromPos: new Vector3(),
-    fromQuat: new Quaternion(),
-    toPos: new Vector3(),
-    toQuat: new Quaternion(),
-    elapsed: 0,
-    duration: DOCK_DURATION_SECONDS,
-  };
+  private readonly dock: DockAnimation = dockAnimation(DOCK_DURATION_SECONDS);
+
+  // Challenge mode (all inert in free play: `challengeLayout` stays null).
+  private challengeLayout: ChallengeLayout | null = null;
+  private silhouette: PlacedElement | null = null;
+  private layoutDirty = true;
+  private readonly homes = new Map<string, HomePose>();
+  private readonly glides = new Map<string, DockAnimation>();
+  private winLook = false;
+  private winGlowLeft!: EdgeGlow;
+  private winGlowRight!: EdgeGlow;
+  /** Fires the challenge's `onSettled` once an animation finishes (a tween's completion). */
+  private readonly settleClock = signal(0);
+  /** Times the second step of a filter change (the relayout after rows fade out). */
+  private readonly relayoutClock = signal(0);
+  private lastNullActivation = -Infinity;
+  private readonly _nullHit = { row: -1, column: -1, distance: Infinity, depth: 0 };
+  /** Per hand: the index fingertip's last distance in front of the result slab (for pokes). */
+  private readonly pokeDepth = { left: Infinity, right: Infinity };
+  private readonly _rayOrigin = new Vector3();
+  private readonly _rayDir = new Vector3();
+  private readonly _pokeTip = new Vector3();
+  private readonly _layoutA = new Vector3();
+  private readonly _layoutB = new Vector3();
 
   private visualsRoot!: Group;
   private lines!: SegmentBatch;
@@ -336,12 +416,16 @@ export class JoinSystem
     this.hints = new SegmentBatch(PREVIEW_HINT_COUNT, COLOR_PREVIEW, 0.002, 0.45);
     this.stationaryGlow = new EdgeGlow(GLOW_WIDTH_METERS);
     this.movingGlow = new EdgeGlow(GLOW_WIDTH_METERS);
+    this.winGlowLeft = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_WIN_GLOW);
+    this.winGlowRight = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_WIN_GLOW);
     this.visualsRoot.add(
       this.lines.mesh,
       this.pulses.mesh,
       this.hints.mesh,
       this.stationaryGlow.mesh,
       this.movingGlow.mesh,
+      this.winGlowLeft.mesh,
+      this.winGlowRight.mesh,
     );
     const visualsEntity = this.world.createTransformEntity(this.visualsRoot, {
       parent: this.world.sceneEntity,
@@ -393,6 +477,8 @@ export class JoinSystem
         this.hints.dispose();
         this.stationaryGlow.dispose();
         this.movingGlow.dispose();
+        this.winGlowLeft.dispose();
+        this.winGlowRight.dispose();
         visualsEntity.dispose();
         this.debug?.dispose();
       },
@@ -403,13 +489,41 @@ export class JoinSystem
     }
     this.queries.sources.subscribe('qualify', (entity) => this.registerSource(entity));
     this.queries.held.subscribe('disqualify', (entity) => this.onRelease(entity));
+
+    if (CHALLENGE_MODE) {
+      joinBridge.join = this;
+      // Home poses: where each slab was before this puzzle first moved it.
+      this.queries.held.subscribe('qualify', (entity) => {
+        const source = this.sourceFor(entity);
+        if (source) {
+          this.captureHome(source);
+        }
+      });
+      // A new session re-places the slabs: forget the old homes, re-lay out.
+      this.cleanupFuncs.push(
+        this.world.visibilityState.subscribe(() => {
+          for (const home of this.homes.values()) {
+            home.set = false;
+          }
+          this.layoutDirty = true;
+        }),
+        () => {
+          joinBridge.join = null;
+        },
+      );
+    }
   }
 
   update(delta: number): void {
     this.tweens.update(delta);
     this.updateDock(delta);
+    this.updateGlides(delta);
     sounds.update();
     this.unlockSoundOnPinch();
+    if (this.challengeLayout) {
+      this.updateChallengeLayout();
+      this.updateWinGlow();
+    }
 
     this.approach = 0;
     switch (this.state.phase) {
@@ -427,6 +541,73 @@ export class JoinSystem
     this.updatePreviewVisuals();
     this.updateLines();
     this.updatePinchSelect();
+    if (this.challengeLayout) {
+      this.updateNullRayAndPoke();
+    }
+  }
+
+  /**
+   * Challenge mode: ray selects and fingertip pokes on NULL cells, tested
+   * against the result slab's own geometry (UIKit clicks don't reach the
+   * result slab in the emulator, so this doesn't rely on them).
+   * - Ray: on select start, each input's target ray is intersected with the
+   *   slab's plane; a hit inside a NULL cell pokes it.
+   * - Poke: an index fingertip crossing the surface (from in front to within
+   *   NULL_POKE_DEPTH_METERS) over a NULL cell pokes it.
+   * A pinch on the same press may also land; the activation debounce makes it count once.
+   */
+  private updateNullRayAndPoke(): void {
+    const view = this.active;
+    if (!view || this.state.phase !== 'joined' || view.doc.fade.peek() < 0.5) {
+      this.pokeDepth.left = Infinity;
+      this.pokeDepth.right = Infinity;
+      return;
+    }
+    view.object.updateWorldMatrix(true, false);
+    for (const hand of HANDS) {
+      // Ray.
+      if (this.input.xr.gamepads[hand]?.getSelectStart()) {
+        const raySpace = this.player.raySpaces[hand];
+        raySpace.updateWorldMatrix(true, false);
+        this._rayOrigin.setFromMatrixPosition(raySpace.matrixWorld);
+        raySpace.getWorldQuaternion(this._q2);
+        this._rayDir.set(0, 0, -1).applyQuaternion(this._q2).add(this._rayOrigin);
+        // Into the slab's frame, where its surface is z = 0.
+        view.object.worldToLocal(this._rayOrigin);
+        view.object.worldToLocal(this._rayDir);
+        this._rayDir.sub(this._rayOrigin);
+        if (this._rayDir.z < -1e-4 && this._rayOrigin.z > 0) {
+          const t = -this._rayOrigin.z / this._rayDir.z;
+          this._a.copy(this._rayOrigin).addScaledVector(this._rayDir, t);
+          view.object.localToWorld(this._a);
+          if (this.nearestNullCell(view, this._a) && this._nullHit.distance <= NULL_RAY_TOLERANCE_METERS) {
+            if (import.meta.env.DEV && this.debug) {
+              this.debug.note(`${hand} ray select on the NULL cell at row ${this._nullHit.row}, column ${this._nullHit.column}`);
+            }
+            this.activateNullCell(view.key, this._nullHit.row, this._nullHit.column);
+          }
+        }
+      }
+      // Poke.
+      const source = this.input.xr.getPrimaryInputSource(hand);
+      if (!source?.hand || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
+        this.pokeDepth[hand] = Infinity;
+        continue;
+      }
+      this._a.copy(this._pokeTip);
+      view.object.worldToLocal(this._a);
+      const depth = this._a.z;
+      const before = this.pokeDepth[hand];
+      this.pokeDepth[hand] = depth;
+      if (before > NULL_POKE_DEPTH_METERS && depth <= NULL_POKE_DEPTH_METERS && depth > -NULL_POKE_DEPTH_METERS) {
+        if (this.nearestNullCell(view, this._pokeTip) && this._nullHit.distance <= NULL_RAY_TOLERANCE_METERS) {
+          if (import.meta.env.DEV && this.debug) {
+            this.debug.note(`${hand} fingertip poke on the NULL cell at row ${this._nullHit.row}, column ${this._nullHit.column}`);
+          }
+          this.activateNullCell(view.key, this._nullHit.row, this._nullHit.column);
+        }
+      }
+    }
   }
 
   /** A pinch is a WebXR user gesture: try to start audio until it runs. */
@@ -529,11 +710,19 @@ export class JoinSystem
       return false;
     }
     this.state = next;
+    // A pending "settled" belongs to the previous state.
+    this.tweens.cancel(this.settleClock);
 
     if (next.phase === 'joined' && prev.phase !== 'joined') {
       this.beginJoin(next.left, next.right, next.joinType);
     } else if (next.phase === 'joined' && prev.phase === 'joined' && next.joinType !== prev.joinType) {
       this.applyJoinTypeChange(prev.joinType, next.joinType);
+    } else if (
+      next.phase === 'joined' &&
+      prev.phase === 'joined' &&
+      !sameFilter(prev.filter ?? null, next.filter ?? null)
+    ) {
+      this.applyFilterChange();
     } else if (next.phase === 'separating') {
       this.beginSeparate();
     } else if (next.phase === 'previewing') {
@@ -542,6 +731,9 @@ export class JoinSystem
 
     if (import.meta.env.DEV && this.debug) {
       this.debug.logTransition(event, prev, next, this.currentStats(next));
+    }
+    if (next.phase !== prev.phase) {
+      joinBridge.challenge?.onPhase(next.phase);
     }
     return true;
   }
@@ -572,6 +764,9 @@ export class JoinSystem
       return;
     }
     this.sources.set(tableId, { id: tableId, entity, object, doc, table });
+    this.homes.set(tableId, { pos: new Vector3(), quat: new Quaternion(), set: false });
+    this.glides.set(tableId, dockAnimation(HOME_GLIDE_SECONDS));
+    this.layoutDirty = true;
     // Build every join direction's result slab up front (startup, not mid-interaction).
     for (const other of this.sources.values()) {
       if (other.id !== tableId) {
@@ -615,10 +810,21 @@ export class JoinSystem
     const result = buildJoinResultTable(left, right, joinTables(left, right, 'left'), 'left');
     const ghostRows = result.lineage.flatMap((l, index) => (l.ghost ? [index] : []));
     const sql = { inner: buildJoinSql(left, right, 'inner'), left: buildJoinSql(left, right, 'left') };
+    // Challenge mode reserves a third caption line for `WHERE ... IS NULL`
+    // (hidden until a filter is set, so filtering never relayouts the
+    // caption), sized for every column a filter could name.
+    const whereLines = CHALLENGE_MODE
+      ? result.columns.map((_, index) => buildWhereSql(left, right, filterForColumn(left, right, result, index)))
+      : [];
     const doc = buildTableSlabDocument(result.table, {
       maxRows: MAX_RESULT_ROWS,
       hiddenRows: new Set(ghostRows),
-      caption: { lines: [...sql.inner], fitLines: [...sql.inner, ...sql.left] },
+      caption: CHALLENGE_MODE
+        ? { lines: [...sql.inner, whereLines[0] ?? ''], fitLines: [...sql.inner, ...sql.left, ...whereLines] }
+        : { lines: [...sql.inner], fitLines: [...sql.inner, ...sql.left] },
+      ...(CHALLENGE_MODE
+        ? { diffGutter: true, placeholderRows: RESULT_ROW_CAP, reserveRows: RESULT_ROW_CAP }
+        : {}),
       anchorTop: true,
       // Same angular text size as the source slabs, at the result's own distance.
       text: slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS),
@@ -634,7 +840,28 @@ export class JoinSystem
     doc.fade.value = 0;
     doc.document.visible = false;
     doc.document.position.set(0, PARKED_Y, 0);
+    if (CHALLENGE_MODE && doc.captionOpacity[2]) {
+      doc.captionOpacity[2].value = 0;
+    }
     const entity = this.world.createTransformEntity(doc.document);
+
+    // Every NULL cell (stored, or a LEFT JOIN ghost) is a poke / ray target in
+    // challenge mode: it filters the result to rows where that column IS NULL.
+    // One listener on the whole slab finds the cell from the hit point, with
+    // the same geometry as the pinch test, so a press on any layer of a row
+    // (background, outline, text) counts.
+    const nullColumns = result.table.rows.map((row) =>
+      result.columns.flatMap((column, index) => (row[column.key] === null ? [index] : [])),
+    );
+    if (CHALLENGE_MODE) {
+      // Interactable from the start (it's parked out of sight until shown);
+      // the slab itself is never grabbable.
+      entity.addComponent(PokeInteractable, {});
+      entity.addComponent(RayInteractable, {});
+      const onClick = (event: unknown) => this.onResultClick(key, event);
+      doc.root.addEventListener('click', onClick);
+      this.cleanupFuncs.push(() => doc.root.removeEventListener('click', onClick));
+    }
     // JoinResultSlab first, so the entity never qualifies as a source slab.
     entity.addComponent(JoinResultSlab, {});
     entity.addComponent(TableSlab, { tableId: result.table.id });
@@ -702,9 +929,444 @@ export class JoinSystem
         innerRows: inner.length,
         leftRows: result.lineage.length,
       },
+      result,
+      leftTable: left,
+      rightTable: right,
+      rowShown: result.lineage.map((l) => !l.ghost),
+      rowSlot: [],
+      nullColumns,
+      placeholdersShown: 0,
     };
+    updateRowSlots(view);
     this.results.set(key, view);
     return view;
+  }
+
+  // --- Challenge mode (JoinControls) -------------------------------------------------
+
+  get joinState(): JoinState {
+    return this.state;
+  }
+
+  deskTableIds(): string[] {
+    return [...this.sources.keys()];
+  }
+
+  setChallengeLayout(layout: ChallengeLayout): void {
+    this.challengeLayout = layout;
+    this.layoutDirty = true;
+  }
+
+  setSilhouette(silhouette: PlacedElement | null): void {
+    this.silhouette = silhouette;
+    if (silhouette) {
+      silhouette.object.visible = this.state.phase === 'idle' || this.state.phase === 'previewing';
+    }
+    this.layoutDirty = true;
+  }
+
+  requestLayout(): void {
+    this.layoutDirty = true;
+    // Joined: the band (control + bar) and the card are placed with the
+    // result; re-place now (e.g. the bar just resized for the filter chip).
+    const view = this.active;
+    if (this.state.phase === 'joined' && view) {
+      const left = this.sources.get(view.leftId);
+      const right = this.sources.get(view.rightId);
+      if (left && right) {
+        this.placeResult(view, left, right);
+      }
+    }
+  }
+
+  requestClearFilter(): void {
+    this.applyTransition({ type: 'clearFilter' });
+  }
+
+  resetToHome(): void {
+    if (this.state.phase === 'joined') {
+      this.applyTransition({ type: 'pullApart' });
+    }
+    for (const source of this.sources.values()) {
+      const home = this.homes.get(source.id);
+      const glide = this.glides.get(source.id);
+      if (!home?.set || !glide || source.entity.hasComponent(Grabbed)) {
+        continue;
+      }
+      glide.active = true;
+      glide.slab = source;
+      glide.fromPos.copy(source.object.position);
+      glide.fromQuat.copy(source.object.quaternion);
+      glide.toPos.copy(home.pos);
+      glide.toQuat.copy(home.quat);
+      glide.elapsed = 0;
+    }
+    this.layoutDirty = true;
+  }
+
+  applyDiff(rowStatus: readonly RowStatus[] | null, missing: number): void {
+    if (this.active && this.state.phase === 'joined') {
+      this.setDiff(this.active, rowStatus, missing);
+    }
+  }
+
+  setWinLook(won: boolean): void {
+    this.winLook = won;
+    const view = this.active;
+    if (view) {
+      view.doc.root.setProperties({ borderColor: slabBorderColor(won) });
+      for (const line of view.doc.captionLines) {
+        line.setProperties({ color: captionColor(won) });
+      }
+    }
+    if (!won) {
+      this.winGlowLeft.hide();
+      this.winGlowRight.hide();
+    }
+  }
+
+  pulseNullRows(): void {
+    const view = this.active;
+    if (!view) {
+      return;
+    }
+    view.nullColumns.forEach((columns, row) => {
+      const rowView = view.doc.rowViews.get(row);
+      if (!rowView || !view.rowShown[row] || columns.length === 0) {
+        return;
+      }
+      const restore = rowView.opacity.peek();
+      this.tweens.to(rowView.opacity, 0.3, 0.18, 0, easeOutCubic, () =>
+        this.tweens.to(rowView.opacity, restore, 0.32, 0, easeInOutCubic, () =>
+          this.tweens.to(rowView.opacity, 0.3, 0.18, 0, easeOutCubic, () =>
+            this.tweens.to(rowView.opacity, restore, 0.32, 0, easeInOutCubic),
+          ),
+        ),
+      );
+    });
+  }
+
+  hasVisibleNull(): boolean {
+    const view = this.active;
+    return !!view && view.nullColumns.some((columns, row) => view.rowShown[row] && columns.length > 0);
+  }
+
+  /** Dev (`F`): pokes the first shown NULL cell, as a finger would. */
+  debugPokeFirstNull(): boolean {
+    const view = this.active;
+    if (!view || this.state.phase !== 'joined') {
+      return false;
+    }
+    for (let row = 0; row < view.nullColumns.length; row++) {
+      if (view.rowShown[row] && view.nullColumns[row].length > 0) {
+        this.lastNullActivation = -Infinity;
+        this.activateNullCell(view.key, row, view.nullColumns[row][0]);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Records where a slab sits before this puzzle first moves it (once per placement). */
+  private captureHome(source: SourceSlab): void {
+    const home = this.homes.get(source.id);
+    if (home && !home.set) {
+      home.pos.copy(source.object.position);
+      home.quat.copy(source.object.quaternion);
+      home.set = true;
+    }
+  }
+
+  /** The home glide (Next): eases each slab back to where it started; a grab wins. */
+  private updateGlides(delta: number): void {
+    for (const glide of this.glides.values()) {
+      const slab = glide.slab;
+      if (!glide.active || !slab) {
+        continue;
+      }
+      if (slab.entity.hasComponent(Grabbed)) {
+        glide.active = false;
+        continue;
+      }
+      glide.elapsed += delta;
+      const progress = Math.min(1, glide.elapsed / glide.duration);
+      const t = easeInOutCubic(progress);
+      slab.object.position.lerpVectors(glide.fromPos, glide.toPos, t);
+      slab.object.quaternion.slerpQuaternions(glide.fromQuat, glide.toQuat, t);
+      if (progress >= 1) {
+        glide.active = false;
+        this.layoutDirty = true;
+      }
+    }
+  }
+
+  private gliding(): boolean {
+    for (const glide of this.glides.values()) {
+      if (glide.active) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Before a join: lays out the bar, silhouette and card when the slabs come
+   * to rest somewhere new (or on request). Never while a slab is held,
+   * docking or gliding, so the layout doesn't chase a moving slab.
+   */
+  private updateChallengeLayout(): void {
+    const layout = this.challengeLayout;
+    if (!layout || this.state.phase !== 'idle' || this.queries.held.entities.size > 0 || this.dock.active || this.gliding()) {
+      return;
+    }
+    // The first registered slab is the frame (the parent table, e.g. customers).
+    const a: SourceSlab | null = this.sources.values().next().value ?? null;
+    const b = a ? this.otherSource(a) : null;
+    if (!a || !b) {
+      return;
+    }
+    const moved =
+      a.object.position.distanceToSquared(this._layoutA) > 1e-6 ||
+      b.object.position.distanceToSquared(this._layoutB) > 1e-6;
+    if (!moved && !this.layoutDirty) {
+      return;
+    }
+    this._layoutA.copy(a.object.position);
+    this._layoutB.copy(b.object.position);
+    this.layoutDirty = false;
+    this.placePreJoin(a, b, layout);
+  }
+
+  /** The win glow along the result slab's side edges, following it. */
+  private updateWinGlow(): void {
+    const view = this.active;
+    if (!this.winLook || !view || this.state.phase !== 'joined') {
+      return;
+    }
+    const height = (view.doc.panelHeightCm?.peek() ?? view.doc.heightMeters * 100) / 100;
+    const glow = 0.55 + 0.2 * Math.sin(this.tweens.now * 3);
+    this.winGlowLeft.place(view.object, -view.doc.widthMeters / 2, -height / 2, height, glow);
+    this.winGlowRight.place(view.object, view.doc.widthMeters / 2, -height / 2, height, glow);
+  }
+
+  /** Tells challenge mode once the current animation has finished (latest call wins). */
+  private scheduleSettle(delay: number): void {
+    if (!joinBridge.challenge) {
+      return;
+    }
+    this.tweens.set(this.settleClock, 0);
+    this.tweens.to(this.settleClock, 1, 0.001, delay, easeOutCubic, () => joinBridge.challenge?.onSettled());
+  }
+
+  /** At a new join: every matched row displayed again, no filter, no diff. */
+  private resetChallengeRows(view: ResultView): void {
+    view.result.lineage.forEach((lineage, row) => {
+      if (!lineage.ghost) {
+        view.rowShown[row] = true;
+        view.doc.rowViews.get(row)?.row.setProperties({ display: 'flex' });
+      }
+    });
+    updateRowSlots(view);
+    this.setDiff(view, null, 0);
+    this.setWhereLine(view, null);
+    this.setWinLook(false);
+  }
+
+  /**
+   * Challenge mode's row display when a NULL filter is (or was) involved:
+   * shows exactly the rows that `joinType` and `filter` keep. Rows leaving
+   * fade out first; then the layout changes and the remaining rows slide
+   * from where they were to their new slots, while rows entering fade in.
+   * One relayout per change, never per frame. Returns its duration.
+   */
+  private applyRowVisibility(view: ResultView, joinType: JoinType, filter: NullFilter | null): number {
+    const mask = nullFilterMask(view.leftTable, view.rightTable, view.result, filter);
+    const nextShown = view.result.lineage.map((lineage, row) => (joinType === 'left' || !lineage.ghost) && mask[row]);
+    const oldSlot = view.rowSlot.slice();
+    let leaving = false;
+    nextShown.forEach((shown, row) => {
+      const rowView = view.doc.rowViews.get(row);
+      if (rowView && view.rowShown[row] && !shown) {
+        leaving = true;
+        this.tweens.to(rowView.opacity, 0, FILTER_FADE_SECONDS, 0, easeInCubic);
+      }
+    });
+
+    const relayout = () => {
+      view.rowShown = nextShown;
+      updateRowSlots(view);
+      const rowCm = view.doc.rowHeightMeters * 100;
+      nextShown.forEach((shown, row) => {
+        const rowView = view.doc.rowViews.get(row);
+        if (!rowView) {
+          return;
+        }
+        rowView.row.setProperties({ display: shown ? 'flex' : 'none' });
+        if (!shown) {
+          return;
+        }
+        if (oldSlot[row] >= 0) {
+          // Layout moves it to its new slot; start it where it was and slide.
+          this.tweens.set(rowView.offsetYCm, (oldSlot[row] - view.rowSlot[row]) * rowCm);
+          this.tweens.to(rowView.offsetYCm, 0, FILTER_SLIDE_SECONDS, 0, easeInOutCubic);
+        } else {
+          this.tweens.set(rowView.offsetYCm, 0);
+          this.tweens.set(rowView.opacity, 0);
+          this.tweens.to(rowView.opacity, 1, FILTER_SLIDE_SECONDS);
+        }
+      });
+      const panelHeight = view.doc.panelHeightCm;
+      if (panelHeight) {
+        const rows = nextShown.filter(Boolean).length + view.placeholdersShown;
+        this.tweens.to(panelHeight, view.doc.heightForRowsMeters(rows) * 100, FILTER_SLIDE_SECONDS, 0, easeOutCubic);
+      }
+    };
+    if (leaving) {
+      this.tweens.set(this.relayoutClock, 0);
+      this.tweens.to(this.relayoutClock, 1, FILTER_FADE_SECONDS, 0, easeOutCubic, relayout);
+      return FILTER_FADE_SECONDS + FILTER_SLIDE_SECONDS;
+    }
+    relayout();
+    return FILTER_SLIDE_SECONDS;
+  }
+
+  private applyFilterChange(): void {
+    const view = this.active;
+    const state = this.state;
+    if (!view || state.phase !== 'joined') {
+      return;
+    }
+    const filter = state.filter ?? null;
+    this.setWhereLine(view, filter);
+    this._a.set(0, -view.doc.heightMeters / 2, 0);
+    view.object.updateWorldMatrix(true, false);
+    view.object.localToWorld(this._a);
+    sounds.playSlide(this._a, filter ? 'out' : 'in');
+    this.scheduleSettle(this.applyRowVisibility(view, state.joinType, filter) + 0.05);
+  }
+
+  /**
+   * A NULL cell was poked (or ray-selected, or pinched): keep only rows
+   * where its column IS NULL, or clear that filter if it's the one set.
+   * A poke and a ray select on the same press count once.
+   */
+  private activateNullCell(key: string, row: number, column: number): void {
+    const view = this.results.get(key);
+    const state = this.state;
+    if (!view || this.active !== view || state.phase !== 'joined' || !view.rowShown[row] || view.doc.fade.peek() < 0.5) {
+      return;
+    }
+    if (this.tweens.now - this.lastNullActivation < NULL_ACTIVATION_DEBOUNCE_SECONDS) {
+      return;
+    }
+    this.lastNullActivation = this.tweens.now;
+    const filter = filterForColumn(view.leftTable, view.rightTable, view.result, column);
+    const span = view.doc.columnSpans[column];
+    this._a.set((span.x0 + span.x1) / 2, rowCenterLocalY(view.doc, view.rowSlot[row]), 0);
+    view.object.updateWorldMatrix(true, false);
+    view.object.localToWorld(this._a);
+    sounds.playClick(this._a);
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`NULL cell poked: row ${row}, ${view.result.columns[column].label} (${filter.tableId}.${filter.column})`);
+    }
+    const current = state.filter ?? null;
+    this.applyTransition(current && sameFilter(current, filter) ? { type: 'clearFilter' } : { type: 'setFilter', filter });
+  }
+
+  /**
+   * The shown NULL cell nearest world `point` (in the slab's plane), into
+   * `_nullHit`: its row and column, the in-plane distance to its rectangle
+   * (0 inside it), and how far `point` is off the surface. False if no shown
+   * row holds a NULL.
+   */
+  private nearestNullCell(view: ResultView, point: Vector3): boolean {
+    view.object.updateWorldMatrix(true, false);
+    this._pinchB.copy(point);
+    view.object.worldToLocal(this._pinchB);
+    const hit = this._nullHit;
+    hit.row = -1;
+    hit.column = -1;
+    hit.distance = Infinity;
+    hit.depth = Math.abs(this._pinchB.z);
+    const halfRow = view.doc.rowHeightMeters / 2;
+    for (let row = 0; row < view.nullColumns.length; row++) {
+      if (!view.rowShown[row] || view.nullColumns[row].length === 0) {
+        continue;
+      }
+      const dy = Math.max(0, Math.abs(this._pinchB.y - rowCenterLocalY(view.doc, view.rowSlot[row])) - halfRow);
+      for (const column of view.nullColumns[row]) {
+        const span = view.doc.columnSpans[column];
+        const dx = Math.max(0, span.x0 - this._pinchB.x, this._pinchB.x - span.x1);
+        const distance = Math.hypot(dx, dy);
+        if (distance < hit.distance) {
+          hit.distance = distance;
+          hit.row = row;
+          hit.column = column;
+        }
+      }
+    }
+    return hit.row >= 0;
+  }
+
+  /**
+   * A poke or ray select anywhere on the result slab (UIKit click, with the
+   * world hit point): pokes the NULL cell under it, if there is one.
+   */
+  private onResultClick(key: string, event: unknown): void {
+    const view = this.results.get(key);
+    const point = (event as { point?: Vector3 } | null)?.point;
+    if (import.meta.env.DEV && this.debug && !point) {
+      const keys = event && typeof event === 'object' ? Object.keys(event).join(', ') : typeof event;
+      this.debug.warn(`result slab click without a hit point; event fields: ${keys}`);
+    }
+    if (!view || this.active !== view || !point) {
+      return;
+    }
+    const onCell = this.nearestNullCell(view, point) && this._nullHit.distance <= 1e-3;
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(
+        `result slab pressed (poke or ray): ` +
+          (onCell
+            ? `on the NULL cell at row ${this._nullHit.row}, column ${this._nullHit.column}`
+            : `not on a NULL cell (nearest ${cm(this._nullHit.distance)} away)`),
+      );
+    }
+    if (onCell) {
+      this.activateNullCell(key, this._nullHit.row, this._nullHit.column);
+    }
+  }
+
+  /** Diff markers (`+` and dimming for extra rows) and the placeholder rows for missing ones. */
+  private setDiff(view: ResultView, rowStatus: readonly RowStatus[] | null, missing: number): void {
+    view.result.lineage.forEach((_, row) => {
+      const rowView = view.doc.rowViews.get(row);
+      if (!rowView) {
+        return;
+      }
+      const extra = rowStatus?.[row] === 'extra';
+      if (rowView.marker) {
+        this.tweens.to(rowView.marker, extra ? 1 : 0, DIFF_FADE_SECONDS);
+      }
+      if (rowStatus && view.rowShown[row]) {
+        this.tweens.to(rowView.opacity, extra ? DIFF_EXTRA_OPACITY : 1, DIFF_FADE_SECONDS);
+      }
+    });
+    const count = rowStatus ? Math.min(missing, view.doc.placeholders.length) : 0;
+    view.doc.placeholders.forEach((placeholder, i) => {
+      if (i < count) {
+        placeholder.row.setProperties({ display: 'flex' });
+        this.tweens.to(placeholder.opacity, 1, DIFF_FADE_SECONDS);
+      } else {
+        placeholder.row.setProperties({ display: 'none' });
+        this.tweens.set(placeholder.opacity, 0);
+      }
+    });
+    view.placeholdersShown = count;
+    const panelHeight = view.doc.panelHeightCm;
+    if (panelHeight && rowStatus) {
+      const rows = view.rowShown.filter(Boolean).length + count;
+      this.tweens.to(panelHeight, view.doc.heightForRowsMeters(rows) * 100, DIFF_FADE_SECONDS, 0, easeOutCubic);
+    }
   }
 
   // --- Proximity / preview --------------------------------------------------------
@@ -903,6 +1565,18 @@ export class JoinSystem
     this.tweens.finishAll();
     this.hidePreview();
     this.active = view;
+    if (this.challengeLayout) {
+      // Before the dock moves anything (a debug join moves a slab without a grab).
+      this.captureHome(left);
+      this.captureHome(right);
+      this.resetChallengeRows(view);
+      if (this.silhouette) {
+        // Hidden and parked: an invisible UIKit document can still catch a
+        // pointer ray meant for the result slab in front of or behind it.
+        this.silhouette.object.visible = false;
+        this.silhouette.object.position.set(0, PARKED_Y, 0);
+      }
+    }
     left.entity.addComponent(JoinDocked, {});
     right.entity.addComponent(JoinDocked, {});
 
@@ -1015,9 +1689,10 @@ export class JoinSystem
     //    (LEFT), with a bounce and a tap at the first impact.
     this.applySourceDim(view, left, right, joinType, DIM_START_SECONDS, DIM_DURATION_SECONDS);
 
+    const linesEnd = LINE_START_SECONDS + Math.max(0, lineCount - 1) * LINE_STAGGER_SECONDS + LINE_DRAW_SECONDS;
+    const end = Math.max(lastLanding, linesEnd, DIM_START_SECONDS + DIM_DURATION_SECONDS);
+    this.scheduleSettle(end + 0.05);
     if (import.meta.env.DEV && this.debug) {
-      const linesEnd = LINE_START_SECONDS + Math.max(0, lineCount - 1) * LINE_STAGGER_SECONDS + LINE_DRAW_SECONDS;
-      const end = Math.max(lastLanding, linesEnd, DIM_START_SECONDS + DIM_DURATION_SECONDS);
       this.debug.note(
         `join sequence: ${end.toFixed(2)} s (snap at 0, dock ${DOCK_DURATION_SECONDS} s, ${lineCount} lines by ` +
           `${linesEnd.toFixed(2)} s, ${rowCount} rows land by ${lastLanding.toFixed(2)} s, drops end ` +
@@ -1090,7 +1765,16 @@ export class JoinSystem
     this.tweens.finishAll();
     this.setCaption(view, to);
     this.setControlSelection(to);
-    this.setGhostRowsShown(view, to === 'left', true, 0);
+    const filter = this.currentFilter();
+    if (filter) {
+      // With a NULL filter, rows can come and go anywhere, not just the ghosts at the end.
+      this.scheduleSettle(this.applyRowVisibility(view, to, filter) + 0.05);
+    } else {
+      this.setGhostRowsShown(view, to === 'left', true, 0);
+      this.scheduleSettle(
+        TOGGLE_DURATION_SECONDS * 1.6 + Math.max(0, view.ghostRows.length - 1) * ROW_STAGGER_SECONDS + 0.05,
+      );
+    }
     this.applySourceDim(view, left, right, to, 0, TOGGLE_DURATION_SECONDS);
     // The LEFT-only rows sliding in or out.
     const ghost = view.ghostRows[0];
@@ -1106,6 +1790,10 @@ export class JoinSystem
     const view = this.active;
     this.tweens.finishAll();
     this.dock.active = false;
+    if (this.challengeLayout && view) {
+      this.setDiff(view, null, 0);
+      this.setWinLook(false);
+    }
     // A soft release at the seam: the reverse of the snap.
     const left = view ? this.sources.get(view.leftId) : null;
     const right = view ? this.sources.get(view.rightId) : null;
@@ -1162,6 +1850,10 @@ export class JoinSystem
     this.active = null;
     this.lines.setCount(0);
     this.pulses.setCount(0);
+    if (this.silhouette) {
+      this.silhouette.object.visible = true;
+    }
+    this.layoutDirty = true;
     this.applyTransition({ type: 'separated' });
   }
 
@@ -1248,6 +1940,10 @@ export class JoinSystem
 
   /** Ghost rows slide in from below / slide out downward. */
   private setGhostRowsShown(view: ResultView, shown: boolean, animate: boolean, delay: number): void {
+    for (const row of view.ghostRows) {
+      view.rowShown[row] = shown;
+    }
+    updateRowSlots(view);
     view.ghostRows.forEach((row, i) => {
       const rowView = view.doc.rowViews.get(row);
       if (!rowView) {
@@ -1276,7 +1972,7 @@ export class JoinSystem
     // slide in, and shrinks once the outgoing rows have slid out.
     const panelHeight = view.doc.panelHeightCm;
     if (panelHeight) {
-      const rows = view.matchedRowCount + (shown ? view.ghostRows.length : 0);
+      const rows = view.matchedRowCount + (shown ? view.ghostRows.length : 0) + view.placeholdersShown;
       const targetCm = view.doc.heightForRowsMeters(rows) * 100;
       if (!animate) {
         this.tweens.set(panelHeight, targetCm);
@@ -1290,9 +1986,26 @@ export class JoinSystem
   }
 
   private setCaption(view: ResultView, joinType: JoinType): void {
-    view.doc.captionLines.forEach((line, i) => {
-      line.setProperties({ text: view.sql[joinType][i] });
+    view.sql[joinType].forEach((text, i) => {
+      view.doc.captionLines[i]?.setProperties({ text });
     });
+  }
+
+  /** Challenge mode: the caption's reserved third line shows the filter's WHERE clause. */
+  private setWhereLine(view: ResultView, filter: NullFilter | null): void {
+    const line = view.doc.captionLines[2];
+    const opacity = view.doc.captionOpacity[2];
+    if (!line || !opacity) {
+      return;
+    }
+    if (filter) {
+      line.setProperties({ text: buildWhereSql(view.leftTable, view.rightTable, filter) });
+    }
+    this.tweens.to(opacity, filter ? 1 : 0, FILTER_FADE_SECONDS);
+  }
+
+  private currentFilter(): NullFilter | null {
+    return this.state.phase === 'joined' ? (this.state.filter ?? null) : null;
   }
 
   private setControlSelection(joinType: JoinType): void {
@@ -1338,8 +2051,6 @@ export class JoinSystem
   private placeResult(view: ResultView, left: SourceSlab, right: SourceSlab): void {
     left.object.updateWorldMatrix(true, false);
     left.object.getWorldQuaternion(this._q1);
-    this._up.copy(UP).applyQuaternion(this._q1);
-    this._normal.set(0, 0, 1).applyQuaternion(this._q1);
 
     // Bottom-edge midpoint of the result slab: centered between the two
     // slabs (the RIGHT one at its dock pose), above the pair's higher top
@@ -1347,15 +2058,36 @@ export class JoinSystem
     const rightX = this.dockSide * (left.doc.widthMeters / 2 + DOCK_GAP_METERS + right.doc.widthMeters / 2);
     this._c.set(rightX / 2, pairTopLocalY(left, right), 0);
     left.object.localToWorld(this._c);
-    this._c.addScaledVector(this._up, RESULT_GAP_ABOVE_METERS).addScaledVector(this._normal, -RESULT_BEHIND_METERS);
 
     // The control sits in the band between the pair's top edge and this
     // slab's bottom edge (next to the SQL caption it switches). Place it
-    // first, then keep this slab's bottom edge above the control in view.
+    // first (and the puzzle bar beside it), then keep this slab's bottom
+    // edge above the control in view.
     this.placeControl(left, right);
-    this.control.document.updateWorldMatrix(true, false);
-    this._f.set(0, this.control.heightMeters / 2, 0);
-    this.control.document.localToWorld(this._f);
+    if (this.challengeLayout) {
+      this.placeBarBesideControl(this.challengeLayout.bar);
+    }
+    this.placeAboveBand(view.object, view.doc.heightMeters, this.control.document, this.control.heightMeters);
+    if (this.challengeLayout) {
+      this.placeCard(view.object, this.challengeLayout.card);
+    }
+  }
+
+  /**
+   * Places a top-anchored slab (`object`, `height` m tall) whose bottom-edge
+   * midpoint starts at `_c` (on the pair's top-edge line, in the frame of
+   * `_q1`): lifted above that line, kept above `band`'s top edge in view,
+   * leaning to face the eyes, pushed back if its top would leave the view.
+   * Overwrites `_c`.
+   */
+  private placeAboveBand(object: Object3D, height: number, band: Object3D, bandHeight: number): void {
+    this._up.copy(UP).applyQuaternion(this._q1);
+    this._normal.set(0, 0, 1).applyQuaternion(this._q1);
+    this._c.addScaledVector(this._up, RESULT_GAP_ABOVE_METERS).addScaledVector(this._normal, -RESULT_BEHIND_METERS);
+
+    band.updateWorldMatrix(true, false);
+    this._f.set(0, bandHeight / 2, 0);
+    band.localToWorld(this._f);
     const minBottomRad =
       MathUtils.degToRad(degreesFromForward(this._head, this.headPitchDown, this._f) + CONTROL_VIEW_GAP_DEG) -
       this.headPitchDown;
@@ -1374,7 +2106,6 @@ export class JoinSystem
     // beyond the legibility cap, pull the slab toward the viewer -- at most
     // until its bottom edge is level with the pair's top edge, so it never
     // hangs in front of the pair's rows. Never shrunk.
-    const height = view.doc.heightMeters;
     let lean = 0;
     let pulled = 0;
     for (let i = 0; i < 3; i++) {
@@ -1426,7 +2157,6 @@ export class JoinSystem
     this._euler.set(-lean, yaw, 0, 'YXZ');
     this._q2.setFromEuler(this._euler);
     this._up.copy(UP).applyQuaternion(this._q2);
-    const object = view.object;
     object.quaternion.copy(this._q2);
     object.position.copy(this._c).addScaledVector(this._up, height);
   }
@@ -1446,47 +2176,118 @@ export class JoinSystem
     const seamX = this.dockSide * (left.doc.widthMeters / 2 + DOCK_GAP_METERS / 2);
     this._d.set(seamX, pairTopLocalY(left, right), 0);
     left.object.localToWorld(this._d);
+    this.placeInBand(this.control.document, this.control.widthMeters, this.control.heightMeters, this._d, left.object);
+  }
 
+  /**
+   * Challenge mode: control + gap + bar as one group, centered where the
+   * control alone would sit (on the seam). Both share the control's
+   * orientation and depth, and the bar is laid out along the control's own
+   * horizontal axis, so the gap between them is exact (never an overlap)
+   * and the bar keeps the control's clearance from the slabs (that axis
+   * lies in the slabs' plane). Run after placeControl.
+   */
+  private placeBarBesideControl(bar: PlacedElement): void {
     const control = this.control.document;
-    this._e.subVectors(this._head, this._d).normalize();
-    control.position.copy(this._d).addScaledVector(this._e, CONTROL_SLAB_CLEARANCE_METERS);
+    this._e.set(1, 0, 0).applyQuaternion(control.quaternion);
+    const groupWidth = this.control.widthMeters + BAR_CONTROL_GAP_METERS + bar.widthMeters;
+    // Shift the control left so the group is centered on its old center...
+    control.position.addScaledVector(this._e, this.control.widthMeters / 2 - groupWidth / 2);
+    // ...and put the bar to its right, one gap away.
+    bar.object.quaternion.copy(control.quaternion);
+    bar.object.position
+      .copy(control.position)
+      .addScaledVector(this._e, this.control.widthMeters / 2 + BAR_CONTROL_GAP_METERS + bar.widthMeters / 2);
+  }
+
+  /**
+   * Places a touchable element (`width` x `height` m, origin at its center)
+   * in the band above the slabs' top edge at world point `anchor`: lifted
+   * CONTROL_SLAB_CLEARANCE_METERS toward the eyes, raised in view so its
+   * bottom edge clears that edge, oriented from `frame` (a slab: its yaw, a
+   * lean that faces the eyes, zero roll), and pushed out until every corner
+   * is that clearance off the slabs' plane. Leaves `_c`, `_d` and `_q1`
+   * untouched (it reads `anchor` first).
+   */
+  private placeInBand(target: Object3D, width: number, height: number, anchor: Vector3, frame: Object3D): void {
+    frame.updateWorldMatrix(true, false);
+    this._e.subVectors(this._head, anchor).normalize();
+    target.position.copy(anchor).addScaledVector(this._e, CONTROL_SLAB_CLEARANCE_METERS);
     this._viewUp.copy(UP).addScaledVector(this._e, -UP.dot(this._e)).normalize();
-    const lift =
-      this.control.heightMeters / 2 +
-      control.position.distanceTo(this._head) * Math.tan(MathUtils.degToRad(CONTROL_VIEW_GAP_DEG));
-    control.position.addScaledVector(this._viewUp, lift);
+    const lift = height / 2 + target.position.distanceTo(this._head) * Math.tan(MathUtils.degToRad(CONTROL_VIEW_GAP_DEG));
+    target.position.addScaledVector(this._viewUp, lift);
 
     // The pair's yaw; lean back by the eye line's elevation in the pair's
     // vertical plane; no roll.
-    left.object.getWorldQuaternion(this._q2);
+    frame.getWorldQuaternion(this._q2);
     this._euler.setFromQuaternion(this._q2, 'YXZ');
     const yaw = this._euler.y;
     this._g.set(0, 0, -1).applyAxisAngle(UP, yaw);
-    this._f.subVectors(control.position, this._head);
-    const lean = Math.atan2(this._head.y - control.position.y, Math.max(this._f.dot(this._g), 1e-3));
+    this._f.subVectors(target.position, this._head);
+    const lean = Math.atan2(this._head.y - target.position.y, Math.max(this._f.dot(this._g), 1e-3));
     this._euler.set(-lean, yaw, 0, 'YXZ');
-    control.quaternion.setFromEuler(this._euler);
+    target.quaternion.setFromEuler(this._euler);
 
-    // The control faces the eyes, so it's tilted against the slabs' plane
-    // (both docked slabs share it) and the sight line isn't the plane's
-    // normal: push it along the sight line until every corner is at least
+    // It faces the eyes, so it's tilted against the slabs' plane (both
+    // slabs share it) and the sight line isn't the plane's normal: push it
+    // along the sight line until every corner is at least
     // CONTROL_SLAB_CLEARANCE_METERS off that plane.
-    control.updateWorldMatrix(true, false);
+    target.updateWorldMatrix(true, false);
     let minOffPlane = Infinity;
     for (let sx = -1; sx <= 1; sx += 2) {
       for (let sy = -1; sy <= 1; sy += 2) {
-        this._f.set((sx * this.control.widthMeters) / 2, (sy * this.control.heightMeters) / 2, 0);
-        control.localToWorld(this._f);
-        left.object.worldToLocal(this._f);
+        this._f.set((sx * width) / 2, (sy * height) / 2, 0);
+        target.localToWorld(this._f);
+        frame.worldToLocal(this._f);
         minOffPlane = Math.min(minOffPlane, this._f.z);
       }
     }
     if (minOffPlane < CONTROL_SLAB_CLEARANCE_METERS) {
-      left.object.getWorldQuaternion(this._q2);
+      frame.getWorldQuaternion(this._q2);
       this._normal.set(0, 0, 1).applyQuaternion(this._q2);
       const alongNormal = Math.max(0.2, this._e.dot(this._normal));
-      control.position.addScaledVector(this._e, (CONTROL_SLAB_CLEARANCE_METERS - minOffPlane) / alongNormal);
+      target.position.addScaledVector(this._e, (CONTROL_SLAB_CLEARANCE_METERS - minOffPlane) / alongNormal);
     }
+  }
+
+  /** Challenge mode: the puzzle card, just above a top-anchored slot (the result or the silhouette). */
+  private placeCard(slot: Object3D, card: PlacedElement): void {
+    slot.updateWorldMatrix(true, false);
+    slot.getWorldQuaternion(this._q2);
+    this._up.copy(UP).applyQuaternion(this._q2);
+    card.object.quaternion.copy(this._q2);
+    card.object.position.copy(slot.position).addScaledVector(this._up, CARD_GAP_METERS + card.heightMeters / 2);
+  }
+
+  /**
+   * Challenge mode, before a join: the bar centered between the two slabs
+   * in the band above them, the silhouette above it where the result will
+   * appear, and the card above that. World-locked: laid out against the head
+   * pose read now, and again only when the slabs come to rest somewhere new.
+   */
+  private placePreJoin(a: SourceSlab, b: SourceSlab, layout: ChallengeLayout): void {
+    this.readHead();
+    a.object.updateWorldMatrix(true, false);
+    b.object.updateWorldMatrix(true, false);
+    // B's center in A's frame: the midpoint between them, at the higher top edge.
+    this._a.setFromMatrixPosition(b.object.matrixWorld);
+    a.object.worldToLocal(this._a);
+    const midX = this._a.x / 2;
+    const topY = Math.max(a.doc.heightMeters / 2, this._a.y + b.doc.heightMeters / 2);
+
+    this._d.set(midX, topY, 0);
+    a.object.localToWorld(this._d);
+    this.placeInBand(layout.bar.object, layout.bar.widthMeters, layout.bar.heightMeters, this._d, a.object);
+
+    const slot = this.silhouette;
+    if (!slot) {
+      return;
+    }
+    a.object.getWorldQuaternion(this._q1);
+    this._c.set(midX, topY, 0);
+    a.object.localToWorld(this._c);
+    this.placeAboveBand(slot.object, slot.heightMeters, layout.bar.object, layout.bar.heightMeters);
+    this.placeCard(slot.object, layout.card);
   }
 
   // --- Pinch near the control ---------------------------------------------------------
@@ -1497,7 +2298,10 @@ export class JoinSystem
    * for the same press, `setJoinType` is idempotent.
    */
   private updatePinchSelect(): void {
-    if (this.state.phase !== 'joined' || !this.control.document.visible || this.control.fade.peek() < 0.5) {
+    const controlLive =
+      this.state.phase === 'joined' && this.control.document.visible && this.control.fade.peek() >= 0.5;
+    // Challenge mode's bar takes pinches before a join, too.
+    if (!controlLive && !this.challengeLayout) {
       return;
     }
     for (const hand of HANDS) {
@@ -1505,36 +2309,38 @@ export class JoinSystem
       if (!source?.hand || !this.input.xr.gamepads[hand]?.getSelectStart()) {
         continue;
       }
-      if (this.readPinchPoint(source, this._pinchA)) {
-        this.evaluatePinch(hand, this._pinchA);
+      if (!readPinchPoint(this.world, this.player, source, this._pinchA)) {
+        continue;
+      }
+      // The control and the puzzle bar sit side by side: the nearer target
+      // within its margin wins (a pinch in the gap between them goes to
+      // whichever is closer). Otherwise, NULL cells on the result.
+      const controlDistance = controlLive ? this.evaluatePinch(hand, this._pinchA) : Infinity;
+      const barDistance = joinBridge.challenge?.barDistance(this._pinchA) ?? Infinity;
+      if (barDistance < Infinity && barDistance < controlDistance) {
+        joinBridge.challenge?.pressBarAt(this._pinchA, hand);
+        continue;
+      }
+      if (controlDistance < Infinity) {
+        this.requestJoinType(this.pinchNearest);
+        continue;
+      }
+      if (controlLive && this.challengeLayout) {
+        this.evaluateNullPinch(hand, source, this._pinchA);
       }
     }
   }
 
-  /** World-space midpoint of the thumb and index fingertips, if tracked. */
-  private readPinchPoint(source: XRInputSource, out: Vector3): boolean {
-    const frame = this.world.xrFrame;
-    const space = this.world.xrReferenceSpace;
-    const thumb = source.hand?.get('thumb-tip');
-    const index = source.hand?.get('index-finger-tip');
-    if (!frame || !space || !thumb || !index || !frame.getJointPose) {
-      return false;
-    }
-    const thumbPose = frame.getJointPose(thumb, space);
-    const indexPose = frame.getJointPose(index, space);
-    if (!thumbPose || !indexPose) {
-      return false;
-    }
-    const a = thumbPose.transform.position;
-    const b = indexPose.transform.position;
-    out.set((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
-    // Joint poses are in the XR reference space, which the player rig carries.
-    this.player.updateWorldMatrix(true, false);
-    out.applyMatrix4(this.player.matrixWorld);
-    return true;
-  }
+  /** The join type nearest the last pinch evaluated against the control. */
+  private pinchNearest: JoinType = 'inner';
 
-  private evaluatePinch(hand: (typeof HANDS)[number], point: Vector3): void {
+  /**
+   * Measures a pinch against the control's options (logged with `debug`);
+   * returns its in-plane distance to the nearest option if it would select
+   * it (within the margin and near the surface), else Infinity. The caller
+   * decides, since the puzzle bar may be nearer.
+   */
+  private evaluatePinch(hand: (typeof HANDS)[number], point: Vector3): number {
     const control = this.control;
     control.document.updateWorldMatrix(true, false);
     this._pinchB.copy(point);
@@ -1563,8 +2369,46 @@ export class JoinSystem
               `<= ${cm(CONTROL_PINCH_DEPTH_METERS)} off the surface)`),
       );
     }
+    this.pinchNearest = nearest;
+    return selected ? distance : Infinity;
+  }
+
+  /**
+   * Challenge mode: a pinch whose pinch point lands on a shown NULL cell (in
+   * plane within NULL_PINCH_MARGIN_METERS, and near the surface) pokes it.
+   * Dev readout: how far the pinch point and the wrist were from the nearest
+   * source slab's grab surface, since a pinch that near a slab could grab it.
+   */
+  private evaluateNullPinch(hand: (typeof HANDS)[number], source: XRInputSource, point: Vector3): void {
+    const view = this.active;
+    if (!view || !this.nearestNullCell(view, point)) {
+      return;
+    }
+    const { row: bestRow, column: bestColumn, distance: best, depth } = this._nullHit;
+    const selected = best <= NULL_PINCH_MARGIN_METERS && depth <= CONTROL_PINCH_DEPTH_METERS;
+
+    if (import.meta.env.DEV && this.debug) {
+      let tipToSlab = Infinity;
+      let wristToSlab = Infinity;
+      const hasWrist = readWristPoint(this.world, this.player, source, this._pinchB);
+      for (const slab of this.sources.values()) {
+        tipToSlab = Math.min(tipToSlab, distanceToSlab(point, slab, this._g));
+        if (hasWrist) {
+          wristToSlab = Math.min(wristToSlab, distanceToSlab(this._pinchB, slab, this._g));
+        }
+      }
+      this.debug.note(
+        `${hand} pinch evaluated against NULL cells: ${cm(best)} from row ${bestRow} column ${bestColumn} in plane, ` +
+          `${cm(depth)} off the surface -> ${selected ? 'poked' : 'not poked'}; pinch point ${cm(tipToSlab)} and ` +
+          `wrist ${hasWrist ? cm(wristToSlab) : 'untracked'} from the nearest source slab (grab sphere ` +
+          `${cm(GRAB_SPHERE_RADIUS_METERS)} around the palm)`,
+      );
+      if (tipToSlab < GRAB_SPHERE_RADIUS_METERS + 0.03 || wristToSlab < GRAB_SPHERE_RADIUS_METERS + 0.03) {
+        this.debug.warn(`a pinch on a NULL cell came within grab range of a source slab (see the note above)`);
+      }
+    }
     if (selected) {
-      this.requestJoinType(nearest);
+      this.activateNullCell(view.key, bestRow, bestColumn);
     }
   }
 
@@ -1704,6 +2548,83 @@ export class JoinSystem
       debug.warn(`join-type control is only ${cm(clearance)} from a source slab (target ${cm(CONTROL_SLAB_CLEARANCE_METERS)})`);
     }
 
+    // Challenge mode's puzzle bar: touched, like the control.
+    const bar = this.challengeLayout?.bar;
+    if (bar) {
+      bar.object.updateWorldMatrix(true, false);
+      this._a.setFromMatrixPosition(bar.object.matrixWorld);
+      const barDistance = this._a.distanceTo(this._head);
+      let barClearance = Infinity;
+      for (const sx of [-1, 0, 1]) {
+        for (const sy of [-1, 0, 1]) {
+          this._d.set((sx * bar.widthMeters) / 2, (sy * bar.heightMeters) / 2, 0);
+          bar.object.localToWorld(this._d);
+          barClearance = Math.min(barClearance, distanceToSlab(this._d, left, this._e), distanceToSlab(this._d, right, this._e));
+        }
+      }
+      this._d.set(0, bar.heightMeters / 2, 0);
+      bar.object.localToWorld(this._d);
+      this._e.set(0, -bar.heightMeters / 2, 0);
+      bar.object.localToWorld(this._e);
+      const barEdges = edgeNote(
+        'puzzle bar',
+        degreesFromForward(this._head, this.headPitchDown, this._d),
+        degreesFromForward(this._head, this.headPitchDown, this._e),
+      );
+      // The gap between the control's right edge and the bar's left edge, in the control's frame.
+      this._d.set(-bar.widthMeters / 2, 0, 0);
+      bar.object.localToWorld(this._d);
+      control.document.worldToLocal(this._d);
+      const gap = this._d.x - control.widthMeters / 2;
+      debug.note(
+        `puzzle bar (touch): center ${barDistance.toFixed(2)} m from the eyes (${reachNote(barDistance)}); ${barEdges}; ` +
+          `clearance to the nearest source slab ${cm(barClearance)} (target >= ${cm(CONTROL_SLAB_CLEARANCE_METERS)}); ` +
+          `${cm(bar.widthMeters)} x ${cm(bar.heightMeters)}; gap from the control ${cm(gap)} ` +
+          `(target >= ${cm(BAR_CONTROL_GAP_METERS)})`,
+      );
+      if (gap < 0) {
+        debug.warn(`puzzle bar OVERLAPS the join-type control by ${cm(-gap)}`);
+      } else if (gap < BAR_CONTROL_GAP_METERS - 0.001) {
+        debug.warn(`puzzle bar is only ${cm(gap)} from the join-type control (target ${cm(BAR_CONTROL_GAP_METERS)})`);
+      }
+      if (barDistance > TOUCH_REACH_MAX_METERS + 0.005) {
+        debug.warn(`puzzle bar is ${barDistance.toFixed(2)} m from the eyes, beyond the reach limit`);
+      }
+      if (barClearance < CONTROL_SLAB_CLEARANCE_METERS - 0.005) {
+        debug.warn(`puzzle bar is only ${cm(barClearance)} from a source slab (target ${cm(CONTROL_SLAB_CLEARANCE_METERS)})`);
+      }
+
+      // Every touch target in the band: size, distance from the eyes, and
+      // clearance to the slabs (its four corners and center).
+      const targets: { name: string; object: Object3D; centerX: number; width: number; height: number }[] = [
+        { name: 'INNER', object: control.document, centerX: control.innerCenterX, width: control.optionWidthMeters, height: control.optionHeightMeters },
+        { name: 'LEFT', object: control.document, centerX: control.leftCenterX, width: control.optionWidthMeters, height: control.optionHeightMeters },
+        ...bar.buttons.map((button) => ({
+          name: button.name,
+          object: bar.object,
+          centerX: button.centerX,
+          width: button.width,
+          height: bar.buttonHeightMeters,
+        })),
+      ];
+      const lines = targets.map((target) => {
+        this._d.set(target.centerX, 0, 0);
+        target.object.localToWorld(this._d);
+        const distance = this._d.distanceTo(this._head);
+        let targetClearance = Infinity;
+        for (const [sx, sy] of [[0, 0], [-1, -1], [-1, 1], [1, -1], [1, 1]]) {
+          this._d.set(target.centerX + (sx * target.width) / 2, (sy * target.height) / 2, 0);
+          target.object.localToWorld(this._d);
+          targetClearance = Math.min(targetClearance, distanceToSlab(this._d, left, this._e), distanceToSlab(this._d, right, this._e));
+        }
+        if (distance > TOUCH_REACH_MAX_METERS + 0.005 || targetClearance < CONTROL_SLAB_CLEARANCE_METERS - 0.005) {
+          debug.warn(`${target.name} target: ${distance.toFixed(2)} m from the eyes, ${cm(targetClearance)} from a slab`);
+        }
+        return `${target.name} ${cm(target.width)} x ${cm(target.height)}, ${distance.toFixed(2)} m, clearance ${cm(targetClearance)}`;
+      });
+      debug.note(`band touch targets (size, distance from the eyes, clearance to the slabs): ${lines.join('; ')}`);
+    }
+
     right.object.position.copy(restore);
     right.object.quaternion.copy(this._q2);
 
@@ -1731,6 +2652,43 @@ export class JoinSystem
     );
     if (resultTextDeg < MIN_ROW_TEXT_DEG) {
       debug.warn(`result slab row text is ${resultTextDeg.toFixed(2)}° tall, below the ${MIN_ROW_TEXT_DEG}° minimum`);
+    }
+
+    // Challenge mode: where the first NULL cell sits (LEFT layout), to aim pokes and rays at in testing.
+    if (this.challengeLayout) {
+      const row = view.nullColumns.findIndex((columns) => columns.length > 0);
+      if (row >= 0) {
+        const column = view.nullColumns[row][0];
+        const span = view.doc.columnSpans[column];
+        this._a.set((span.x0 + span.x1) / 2, rowCenterLocalY(view.doc, row), 0);
+        view.object.localToWorld(this._a);
+        debug.note(
+          `first NULL cell (row ${row}, ${view.result.columns[column].label}, with LEFT): world ` +
+            `(${this._a.x.toFixed(3)}, ${this._a.y.toFixed(3)}, ${this._a.z.toFixed(3)}); ` +
+            `${cm(span.x1 - span.x0)} x ${cm(view.doc.rowHeightMeters)}`,
+        );
+      }
+    }
+
+    // Challenge mode's puzzle card: viewed, above the result slab.
+    const card = this.challengeLayout?.card;
+    if (card) {
+      card.object.updateWorldMatrix(true, false);
+      this._a.setFromMatrixPosition(card.object.matrixWorld);
+      const cardDistance = this._a.distanceTo(this._head);
+      this._d.set(0, card.heightMeters / 2, 0);
+      card.object.localToWorld(this._d);
+      this._e.set(0, -card.heightMeters / 2, 0);
+      card.object.localToWorld(this._e);
+      const cardEdges = edgeNote(
+        'puzzle card',
+        degreesFromForward(this._head, this.headPitchDown, this._d),
+        degreesFromForward(this._head, this.headPitchDown, this._e),
+      );
+      debug.note(
+        `puzzle card (view only): center ${cardDistance.toFixed(2)} m from the eyes; ${cardEdges}; ` +
+          `${cm(card.widthMeters)} x ${cm(card.heightMeters)}`,
+      );
     }
     debug.note(
       `layout gaps in view: pair top -> control bottom ${(controlBottomDeg - pairTopDeg).toFixed(1)}°, ` +
@@ -1923,6 +2881,15 @@ export class JoinSystem
 
 function resultKey(leftId: string, rightId: string): string {
   return `${leftId}>${rightId}`;
+}
+
+/** Recomputes each result row's display slot from `rowShown` (hidden rows: -1). */
+function updateRowSlots(view: ResultView): void {
+  let slot = 0;
+  view.rowSlot.length = view.rowShown.length;
+  for (let row = 0; row < view.rowShown.length; row++) {
+    view.rowSlot[row] = view.rowShown[row] ? slot++ : -1;
+  }
 }
 
 /**

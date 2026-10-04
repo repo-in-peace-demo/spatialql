@@ -1,0 +1,118 @@
+/**
+ * Dev-only challenge-mode aids (with `?debug=1`): keys that drive the
+ * puzzle without hands, and a log line per evaluation. Only constructed
+ * behind `import.meta.env.DEV`, so production builds drop this module.
+ *
+ * Keys (clear of the emulator's WASD/QE and the join debug keys J/T/U/R):
+ *   H  show the next hint
+ *   F  poke the first shown NULL cell (filter on its column, or clear it)
+ *   N  next puzzle
+ *   P  previous puzzle
+ *   I  print the last diff, row by row
+ */
+
+import type { Comparison } from './data/compare.js';
+import { rowLabel, type Puzzle } from './data/puzzles.js';
+import { visibleRowIndices, type QueryOutput } from './data/query.js';
+
+export interface ChallengeDebugHost {
+  debugHint(): void;
+  debugNext(): void;
+  debugPrev(): void;
+  debugPoke(): boolean;
+  debugSnapshot(): { puzzle: Puzzle; output: QueryOutput; comparison: Comparison } | null;
+}
+
+const LOG_PREFIX = '[Challenge debug]';
+
+const KEY_HELP = [
+  'H  hint (next tier)',
+  'F  poke the first shown NULL cell',
+  'N  next puzzle',
+  'P  previous puzzle (dev only; ignores the unlock order)',
+  'I  print the diff',
+];
+
+export class ChallengeDebug {
+  private readonly host: ChallengeDebugHost;
+
+  constructor(host: ChallengeDebugHost) {
+    this.host = host;
+    window.addEventListener('keydown', this.onKeyDown);
+    console.info(`${LOG_PREFIX} keyboard shortcuts:\n  ${KEY_HELP.join('\n  ')}`);
+  }
+
+  note(message: string): void {
+    console.log(`${LOG_PREFIX} ${message}`);
+  }
+
+  error(message: string): void {
+    console.error(`${LOG_PREFIX} ${message}`);
+  }
+
+  logComparison(puzzle: Puzzle, output: QueryOutput, comparison: Comparison): void {
+    const { spec } = output;
+    const extra = comparison.rowStatus.filter((status) => status === 'extra').length;
+    const filter = spec.filter ? ` WHERE ${spec.filter.tableId}.${spec.filter.column} IS NULL` : '';
+    this.note(
+      `${puzzle.id}: ${spec.left} <- ${spec.right} ${spec.joinType.toUpperCase()}${filter}: ` +
+        `${comparison.visibleCount} rows shown, ${extra} extra, ${comparison.missing.length} missing -> ` +
+        (comparison.solved ? 'SOLVED' : 'not yet'),
+    );
+  }
+
+  /** One pinch evaluated against the bar. */
+  notePinch(hand: string, button: string | null, distance: number): void {
+    const where = Number.isFinite(distance) ? `${(distance * 100).toFixed(1)} cm in plane from the nearest button` : 'off the bar surface';
+    this.note(`${hand} pinch evaluated against the puzzle bar: ${where} -> ${button ? `pressed ${button}` : 'no press'}`);
+  }
+
+  dispose(): void {
+    window.removeEventListener('keydown', this.onKeyDown);
+  }
+
+  private printDiff(): void {
+    const snapshot = this.host.debugSnapshot();
+    if (!snapshot) {
+      this.note('no diff yet (join first)');
+      return;
+    }
+    const { puzzle, output, comparison } = snapshot;
+    const lines = visibleRowIndices(output).map(
+      (row) => `  ${comparison.rowStatus[row] === 'extra' ? '+ extra ' : '  match '} ${rowLabel(puzzle, output, row)}`,
+    );
+    this.note(
+      `diff for ${puzzle.id} (${comparison.solved ? 'solved' : 'not solved'}):\n${lines.join('\n')}\n` +
+        `  missing: ${comparison.missing.length}`,
+    );
+  }
+
+  private readonly onKeyDown = (event: KeyboardEvent): void => {
+    const target = event.target as HTMLElement | null;
+    if (event.repeat || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || target?.isContentEditable) {
+      return;
+    }
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+      return;
+    }
+    switch (event.key.toLowerCase()) {
+      case 'h':
+        this.host.debugHint();
+        break;
+      case 'f':
+        if (!this.host.debugPoke()) {
+          this.note('F ignored: no NULL cell shown (join with LEFT first)');
+        }
+        break;
+      case 'n':
+        this.host.debugNext();
+        break;
+      case 'p':
+        this.host.debugPrev();
+        break;
+      case 'i':
+        this.printDiff();
+        break;
+    }
+  };
+}

@@ -7,6 +7,7 @@
 
 import { World } from '@iwsdk/core';
 import projectOptions from 'virtual:iwsdk-project';
+import { ChallengeSystem } from './challenge-system.js';
 import { DeskPlacementSystem } from './desk-placement.js';
 import { devFlag, installDevFlagHotkeys } from './dev-flags.js';
 import { JoinSystem } from './join-system.js';
@@ -34,6 +35,8 @@ World.create(
   world.registerSystem(DeskPlacementSystem);
   // After DeskPlacementSystem, which creates the source slabs it joins.
   world.registerSystem(JoinSystem);
+  // After JoinSystem, which it plays on (inert in free play).
+  world.registerSystem(ChallengeSystem);
   // Dev-only `debug`: per-hand grab readout. Dropped from production.
   if (import.meta.env.DEV && devFlag('debug')) {
     void import('./grab-debug.js').then(({ GrabDebugSystem }) => world.registerSystem(GrabDebugSystem));

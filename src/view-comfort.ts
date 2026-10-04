@@ -54,6 +54,8 @@ export const PLANNED_SOURCE_DISTANCE_METERS = 0.55;
 // Measured at join in the emulator (seated, desk); 0.65 m gave 1.33° text.
 export const PLANNED_RESULT_DISTANCE_METERS = 0.56;
 export const PLANNED_CONTROL_DISTANCE_METERS = 0.45;
+/** Challenge mode's puzzle card, just above the result slot (view only). */
+export const PLANNED_CARD_DISTANCE_METERS = 0.6;
 /** Readouts warn when a slab's actual row text angle is this far off target. */
 export const TEXT_ANGLE_TOLERANCE = 0.15;
 

@@ -54,8 +54,12 @@ export function renderPuzzleText(puzzle: Puzzle, text: string): string {
 export type PuzzleText = {
   goal: string;
   hints: [string, string, string];
-  winNote: string | null;
+  takeaway: string;
 };
+
+/** A takeaway fits one card line at this length; fan-out takeaways may use two. */
+export const TAKEAWAY_MAX_CHARS = 60;
+export const FANOUT_TAKEAWAY_MAX_CHARS = 2 * TAKEAWAY_MAX_CHARS - 10;
 
 export function puzzleText(puzzle: Puzzle): PuzzleText {
   const copy = PUZZLE_COPY[puzzle.id];
@@ -63,6 +67,6 @@ export function puzzleText(puzzle: Puzzle): PuzzleText {
   return {
     goal: render(copy.goal),
     hints: [render(copy.hints[0]), render(copy.hints[1]), render(copy.hints[2])],
-    winNote: copy.winNote === undefined ? null : render(copy.winNote),
+    takeaway: render(copy.takeaway),
   };
 }

@@ -71,7 +71,11 @@ events and logged state; nothing has been tested on a real Quest yet.
 Daily and practice puzzles over four small datasets; design and phases in
 [`plans/challenge-mode.md`](plans/challenge-mode.md). Phase 1 (pure data
 layer and tests: datasets, 20 puzzles, query and NULL filter, result
-comparison and diff, daily selection, streak, progress, copy) is written.
+comparison and diff, daily selection, streak, progress, copy) is committed.
+Phase 2 (shop puzzles 1-3 playable: card, silhouette, diff, NULL poke, bar,
+win, progress) is implemented and emulator-tested, at its checkpoint.
+Challenge mode is on in dev and with `?challenge=1` in production; the
+production default is still the sandbox.
 
 ## Future
 

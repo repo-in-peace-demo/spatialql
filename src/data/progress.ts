@@ -131,6 +131,46 @@ export function practiceSolvedCount(progress: Progress, order: readonly PuzzleId
   return order.filter((id) => isSolved(progress, id)).length;
 }
 
+/**
+ * Drops progress that the current build can't have produced: solves of
+ * puzzles outside `playable` (e.g. beyond phase 2's range), and, with
+ * `inOrderOnly` (no daily yet, so every solve came from strict practice
+ * order), solves after the first unsolved puzzle. A resume point outside
+ * `playable` is dropped too. Returns the same object when nothing changes.
+ */
+export function sanitizeProgress(
+  progress: Progress,
+  playable: readonly PuzzleId[],
+  order: readonly PuzzleId[],
+  inOrderOnly: boolean,
+): Progress {
+  const solved: Progress['solved'] = {};
+  let changed = false;
+  let gap = false;
+  for (const id of order) {
+    const record = progress.solved[id];
+    if (!record) {
+      gap = true;
+      continue;
+    }
+    if (!playable.includes(id) || (inOrderOnly && gap)) {
+      changed = true;
+      continue;
+    }
+    solved[id] = record;
+  }
+  for (const id of Object.keys(progress.solved)) {
+    if (!order.includes(id as PuzzleId)) {
+      changed = true;
+    }
+  }
+  const lastPuzzle = progress.lastPuzzle && playable.includes(progress.lastPuzzle) ? progress.lastPuzzle : null;
+  if (lastPuzzle !== progress.lastPuzzle) {
+    changed = true;
+  }
+  return changed ? { ...progress, solved, lastPuzzle } : progress;
+}
+
 // --- Parsing and storage ------------------------------------------------------
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -3,8 +3,10 @@ import { compareToTarget, fanOutGroups } from './compare.js';
 import { CONCEPT_INTROS, DATASET_TITLES, PUZZLE_COPY } from './copy.js';
 import { DATASETS } from './datasets.js';
 import {
+  canActivatePuzzle,
   DAILY_SCHEDULE,
   introducesConcept,
+  puzzleMatchesTables,
   PRACTICE_ORDER,
   PUZZLES,
   puzzleTables,
@@ -76,9 +78,8 @@ describe.each(PUZZLES.map((puzzle): [string, Puzzle] => [puzzle.id, puzzle]))('p
     expect(target.result.lineage[puzzle.revealRow].ghost).toBe(false);
   });
 
-  it('fan-out puzzles have repeats to highlight and a note explaining them', () => {
+  it('fan-out puzzles have repeats to highlight (their takeaway explains them)', () => {
     expect(puzzle.fanOutHighlight !== undefined).toBe(puzzle.concept === 'fanout');
-    expect(PUZZLE_COPY[puzzle.id].winNote !== undefined).toBe(puzzle.concept === 'fanout');
     if (puzzle.fanOutHighlight) {
       const groups = fanOutGroups(target).filter((group) => group.cause === puzzle.fanOutHighlight);
       expect(groups.length).toBeGreaterThan(0);
@@ -90,7 +91,7 @@ describe.each(PUZZLES.map((puzzle): [string, Puzzle] => [puzzle.id, puzzle]))('p
     expect(copy.goal.length).toBeGreaterThan(0);
     expect(copy.goal.length).toBeLessThanOrEqual(GOAL_MAX_CHARS);
     expect(copy.hints).toHaveLength(3);
-    for (const text of [copy.goal, ...copy.hints, copy.winNote ?? '']) {
+    for (const text of [copy.goal, ...copy.hints, copy.takeaway]) {
       // Plain ASCII only (see copy.ts).
       expect(text).toMatch(/^[\x20-\x7e]*$/);
     }
@@ -147,6 +148,35 @@ describe('the trickier puzzles', () => {
       expect(states.length, id).toBeGreaterThan(0);
     }
     expect(solving).toMatchSnapshot();
+  });
+});
+
+describe('puzzle activation guards', () => {
+  const PHASE_2 = PRACTICE_ORDER.slice(0, 3);
+  const SHOP_DESK = ['customers', 'orders'];
+
+  it('a puzzle matches only its own tables, in either order', () => {
+    expect(puzzleMatchesTables(getPuzzle('shop-match'), ['orders', 'customers'])).toBe(true);
+    expect(puzzleMatchesTables(getPuzzle('library-fanout'), SHOP_DESK)).toBe(false);
+    expect(puzzleMatchesTables(getPuzzle('shop-match'), ['customers'])).toBe(false);
+    expect(puzzleMatchesTables(getPuzzle('shop-match'), ['customers', 'orders', 'books'])).toBe(false);
+  });
+
+  it('loading is rejected for a puzzle on other tables, or outside the playable range', () => {
+    expect(canActivatePuzzle('shop-never-ordered', PHASE_2, SHOP_DESK)).toBe(true);
+    // Puzzle 4 is on the library tables, and beyond phase 2's range.
+    expect(canActivatePuzzle('library-fanout', PHASE_2, SHOP_DESK)).toBe(false);
+    expect(canActivatePuzzle('library-fanout', PRACTICE_ORDER, SHOP_DESK)).toBe(false);
+    expect(canActivatePuzzle('library-fanout', PRACTICE_ORDER, ['borrowers', 'books'])).toBe(true);
+    // A shop puzzle beyond the range (puzzle 5) is rejected too.
+    expect(canActivatePuzzle('shop-every-order', PHASE_2, SHOP_DESK)).toBe(false);
+    expect(canActivatePuzzle('no-such-puzzle', PRACTICE_ORDER, SHOP_DESK)).toBe(false);
+  });
+
+  it('evaluating a result against a puzzle on other tables is rejected', () => {
+    // The shop result that solves puzzle 3, checked against puzzle 4 (library).
+    const shopResult = runPuzzleQuery(getPuzzle('shop-never-ordered'), getPuzzle('shop-never-ordered').solution);
+    expect(puzzleMatchesTables(getPuzzle('library-fanout'), [shopResult.left.id, shopResult.right.id])).toBe(false);
   });
 });
 

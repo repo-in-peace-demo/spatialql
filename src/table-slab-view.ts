@@ -115,6 +115,25 @@ const COLOR_ROW_BACKGROUND_ODD = '#ece7db';
 const COLOR_TEXT = '#1c1c1c';
 const COLOR_TEXT_NULL = '#8a8378';
 const COLOR_CAPTION = '#3a362e';
+// Challenge mode: the win look (a warm border and caption), the diff
+// marker, and the outline of silhouette / placeholder rows.
+const COLOR_WIN_BORDER = '#d08a1e';
+const COLOR_CAPTION_WIN = '#8a4b00';
+const COLOR_DIFF_MARKER = '#5b4a8a';
+const COLOR_OUTLINE = '#a89f8c';
+/** Width of the diff gutter (a narrow first column for the `+` marker), at the base font. */
+const BASE_GUTTER_WIDTH = 2.2;
+const BASE_OUTLINE_WIDTH = 0.12;
+
+/** Challenge win look for a result slab's border. */
+export function slabBorderColor(win: boolean): string {
+  return win ? COLOR_WIN_BORDER : COLOR_PANEL_BORDER;
+}
+
+/** Challenge win look for a result slab's SQL caption. */
+export function captionColor(win: boolean): string {
+  return win ? COLOR_CAPTION_WIN : COLOR_CAPTION;
+}
 
 // The exact MSDF font data UIKit renders with. UIKit's default family is this
 // same Inter package, but it resolves `fontWeight` to the nearest available
@@ -151,6 +170,7 @@ const HEADER_METRICS = buildGlyphMetrics(HEADER_FONT_INFO);
 const MONO_METRICS = buildGlyphMetrics(MONO_FONT_INFO);
 
 type Container = InstanceType<typeof UIKit.Container>;
+type ContainerProps = NonNullable<ConstructorParameters<typeof UIKit.Container>[0]>;
 type Text = InstanceType<typeof UIKit.Text>;
 
 /** A transform offset (cm, panel-local; +Y is down, +Z toward the viewer) for a group of cells. */
@@ -178,7 +198,18 @@ export type RowView = {
   backgroundFade: Signal<number>;
   /** The row's own (zebra) background, restored when a key tint is cleared. */
   baseBackground: string;
+  /** With `diffGutter`: opacity of the row's `+` ("not in the answer") marker. */
+  marker: Signal<number> | null;
 };
+
+/** A placeholder for a row the answer still needs (challenge mode); hidden until shown. */
+export type PlaceholderRowView = {
+  row: Container;
+  opacity: Signal<number>;
+};
+
+/** A data column's horizontal extent in the document's frame (meters, origin at the panel center). */
+export type ColumnSpan = { x0: number; x1: number };
 
 function cellOffset(): CellOffset {
   return { x: signal(0), y: signal(0), z: signal(0) };
@@ -205,6 +236,12 @@ export type TableSlabDocument = {
   fade: Signal<number>;
   /** The SQL caption's Text nodes, one per line (empty without a caption). */
   captionLines: Text[];
+  /** Per caption line: its opacity (multiplied by `fade`), e.g. to hide a reserved line. */
+  captionOpacity: Signal<number>[];
+  /** Each data column's extent, for hit tests (pinch on a cell). */
+  columnSpans: ColumnSpan[];
+  /** With `placeholderRows`: the hidden placeholder rows, after the data rows. */
+  placeholders: PlaceholderRowView[];
   /** Physical font sizes the slab was built with (meters). */
   rowFontMeters: number;
   headerFontMeters: number;
@@ -240,6 +277,17 @@ export type SlabBuildOptions = {
    * once with the slab, so animating it needs no new objects or layout.
    */
   cellSides?: ReadonlyArray<'left' | 'right'>;
+  /** Challenge mode: a narrow first column holding each row's diff marker. */
+  diffGutter?: boolean;
+  /** Challenge mode: this many hidden placeholder rows after the data rows. */
+  placeholderRows?: number;
+  /**
+   * Reserve the height of at least this many rows (`heightMeters`), so
+   * placement keeps room for rows plus placeholders.
+   */
+  reserveRows?: number;
+  /** Challenge silhouette: rows are empty outlines, except `revealRow`, which keeps its text. */
+  silhouette?: { revealRow: number | null };
 };
 
 /** Rows shown for `table` under `maxRows`, and whether a "+N more" row follows. */
@@ -258,7 +306,8 @@ function captionHeightCmFor(options: SlabBuildOptions, m: SlabMetrics): number {
  */
 export function tableSlabNaturalHeightMeters(table: Table, options: SlabBuildOptions = {}): number {
   const { visibleRowCount, overflow } = visibleRowLayout(table, options.maxRows ?? MAX_VISIBLE_ROWS);
-  return panelHeightCm(options, slabMetrics(options.text), visibleRowCount, overflow) / 100;
+  const rows = Math.max(visibleRowCount, options.reserveRows ?? 0);
+  return panelHeightCm(options, slabMetrics(options.text), rows, overflow) / 100;
 }
 
 /** Panel height (cm) with `rows` data rows (plus the "+N more" row if `overflow`). */
@@ -352,6 +401,8 @@ function buildCell(
   bold: boolean,
   m: SlabMetrics,
   offset: CellOffset | null = null,
+  /** A number, or a (computed) signal UIKit binds like any other property. */
+  textOpacity: unknown = 1,
 ): Container {
   const cell = cellContainer(columnWidthCm, m);
   if (offset) {
@@ -370,9 +421,20 @@ function buildCell(
       // Never break onto a second line; text is pre-truncated to fit.
       wordBreak: 'keep-all',
       flexShrink: 0,
+      ...(textOpacity === 1 ? {} : { opacity: textOpacity as number }),
     }),
   );
   return cell;
+}
+
+/** Single-line width (cm) of `text` in the bold header font at `fontSizeCm`. */
+export function measureHeaderTextCm(text: string, fontSizeCm: number): number {
+  return measureTextCm(text, HEADER_METRICS, fontSizeCm);
+}
+
+/** Single-line width (cm) of `text` in the regular data font at `fontSizeCm`. */
+export function measureDataTextCm(text: string, fontSizeCm: number): number {
+  return measureTextCm(text, DATA_METRICS, fontSizeCm);
 }
 
 /** Width of the caption's widest possible line at the (fixed) caption size. */
@@ -408,16 +470,22 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
   const maxRows = options.maxRows ?? MAX_VISIBLE_ROWS;
   const { visibleRowCount, overflow } = visibleRowLayout(table, maxRows);
   const visibleRows = table.rows.slice(0, visibleRowCount);
-  // Height with every row displayed (hidden rows included): what placement reserves.
-  const heightCm = panelHeightCm(options, m, visibleRowCount, overflow);
+  // Height with every row displayed (hidden rows included), or the reserved
+  // row count if larger: what placement reserves.
+  const heightCm = panelHeightCm(options, m, Math.max(visibleRowCount, options.reserveRows ?? 0), overflow);
   const heightForRowsMeters = (rows: number) => panelHeightCm(options, m, rows, overflow) / 100;
   // With `animatedHeight`, the panel starts at the height of the rows shown now.
   const shownRows = visibleRows.filter((_, rowIndex) => !options.hiddenRows?.has(rowIndex)).length;
   const panelHeight = options.animatedHeight ? signal(heightForRowsMeters(shownRows) * 100) : null;
 
   const columnWidths = computeColumnWidths(table, visibleRows, m);
+  // The diff gutter is a narrow column before the data columns.
+  const gutterWidthCm = options.diffGutter ? BASE_GUTTER_WIDTH * (m.rowFont / BASE_ROW_FONT_CM) : 0;
+  const gutterSpanCm = options.diffGutter ? gutterWidthCm + m.columnGap : 0;
   let contentWidthCm =
-    columnWidths.reduce((sum, w) => sum + w, 0) + m.columnGap * Math.max(0, table.columns.length - 1);
+    gutterSpanCm +
+    columnWidths.reduce((sum, w) => sum + w, 0) +
+    m.columnGap * Math.max(0, table.columns.length - 1);
   // The caption never shrinks below its fixed size: if it's wider than the
   // columns, the last column absorbs the difference so rows still span the
   // full slab width.
@@ -459,6 +527,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
 
   const captionHeightCm = captionHeightCmFor(options, m);
   const captionLines: Text[] = [];
+  const captionOpacity: Signal<number>[] = [];
   if (options.caption) {
     const fontSize = m.captionFont;
     const captionBlock = new UIKit.Container({
@@ -466,6 +535,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       paddingBottom: m.captionGapBelow,
     });
     for (const line of options.caption.lines) {
+      const lineOpacity = signal(1);
       const text = new UIKit.Text({
         text: line,
         fontFamily: 'mono',
@@ -473,12 +543,51 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
         color: COLOR_CAPTION,
         wordBreak: 'keep-all',
         flexShrink: 0,
+        opacity: computed(() => lineOpacity.value * fade.value),
       });
       captionBlock.add(text);
       captionLines.push(text);
+      captionOpacity.push(lineOpacity);
     }
     root.add(captionBlock);
   }
+
+  // Each data column's extent, measured from the panel's left edge (cm),
+  // then converted to the document frame (origin at the panel center).
+  const columnSpans: ColumnSpan[] = [];
+  let columnLeftCm = m.borderWidth + m.panelPadding + gutterSpanCm;
+  for (const columnWidth of columnWidths) {
+    columnSpans.push({
+      x0: (columnLeftCm - widthCm / 2) / 100,
+      x1: (columnLeftCm + columnWidth - widthCm / 2) / 100,
+    });
+    columnLeftCm += columnWidth + m.columnGap;
+  }
+  const outlineWidth = BASE_OUTLINE_WIDTH * (m.rowFont / BASE_ROW_FONT_CM);
+  // An absolutely positioned layer filling a row (so it never affects layout).
+  // It ignores pointers, so a poke or ray reaches the cell above it (and its
+  // click listener) instead of stopping at the layer.
+  const rowLayer = (properties: ContainerProps) =>
+    new UIKit.Container({
+      pointerEvents: 'none',
+      positionType: 'absolute',
+      positionTop: 0,
+      positionLeft: 0,
+      positionRight: 0,
+      positionBottom: 0,
+      ...properties,
+    });
+  const outline = {
+    borderColor: COLOR_OUTLINE,
+    borderTopWidth: outlineWidth,
+    borderLeftWidth: outlineWidth,
+    borderRightWidth: outlineWidth,
+    borderBottomWidth: outlineWidth,
+    borderTopLeftRadius: m.borderRadius * 0.4,
+    borderTopRightRadius: m.borderRadius * 0.4,
+    borderBottomLeftRadius: m.borderRadius * 0.4,
+    borderBottomRightRadius: m.borderRadius * 0.4,
+  };
 
   const header = new UIKit.Container({
     flexDirection: 'row',
@@ -487,6 +596,9 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     borderTopLeftRadius: m.borderRadius * 0.6,
     borderTopRightRadius: m.borderRadius * 0.6,
   });
+  if (options.diffGutter) {
+    header.add(buildCell('', m.headerFont, gutterWidthCm, COLOR_TEXT, true, m));
+  }
   table.columns.forEach((column, columnIndex) => {
     const columnWidth = columnWidths[columnIndex];
     const label = truncateToWidth(
@@ -509,8 +621,8 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     const backgroundFade = signal(1);
     const rowContainer = new UIKit.Container({
       flexDirection: 'row',
-      // Join results paint the background on a separate layer (below).
-      ...(flight ? {} : { backgroundColor: rowBackground }),
+      // Join results (and silhouettes) paint the background on a separate layer (below).
+      ...(flight || options.silhouette ? {} : { backgroundColor: rowBackground }),
       gapColumn: m.columnGap,
       opacity: computed(() => rowOpacity.value * fade.value),
       transformTranslateY: offsetYCm,
@@ -521,16 +633,23 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     // cells land, while the cells stay fully visible in flight.
     let background = rowContainer;
     if (flight) {
-      background = new UIKit.Container({
-        positionType: 'absolute',
-        positionTop: 0,
-        positionLeft: 0,
-        positionRight: 0,
-        positionBottom: 0,
-        backgroundColor: rowBackground,
-        opacity: backgroundFade,
-      });
+      background = rowLayer({ backgroundColor: rowBackground, opacity: backgroundFade });
       rowContainer.add(background);
+    }
+    // A silhouette row is an empty outline (its text is laid out but invisible,
+    // so its height matches a real row); the revealed row keeps its text.
+    const revealed = !options.silhouette || options.silhouette.revealRow === rowIndex;
+    if (options.silhouette) {
+      rowContainer.add(rowLayer(revealed ? { ...outline, backgroundColor: rowBackground } : outline));
+    }
+
+    let marker: Signal<number> | null = null;
+    if (options.diffGutter) {
+      const markerOpacity = signal(0);
+      marker = markerOpacity;
+      // Its own opacity, so multiplied by the row's and the slab's explicitly.
+      const shown = computed(() => markerOpacity.value * rowOpacity.value * fade.value);
+      rowContainer.add(buildCell('+', m.rowFont, gutterWidthCm, COLOR_DIFF_MARKER, true, m, null, shown));
     }
 
     // Cells of an unmatched LEFT JOIN row hold `null` and render as `NULL`,
@@ -548,7 +667,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       const side = options.cellSides?.[columnIndex];
       const offset = flight && side ? flight[side] : null;
       const color = raw === null ? COLOR_TEXT_NULL : COLOR_TEXT;
-      const cell = buildCell(truncated, m.rowFont, columnWidth, color, false, m, offset);
+      const cell = buildCell(truncated, m.rowFont, columnWidth, color, false, m, offset, revealed ? 1 : 0);
       rowContainer.add(cell);
       return cell;
     });
@@ -563,8 +682,27 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       background,
       backgroundFade,
       baseBackground: rowBackground,
+      marker,
     });
   });
+
+  // Placeholders for rows the answer still needs: a `?` in an outline, the
+  // same height as a data row, hidden until shown.
+  const placeholders: PlaceholderRowView[] = [];
+  for (let i = 0; i < (options.placeholderRows ?? 0); i++) {
+    const opacity = signal(0);
+    const row = new UIKit.Container({
+      flexDirection: 'row',
+      justifyContent: 'center',
+      gapColumn: m.columnGap,
+      opacity: computed(() => opacity.value * fade.value),
+      display: 'none',
+    });
+    row.add(rowLayer(outline));
+    row.add(buildCell('?', m.rowFont, m.columnMinWidth, COLOR_TEXT_NULL, true, m));
+    root.add(row);
+    placeholders.push({ row, opacity });
+  }
 
   if (overflow) {
     const remaining = table.rows.length - visibleRowCount;
@@ -599,6 +737,9 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     rowHeightMeters: m.dataRowHeight / 100,
     fade,
     captionLines,
+    captionOpacity,
+    columnSpans,
+    placeholders,
     rowFontMeters: m.rowFont / 100,
     headerFontMeters: m.headerFont / 100,
     panelHeightCm: panelHeight,

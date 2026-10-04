@@ -15,8 +15,14 @@ and its tests) is written; phases 2-5 aren't started.
   key that caused it are highlighted briefly (`fanOutGroups`, with
   `fanOutHighlight` per puzzle), and the card shows a one-line note
   (`winNote` in `copy.ts`). Puzzle 1 is the tutorial; an instant win is fine.
-- Win line: "You just wrote this query." normally; "That's this query:"
-  when the full-answer hint was shown.
+- Win message (revised after phase 2 feedback), in the existing card height:
+  the headline "Solved!" (large, gold) takes the goal's two-line slot while
+  won; then a puzzle-specific `takeaway` (why it worked; at most 60
+  characters, one line, tested; the fan-out takeaways use two lines); then
+  the query line "Your moves wrote this query:" ("That's this query:" when
+  the full-answer hint was shown). "Solved with N hints." sits in the title
+  row's right-hand slot. The goal text is what's dropped while the win
+  shows; the title still names the puzzle.
 - Free play: a secondary button below the main Start button on the welcome
   panel.
 - Streak: daily only, local calendar day, no freeze.
@@ -581,7 +587,59 @@ If phase 3 runs late, the fallback is a plain fade between datasets instead of
 the sink and rise. If even that slips, ship the 5 shop puzzles plus the daily
 (shop only), so the daily would repeat every 5 days.
 
-## Phase 2 plan: smallest playable (awaiting approval)
+## Phase 2 status (implemented; at the checkpoint)
+
+Approved with: sandbox stays the production default, and `?challenge=1`
+turns challenge mode on in any build (dev defaults to challenge mode;
+`?mode=free` gives the sandbox there); Next glides the slabs home; after
+puzzle 3 the card says "More puzzles soon." and Next is inactive.
+
+Changes from the plan below:
+
+- **Home glide:** each slab's pose is recorded before the puzzle first moves
+  it (first grab or join) and Next eases it back there, instead of
+  re-running desk placement (`replaceSlabs()` wasn't needed).
+- **NULL cells:** UIKit clicks never reached the result slab in the
+  emulator, so the join system tests ray selects (each input's target ray
+  against the slab's plane), fingertip pokes (crossing the surface) and
+  pinches against the cell geometry itself. One debounced path for all three.
+- **The band (bar fix):** INNER | LEFT and the bar are one group centered on
+  the seam, the bar laid out along the control's own axis with a fixed
+  `BAR_CONTROL_GAP_METERS` (1.5 cm) gap, so they can't overlap. The bar is
+  only as wide as its buttons; the filter chip appears with a filter and the
+  bar resizes and re-centers. A pinch goes to the nearest target (control or
+  bar) within its margin. Disabled Next: light fill with mid-dark text.
+- **Dev:** `P` (previous puzzle) joins H / F / N / I.
+- **Guards** (after a dev-only win-card preview key painted puzzle 4's win
+  over the shop tables; the key is removed): a puzzle becomes active only
+  through `canActivatePuzzle` (in the playable range, and on exactly the
+  tables on the desk), whatever asks (Next, debug keys, saved progress,
+  later the daily); otherwise the card says "More puzzles soon." The win
+  check and diff run only when the active puzzle matches the joined tables
+  (`puzzleMatchesTables`); a mismatch logs an error under `?debug=1` and
+  shows no result state. Saved progress is sanitized on load
+  (`sanitizeProgress`: solves outside the playable range or out of strict
+  order, and an out-of-range resume point, are dropped). From phase 3,
+  loading a puzzle loads its dataset first.
+- **Filter chip:** the WHERE clause is a flat label (not a target), followed
+  by its own bordered Clear pill (4 x 2.5 cm target).
+
+Emulator results (seated head, debug keys plus controller rays):
+
+- Puzzles 1-3 play through: 1 wins on the first join; 2 shows "1 row
+  missing" with a placeholder after INNER and wins on LEFT; 3 shows 10
+  extra rows and the NULL coach on LEFT, and wins when a NULL is poked (by
+  `F`, and by a controller ray at the cell). Poking again restores all rows.
+- Readout: group 71.4 deg of 80 (card top 38.0 deg); band targets INNER /
+  LEFT 4.4 x 2.5 cm, Hint / Next 4.0 x 2.5 cm, all 0.46-0.47 m from the eyes
+  and 10.1-10.6 cm clear of the slabs; control-to-bar gap 1.5 cm.
+- Sounds: win -16.5 to -18.0 dBFS (resolve -16.1), hint -16.9 to -19.7.
+- Join start 2-4 ms; no long tasks at join, filter or Next.
+- Not yet verified: hand pinch on bar buttons and NULL cells (and the
+  pinch-to-slab distance it logs), a pinch in the control/bar gap, free play
+  with `?mode=free`, `?resetProgress`; typecheck, tests and the build.
+
+## Phase 2 plan: smallest playable (approved)
 
 Scope: shop puzzles 1–3 on the existing tables, so no table switching. It
 ends at a checkpoint for hands-on play. Fan-out highlighting, other datasets,
