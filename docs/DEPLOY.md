@@ -19,11 +19,14 @@ production.
 | Grab readout, seated head | Dynamically imported only inside `import.meta.env.DEV` checks |
 | Placement and join readouts, outlines, J / Shift+J / T / U / R keys | Only constructed when `import.meta.env.DEV` and the `debug` flag are on |
 | Challenge mode's readouts and keys: H / F / N / P / I, G (apply the solution) and X (apply the wrong state) | `ChallengeDebug`, only constructed when `import.meta.env.DEV` and the `debug` flag are on |
-| Challenge `?resetProgress` and `?puzzle=` | Read only inside `import.meta.env.DEV` checks |
+| Challenge `?resetProgress`, `?puzzle=` and `?day=`, and the start-choice readout | Read or logged only inside `import.meta.env.DEV` checks |
 | The `[Slab]` truncation warning | Inside an `import.meta.env.DEV` check |
+| The in-headset debug panel (`src/debug-hud.ts`): console tap, frame-time line, swap button, `debugSide` | Dynamically imported only inside an `import.meta.env.DEV` check, with the `debug` flag on |
 
-Challenge mode itself ships: it's off by default in production and turned on
-with `?challenge=1`.
+Challenge mode itself ships, and is the default: the puzzles, the daily
+puzzle and its streak. The welcome screen's **Free play** button reloads the
+page in the sandbox (`?mode=free`), and its **Puzzles** button reloads back.
+Challenge mode's `?day=` override is dev-only.
 
 Vite sets `import.meta.env.DEV` to `false` in a production build, so the bundler
 can remove all of this. To confirm it did, see "Verify the build locally" below.
@@ -73,7 +76,7 @@ Then check that no dev-only code made it into `dist/`. This should print
 nothing:
 
 ```
-grep -rlE "\[Grab debug\]|\[Join debug\]|\[DeskPlacement|\[seated\]|\[dev flags\]|spatialql\.debug|Option\+Shift|join: bring orders|@iwer|slab \(touch\)|pinch evaluated|group: top|\[Challenge debug\]|applying the solution|applying the wrong state|apply the puzzle|resetProgress|\[Slab\]|cut off with an ellipsis|switched to" dist/
+grep -rlE "\[Grab debug\]|\[Join debug\]|\[DeskPlacement|\[seated\]|\[dev flags\]|spatialql\.debug|Option\+Shift|join: bring orders|@iwer|slab \(touch\)|pinch evaluated|group: top|\[Challenge debug\]|applying the solution|applying the wrong state|apply the puzzle|resetProgress|\[Slab\]|cut off with an ellipsis|switched to|\[HUD\]|frame p50|debugSide|start: daily|start: practice|from \?puzzle=" dist/
 ```
 
 If it lists a file, some dev code survived the build (it can't run, because
@@ -96,7 +99,8 @@ session. No HTTPS or extra flag is needed for this: `localhost` counts as a
 secure context.
 
 `npm run preview` is for checking on the desktop. To test on a Quest, use the
-deployed HTTPS link. Over plain HTTP on your LAN the Quest Browser won't
+deployed HTTPS link, or the dev server over Wi-Fi (see "Testing on a Quest
+over Wi-Fi" below). Over plain HTTP on your LAN the Quest Browser won't
 expose WebXR at all.
 
 ## Deploy, recommended: import the GitHub repo in Vercel
@@ -156,18 +160,89 @@ Redeploy after any change by running `npx vercel deploy --prod` again.
 
 1. Put on the headset and open the **Meta Quest Browser**.
 2. Type the production address (`https://<project>.vercel.app`) and open it.
-3. You'll see the welcome panel ("Hello, Immersive Web!") with an **Enter XR**
-   button. Tap it.
+3. You'll see the SpatialQL welcome screen: today's puzzle (or "Start with 3
+   short practice puzzles." on a first visit), the streak, practice progress,
+   and the **Start** button (it enters XR). Tap Start.
 4. Allow the permission prompts. The browser asks to use your surroundings
    (passthrough / spatial data) and hand tracking. Choose **Allow**.
-5. You're in passthrough AR. The customers and orders slabs appear in front of
-   you, within reach. If a table is detected they rest on it; otherwise they
-   float at desk height. Put your controllers down to use your hands.
-6. Pinch a slab with your palm close to it to grab it. Bring orders next to
-   customers until the edges glow, and release to join. The INNER | LEFT
+5. You're in passthrough AR. Two table slabs appear in front of you, within
+   reach, with a puzzle card above them. If a desk is detected they rest on
+   it; otherwise they float at desk height. Put your controllers down to use
+   your hands.
+6. Pinch a slab with your palm close to it to grab it. Bring one table next to
+   the other until the edges glow, and release to join. The INNER | LEFT
    control above the pair switches the join type; pull a slab away to undo.
+   Hint and Next sit beside the control.
 7. To leave, use the Quest's system menu (or the browser's exit control). The
-   welcome panel comes back.
+   welcome screen comes back, with the progress updated.
 
-A first-time user sees the same flow. There are no dev flags, debug lines,
-outlines or keyboard shortcuts in production.
+A first-time user sees the same flow, starting with practice puzzle 1. The
+daily puzzle is offered once practice 1-3 are solved. **Free play** on the
+welcome screen gives the sandbox (no card, no puzzles). There are no dev
+flags, debug lines, outlines or keyboard shortcuts in production.
+
+## Testing on a Quest over Wi-Fi
+
+The dev server can run on the Quest directly, so changes show up on the
+headset as you save, with no deploy.
+
+1. **Same network.** The Quest and the Mac must be on the same Wi-Fi.
+   Guest networks that isolate devices won't work.
+2. **Start the dev server** on the Mac with `npm run dev`, then find its
+   network URL with `npx @iwsdk/cli dev status` (`data.runtimeUrls.network`),
+   for example `https://192.168.29.98:8081/`. Vite already listens on all
+   interfaces (`server.host: '0.0.0.0'` in `vite.config.ts`). If the Quest
+   can't reach it, allow incoming connections for Node in the macOS firewall
+   (System Settings, Network, Firewall).
+3. **Open the URL in the Meta Quest Browser.** The dev server uses a
+   self-signed certificate, so the browser shows a warning ("Your connection
+   is not private"). Choose **Advanced**, then **Proceed to 192.168.x.x
+   (unsafe)**. That's expected for the local dev certificate, and WebXR works
+   once you're through. The warning comes back if the cached certificate is
+   regenerated (`.iwsdk/https`) or the Mac's IP address changes.
+4. **The emulator stays off on the Quest.** No configuration needed: the
+   IWSDK dev plugin injects the XR emulator (IWER) only when the page's
+   host is `localhost` or `127.0.0.1` (its `activation` option defaults to
+   `'localhost'`), and it also skips any user agent matching
+   `/OculusBrowser/` (`userAgentException`). The startup log line
+   `[IWSDK Dev] Configuration: {... activation: localhost ...
+   "userAgentException":"/OculusBrowser/" ...}` shows both. On the Quest you
+   get native WebXR: real passthrough, real hands, and the desk from real
+   plane detection. With `?debug=1`, the debug panel's title shows the host
+   and "Quest Browser".
+5. **Dev flags go in the URL.** For example
+   `https://192.168.29.98:8081/?debug=1`. Also available: `mute=1`,
+   `puzzle=<id>`, `day=YYYY-MM-DD` (pretend it's that day, for the daily and
+   the streak), `resetProgress`, `mode=free` (the sandbox), and
+   `debugSide=left|right` for the debug panel.
+   - **Keep `seated` and `forceSurface` off on the Quest.** `seated` is an
+     emulator aid that fights the real head pose; `forceSurface` replaces the
+     real desk with a synthetic one.
+   - The Quest has its own `localStorage`: flags stored on the Mac (with the
+     Option+Shift hotkeys) don't carry over. The keyboard shortcuts need a
+     keyboard paired with the Quest.
+6. **Live changes.** Saving on the Mac hot-reloads the page on the Quest. The
+   managed Chromium window on the Mac can stay open alongside it.
+
+### The in-headset debug panel (`?debug=1`)
+
+A small dark text panel beside the tables, outside their view window, about
+0.5 m away. It shows:
+
+- the latest tagged debug lines: grab attempts and why they did or didn't
+  grab (`grab`), join and toggle transitions, the filter and sounds with
+  their peaks (`join`), placement (`desk`), puzzle evaluations (`puzzle`);
+- every warning (yellow) and error (red), including uncaught errors;
+- a frame-time line: p50, p95 and max over the last 360 frames (about
+  4-5 s), and the long-task count with the latest one. The VR budget is
+  11-14 ms per frame.
+
+It refreshes at most four times a second. Its **Move left / Move right**
+button (on the edge nearest the tables) swaps it to the other side: poke it,
+pinch on it, or point a ray and select. The side is remembered on that
+device; `?debugSide=left|right` overrides it. The panel is never grabbable
+and its placement line (`hud placed ...`) reports the button's distance and
+its clearance from the nearest slab.
+
+For the full console, connect the Quest over USB and open `chrome://inspect`
+in Chrome on the Mac.

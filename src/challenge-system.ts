@@ -18,15 +18,17 @@
  * Inert in free play (`CHALLENGE_MODE` false): it builds nothing.
  */
 
-import { createSystem, PokeInteractable, RayInteractable, Vector3, type Entity } from '@iwsdk/core';
+import { createSystem, PokeInteractable, RayInteractable, Vector3, type Entity, type Signal } from '@iwsdk/core';
 import { CHALLENGE_MODE } from './challenge-mode.js';
-import { challengeStart, PLAYABLE } from './challenge-start.js';
+import { challengeStart, PLAYABLE, publishProgress } from './challenge-start.js';
 import {
   buildPuzzleBar,
   buildPuzzleCard,
   setBarChip,
+  setCardIntro,
   setCardTheme,
   setCardWin,
+  setHintLabel,
   setNextAvailable,
   setNextWaiting,
   type BarButton,
@@ -34,13 +36,24 @@ import {
   type PuzzleCardView,
 } from './challenge-view.js';
 import { compareToTarget, fanOutGroups, type Comparison } from './data/compare.js';
-import { BAR, CARD, CONCEPT_INTROS, NULL_EXPLAINER } from './data/copy.js';
-import { localDay } from './data/daily.js';
+import { BAR, CARD, CONCEPT_INTROS, NULL_EXPLAINER, WELCOME } from './data/copy.js';
+import { isoFromDay } from './data/daily.js';
+import { aheadConcepts, isTodaysDaily, nextPuzzle } from './data/daily-flow.js';
 import { DATASETS } from './data/datasets.js';
 import { canEvaluate, canStartSwitch, deskTableIds, type DeskState } from './data/desk-session.js';
 import type { JoinState } from './data/join-state.js';
 import { buildWhereSql } from './data/join-sql.js';
-import { isSolved, markConceptSeen, markSolved, saveProgress, type KeyValueStorage, type Progress } from './data/progress.js';
+import {
+  currentStreak,
+  dailySolvedToday,
+  isSolved,
+  markConceptSeen,
+  markDailySolved,
+  markSolved,
+  saveProgress,
+  type KeyValueStorage,
+  type Progress,
+} from './data/progress.js';
 import { PUZZLE_CHECKS } from './data/puzzle-checks.js';
 import { latestHintIndex, sessionTransition, startSession, type PuzzleSession } from './data/puzzle-session.js';
 import { puzzleText, type PuzzleText } from './data/puzzle-text.js';
@@ -72,11 +85,25 @@ const BAR_PINCH_DEPTH_METERS = 0.03;
 const BAR_PRESS_DEBOUNCE_SECONDS = 0.3;
 /** The card fades back in this fast when it changes puzzle (per second). */
 const CARD_FADE_IN_PER_SECOND = 3;
+/**
+ * During a dataset switch the card, bar and silhouette fade out with the
+ * leaving tables (over their 0.35 s), and fade back in only once placed for
+ * the new tables, so their move is part of the switch, never a jump after it.
+ */
+const SWITCH_FADE_OUT_PER_SECOND = 1 / 0.35;
+/** Frames to wait after activation before fading in: the join system places them first. */
+const REVEAL_DELAY_FRAMES = 2;
 
 export class ChallengeSystem extends createSystem({}) implements ChallengeHooks, ChallengeDebugHost {
   private join: JoinControls | null = null;
   private storage: KeyValueStorage | null = null;
   private progress!: Progress;
+  /** The day this page plays (fixed at load; dev `?day=` overrides it). */
+  private today = 0;
+  /** Whether the active puzzle is played as today's daily (its title, and its win extends the streak). */
+  private isDaily = false;
+  /** Whether the card shows the daily's concept intros in its query and note rows. */
+  private introShown = false;
 
   private card!: PuzzleCardView;
   private bar!: PuzzleBarView;
@@ -103,6 +130,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   /** The card's message text and puzzle, as last set. */
   private messageText = '';
   private cardPuzzleId: PuzzleId | null = null;
+  /** Frames left before the card, bar and silhouette fade in after activation. */
+  private revealFrames = 0;
   private debug: ChallengeDebug | null = null;
   private readonly _point = new Vector3();
   private readonly _local = new Vector3();
@@ -122,12 +151,13 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     const start = challengeStart();
     this.storage = start.storage;
     this.progress = start.progress;
+    this.today = start.today;
 
     // The card and bar, each on its own non-grabbable entity.
     this.card = buildPuzzleCard();
     this.cardEntity = this.world.createTransformEntity(this.card.document);
     this.bar = buildPuzzleBar(slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm, {
-      hint: BAR.hint,
+      hint: BAR.hintLabels,
       next: BAR.next,
       clear: BAR.clearFilter,
     });
@@ -163,6 +193,16 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         `progress: ${solved} solved; starting at ${start.puzzleId} on ${start.datasetId}` +
           (start.sanitized ? ' (sanitized: dropped entries this build cannot have made)' : ''),
       );
+      const streak = currentStreak(this.progress.daily, this.today);
+      this.debug.note(
+        start.reason === 'daily'
+          ? `start: daily ${start.puzzleId} for ${isoFromDay(this.today)}, streak ${streak}`
+          : start.reason === 'practice'
+            ? `start: practice ${start.puzzleId} on ${isoFromDay(this.today)} (` +
+              (dailySolvedToday(this.progress.daily, this.today) ? 'daily already solved' : 'daily not offered yet') +
+              `), streak ${streak}`
+            : `start: ${start.puzzleId} from ?puzzle= on ${isoFromDay(this.today)}, streak ${streak}`,
+      );
     }
 
     this.cleanupFuncs.push(() => {
@@ -187,9 +227,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       return;
     }
     this.clock += delta;
-    if (this.card.fade.peek() < 1) {
-      this.card.fade.value = Math.min(1, this.card.fade.peek() + delta * CARD_FADE_IN_PER_SECOND);
-    }
+    this.updateFade(delta);
     if (this.pending) {
       this.updatePendingSwitch(join);
       return;
@@ -205,6 +243,29 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     // Next pulses once the puzzle is won, until it's pressed.
     if (this.session.solved && this.nextAvailable()) {
       this.bar.nextOpacity.value = 0.75 + 0.25 * Math.sin(this.clock * 4);
+    }
+  }
+
+  /**
+   * The card's, bar's and silhouette's fade: out while the desk switches
+   * datasets; in again once the new puzzle is active and placed.
+   */
+  private updateFade(delta: number): void {
+    const switching = this.pending !== null && this.deskState().phase !== 'ready';
+    let target = 1;
+    let rate = CARD_FADE_IN_PER_SECOND;
+    if (switching) {
+      target = 0;
+      rate = SWITCH_FADE_OUT_PER_SECOND;
+    } else if (this.revealFrames > 0) {
+      this.revealFrames--;
+      return;
+    }
+    const step = delta * rate;
+    stepFade(this.card.fade, target, step);
+    stepFade(this.bar.fade, target, step);
+    if (this.silhouette) {
+      stepFade(this.silhouette.doc.fade, target, step);
     }
   }
 
@@ -247,7 +308,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (this.nullCoachPending && state.joinType === 'left' && join.hasVisibleNull()) {
       this.nullCoachPending = false;
       this.progress = markConceptSeen(this.progress, this.puzzle.concept);
-      saveProgress(this.storage, this.progress);
+      this.save();
       if (!this.session.solved && this.session.hintsShown === 0) {
         this.setMessage(`${CONCEPT_INTROS[this.puzzle.concept]} ${NULL_EXPLAINER}`);
       }
@@ -421,36 +482,54 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.text = puzzleText(this.puzzle);
     this.target = puzzleTarget(this.puzzle);
     this.session = startSession(id);
+    this.updateHintLabel();
     this.lastComparison = null;
     this.lastState = null;
 
     // The silhouette: the target's headers and row outlines, in the result slot.
     this.silhouette?.entity.dispose();
     const doc = buildSilhouette(this.puzzle, this.target);
+    // It appears with the card: hidden until placed (after a switch the card
+    // is faded out too), then they fade in together.
+    doc.fade.value = Math.min(doc.fade.peek(), this.card.fade.peek());
+    this.revealFrames = REVEAL_DELAY_FRAMES;
     const entity = this.world.createTransformEntity(doc.document);
     this.silhouette = { doc, entity };
     join.setSilhouette({ object: doc.document, widthMeters: doc.widthMeters, heightMeters: doc.heightMeters });
 
     // The card.
+    this.isDaily = isTodaysDaily(this.progress, id, this.today, PRACTICE_ORDER);
     this.showCardFor(this.puzzle);
     const concept = this.puzzle.concept;
+    // A daily ahead of practice introduces what it uses, without marking it
+    // seen: practice still introduces it properly when it gets there.
+    const ahead = this.isDaily ? aheadConcepts(this.progress, this.puzzle) : [];
     const freshConcept = introducesConcept(this.puzzle) && !this.progress.seenConcepts.includes(concept);
     // The antijoin intro waits until NULLs are on screen (see onSettled).
-    this.nullCoachPending = freshConcept && concept === 'antijoin';
-    if (freshConcept && concept !== 'antijoin') {
+    this.nullCoachPending = ahead.length === 0 && freshConcept && concept === 'antijoin';
+    if (ahead.length > 0) {
+      setCardIntro(this.card, CARD.dailyAhead, ahead.map((c) => CONCEPT_INTROS[c]));
+      this.messageText = CARD.dailyAhead;
+      this.introShown = true;
+    } else if (freshConcept && concept !== 'antijoin') {
       this.setMessage(CONCEPT_INTROS[concept]);
       this.progress = markConceptSeen(this.progress, concept);
     } else {
       this.setMessage('');
     }
 
-    this.progress = { ...this.progress, lastPuzzle: id };
-    saveProgress(this.storage, this.progress);
+    // A daily (possibly locked) is never the resume point; practice is.
+    if (!this.isDaily) {
+      this.progress = { ...this.progress, lastPuzzle: id };
+    }
+    this.save();
     this.updateNextLook();
     if (import.meta.env.DEV && this.debug) {
       this.debug.note(
-        `puzzle ${PRACTICE_ORDER.indexOf(id) + 1} (${id}) loaded on ${this.puzzle.datasetId}; ` +
-          `target ${visibleRowIndices(this.target).length} rows`,
+        `puzzle ${PRACTICE_ORDER.indexOf(id) + 1} (${id}) loaded on ${this.puzzle.datasetId}` +
+          `${this.isDaily ? ` as the daily for ${isoFromDay(this.today)}` : ''}; ` +
+          `target ${visibleRowIndices(this.target).length} rows` +
+          (ahead.length > 0 ? `; ahead of practice: ${ahead.join(', ')}` : ''),
       );
     }
   }
@@ -461,7 +540,13 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.cardPuzzleId = puzzle.id;
     setCardTheme(this.card, DATASETS[puzzle.datasetId].theme);
     setCardWin(this.card, null);
-    this.card.title.setProperties({ text: CARD.practiceTitle(PRACTICE_ORDER.indexOf(puzzle.id) + 1, puzzle.datasetId) });
+    this.introShown = false;
+    const daily = isTodaysDaily(this.progress, puzzle.id, this.today, PRACTICE_ORDER);
+    this.card.title.setProperties({
+      text: daily
+        ? CARD.dailyTitle(puzzle.datasetId)
+        : CARD.practiceTitle(PRACTICE_ORDER.indexOf(puzzle.id) + 1, puzzle.datasetId),
+    });
     this.card.goal.setProperties({ text: puzzleText(puzzle).goal });
     this.card.status.setProperties({ text: '' });
     if (fresh) {
@@ -471,12 +556,20 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   private win(): void {
     this.session = sessionTransition(this.session, { type: 'evaluate', solved: true });
+    // Recorded first, so Next and the streak below see this solve. Today's
+    // daily also extends the streak (once per day: a repeat changes nothing).
+    this.progress = markSolved(this.progress, this.puzzle.id, this.today, this.session.hintsShown);
+    if (this.isDaily) {
+      this.progress = markDailySolved(this.progress, this.today);
+    }
+    this.save();
+    this.introShown = false;
     // Solved! / why it worked / the query it wrote (honest after the full answer).
     setCardWin(this.card, {
       headline: CARD.headline,
       takeaway: this.text.takeaway,
       query: this.session.solvedWithAnswer ? CARD.winWithAnswer : CARD.win,
-      note: this.isLastPlayable() ? CARD.morePuzzlesSoon : null,
+      note: this.nextId() === null ? CARD.morePuzzlesSoon : null,
     });
     // The title row's right-hand slot (the diff summary while playing).
     this.card.status.setProperties({ text: this.solvedStatus() });
@@ -492,10 +585,12 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         .flatMap((group) => group.resultRows);
       this.join?.pulseRows(rows);
     }
-
-    this.progress = markSolved(this.progress, this.puzzle.id, localDay(new Date()), this.session.hintsShown);
-    saveProgress(this.storage, this.progress);
     this.updateNextLook();
+  }
+
+  /** Saves progress (best effort) and publishes it for the welcome screen. */
+  private save(): void {
+    publishProgress(this.progress, saveProgress(this.storage, this.progress));
   }
 
   private showHint(): void {
@@ -504,6 +599,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     const before = this.session;
     this.session = sessionTransition(this.session, { type: 'showHint' });
+    this.updateHintLabel();
     const index = latestHintIndex(this.session);
     if (index === null) {
       return;
@@ -518,27 +614,42 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
   }
 
+  /**
+   * The hint button says what it shows next: "Hint" before the first,
+   * "Another hint" after it, "Show answer" before the third (and after it,
+   * where a press shows the answer again).
+   */
+  private updateHintLabel(): void {
+    const labels = BAR.hintLabels;
+    setHintLabel(this.bar, labels[Math.min(this.session.hintsShown, labels.length - 1)]);
+  }
+
   private next(): void {
-    if (!this.nextAvailable()) {
+    const nextId = this.nextAvailable() ? this.nextId() : null;
+    if (!nextId) {
       return;
     }
-    const nextId = PLAYABLE[PLAYABLE.indexOf(this.puzzle.id) + 1];
     this.join?.resetToHome();
     this.loadPuzzle(nextId);
   }
 
-  /** The status line once solved: how many hints it took, if any. */
+  /** Where Next goes: today's daily if it's open, back to practice after it, else the next practice puzzle. */
+  private nextId(): PuzzleId | null {
+    return nextPuzzle(this.progress, this.puzzle.id, this.today, PLAYABLE);
+  }
+
+  /** The status line once solved: the streak for today's daily, else how many hints it took, if any. */
   private solvedStatus(): string {
+    if (this.isDaily && dailySolvedToday(this.progress.daily, this.today)) {
+      return WELCOME.streak(currentStreak(this.progress.daily, this.today));
+    }
     return this.session.hintsShown > 0 ? CARD.solvedWithHints(this.session.hintsShown) : '';
   }
 
   private nextAvailable(): boolean {
-    const nextId = PLAYABLE[PLAYABLE.indexOf(this.puzzle.id) + 1];
-    return !this.pending && nextId !== undefined && (this.session.solved || isSolved(this.progress, this.puzzle.id));
-  }
-
-  private isLastPlayable(): boolean {
-    return PLAYABLE.indexOf(this.puzzle.id) === PLAYABLE.length - 1;
+    return (
+      !this.pending && this.nextId() !== null && (this.session.solved || isSolved(this.progress, this.puzzle.id))
+    );
   }
 
   private updateNextLook(): void {
@@ -547,6 +658,12 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   private setMessage(text: string): void {
     this.messageText = text;
+    if (this.introShown) {
+      // A hint (or any other message) replaces the daily's intro lines.
+      this.introShown = false;
+      setCardIntro(this.card, text, []);
+      return;
+    }
     this.card.message.setProperties({ text });
   }
 
@@ -619,6 +736,14 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       }
     }
     return this.lastPinchDistance <= BAR_PINCH_MARGIN_METERS ? best : null;
+  }
+}
+
+/** Moves a fade signal `step` toward `target` (no write once it's there). */
+function stepFade(fade: Signal<number>, target: number, step: number): void {
+  const value = fade.peek();
+  if (value !== target) {
+    fade.value = target > value ? Math.min(target, value + step) : Math.max(target, value - step);
   }
 }
 

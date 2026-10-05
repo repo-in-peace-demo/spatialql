@@ -48,7 +48,7 @@ describe('puzzle text', () => {
   );
 
   it('the trap puzzle names its columns as shown', () => {
-    expect(puzzleText(getPuzzle('cafe-never-ordered')).takeaway).toBe('Testing T.ID, not MILK, ignores stored NULLs.');
+    expect(puzzleText(getPuzzle('cafe-never-ordered')).takeaway).toBe("The NULL under T.ID means no match; MILK's doesn't.");
   });
 
   it('result headers are the same in either join direction', () => {

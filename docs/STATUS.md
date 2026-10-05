@@ -33,7 +33,7 @@ events and logged state; nothing has been tested on a real Quest yet.
 | Pull apart | Dragging a docked slab > 10 cm separates. | Emulator |
 | Feel | Approach glow and hum, dock snap with overshoot, line ticks and pulses, rows flying in from their source rows (row backgrounds fade in only as the cells land), unmatched rows dropping 12% of a row within their slot, resolve; ~1.15–1.2 s. Synthesized spatial sound (`src/sound.ts`), balanced: ticks 11–14 dB and the resolve ~9 dB below the snap. | Emulator: sound order and output peaks from the log; drop offsets for J / Shift+J, INNER / LEFT and five toggles (no drift); mid-flight screenshots; frame times; no long tasks at join start. Approach glow/hum not yet tried by hand. |
 | Browser support | "Open in the Meta Quest Browser" message on non-AR browsers; dismissible note on AR browsers that aren't the Quest Browser. | Unit test for detection; production preview |
-| Welcome panel | Browser entry point (Enter XR); hidden in XR, back after exit. | Emulator: screenshots in and after XR |
+| Welcome screen | Browser entry point: SpatialQL, today's puzzle, streak, practice progress, Start (enters XR) and Free play; hidden in XR, back (updated) after exit. | Emulator: screenshots in and after XR, Free play and back |
 | Production build | No dev-only code. | Grep of `dist/` and of the deployed bundle |
 | Deployment | Vercel from GitHub `main`. | Site, bundle and assets return 200 over HTTPS |
 
@@ -77,8 +77,33 @@ win, progress) is committed. Phase 3 (all 20 puzzles on four datasets, with
 the desk switching tables, dataset theming, and guards so nothing is judged
 mid-switch or on the wrong tables) is implemented and emulator-tested, at
 its checkpoint.
-Challenge mode is on in dev and with `?challenge=1` in production; the
-production default is still the sandbox.
+Phase 4 (the daily puzzle after practice 1-3, its streak, and the SpatialQL
+welcome screen with Start and Free play) is implemented and emulator-checked
+(start on the daily, win, streak, Next back to practice, welcome screen,
+Free play and back); the streak across days with `?day=` isn't checked yet.
+Challenge mode is now the default everywhere; Free play (`?mode=free`) gives
+the sandbox, labeled as such on the welcome screen ("Start free play").
+
+Since phase 4:
+
+- **Table names on the slabs:** each source slab has a name tab on its top
+  edge with the table's SQL name and alias (`customers c`), in the dataset
+  accent, so the slabs, the caption and the result headers read as one. It's
+  part of the slab (grabbing it grabs the slab). A test checks that every
+  "the X table" in the puzzle text is a slab on that puzzle's desk.
+- **The card fits the view:** the result slab (and the outline before the
+  join) is pushed back until the card on it fits the +40° limit too, never
+  past where its rows would drop below 1.05°. Seated, with the tabs: shop
+  top 40.0°, extent 74.5° (result 0.58 m, rows 1.10°); library 38.5° / 72.0°;
+  school 37.1° / 70.9°; cafe 38.4° / 73.5°.
+- **Copy:** the win takeaways describe what happened to the rows in plain
+  words, naming columns only through placeholders; the hint button says what
+  it shows next (Hint, Another hint, Show answer).
+- **Dataset switch:** the card, bar and outline fade out with the leaving
+  tables and back in once placed for the new ones (no jump after arriving).
+- **Dev, for the headset:** the in-headset debug panel (`?debug=1`) mirrors
+  the debug lines, warnings and errors, wrapping long ones, with frame times;
+  testing on a Quest over Wi-Fi is in [`DEPLOY.md`](DEPLOY.md).
 
 ## Future
 
@@ -120,5 +145,8 @@ IWSDK app (Vite + TypeScript):
   via the URL or Option+Shift+D / S / F / M. With `debug`: J / Shift+J join,
   T toggles, U separates, R replays. Steps and expected logs:
   [`grab-debug.md`](grab-debug.md).
-- Headset: the deployed link, or the dev server's network URL
-  (`npx @iwsdk/cli dev status`).
+- Headset: the deployed link, or the dev server over Wi-Fi (network URL from
+  `npx @iwsdk/cli dev status`; steps, the certificate warning and the flags in
+  [`DEPLOY.md`](DEPLOY.md#testing-on-a-quest-over-wi-fi)). With `?debug=1`, an
+  in-headset panel beside the tables mirrors the debug lines, warnings and
+  errors, and shows frame times.

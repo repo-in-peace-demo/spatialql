@@ -28,6 +28,7 @@ import { CHALLENGE_MODE } from './challenge-mode.js';
 import { challengeStart } from './challenge-start.js';
 import { DATASETS, type DatasetId } from './data/datasets.js';
 import { deskTransition, type DeskState } from './data/desk-session.js';
+import { tableLabel } from './data/join-result.js';
 import type { Table } from './data/types.js';
 import { deskBridge, type DeskControls } from './desk-bridge.js';
 import { devFlag } from './dev-flags.js';
@@ -308,7 +309,12 @@ export class DeskPlacementSystem
   private createSlab(table: Table, grabbable: boolean): Slab {
     const text = slabTextSizeAt(PLANNED_SOURCE_DISTANCE_METERS);
     const dataset = DATASETS[this.deskDatasetFor(table)];
-    const doc = buildTableSlabDocument(table, { text, ...(CHALLENGE_MODE ? { accent: dataset.theme.accent } : {}) });
+    // The name tab (both modes), in the dataset accent in challenge mode.
+    const doc = buildTableSlabDocument(table, {
+      text,
+      title: tableLabel(table),
+      ...(CHALLENGE_MODE ? { accent: dataset.theme.accent } : {}),
+    });
     const entity = this.world.createTransformEntity(doc.document);
     entity.addComponent(TableSlab, { tableId: table.id });
     entity.addComponent(TableSlabRuntime, { document: doc.document, rowViews: doc.rowViews, layout: doc });
@@ -912,10 +918,12 @@ export class DeskPlacementSystem
   /** Bottom-edge distance keeping both edges of a propped slab in view. */
   private surfaceForwardToFit(surfaceY: number, half: number, sinLean: number, cosLean: number): number {
     const bottomY = surfaceY + SURFACE_LIFT_METERS;
-    const topY = bottomY + 2 * half * cosLean;
+    // The highest point is the name tab's top (the taller of the two).
+    const tab = Math.max(0, ...this.slabs.map((slab) => slab.doc.tabHeightMeters));
+    const topY = bottomY + (2 * half + tab) * cosLean;
     return Math.max(
       this.edgeFitDistance(this._headPos.y - bottomY, 0),
-      this.edgeFitDistance(this._headPos.y - topY, 2 * half * sinLean),
+      this.edgeFitDistance(this._headPos.y - topY, (2 * half + tab) * sinLean),
     );
   }
 
@@ -945,7 +953,16 @@ export class DeskPlacementSystem
       return null;
     }
     const half = this.slabHeightMeters(doc) / 2;
-    return measureSlabEdges(this._headPos, NATURAL_GAZE_PITCH_RAD, object, half, -half, this._local, this._edges);
+    // The top edge is the name tab's top: the highest thing on the slab.
+    return measureSlabEdges(
+      this._headPos,
+      NATURAL_GAZE_PITCH_RAD,
+      object,
+      half + doc.tabHeightMeters,
+      -half,
+      this._local,
+      this._edges,
+    );
   }
 
   /** Eye-to-center distance of a placed slab (NaN without an object). */

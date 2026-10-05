@@ -19,6 +19,14 @@ import { installXrSupportNotice } from './xr-support.js';
 // is missing entirely.
 void installXrSupportNotice();
 
+// Dev-only `debug`: the in-headset readout. Loaded before the world so its
+// console tap catches the systems' startup lines. Dropped from production.
+let debugHud: Promise<typeof import('./debug-hud.js')> | null = null;
+if (import.meta.env.DEV && devFlag('debug')) {
+  debugHud = import('./debug-hud.js');
+  void debugHud.then(({ installHudConsoleTap }) => installHudConsoleTap());
+}
+
 World.create(
   document.getElementById('scene-container') as HTMLDivElement,
   projectOptions,
@@ -40,5 +48,8 @@ World.create(
   // Dev-only `debug`: per-hand grab readout. Dropped from production.
   if (import.meta.env.DEV && devFlag('debug')) {
     void import('./grab-debug.js').then(({ GrabDebugSystem }) => world.registerSystem(GrabDebugSystem));
+  }
+  if (import.meta.env.DEV && debugHud) {
+    void debugHud.then(({ DebugHudSystem }) => world.registerSystem(DebugHudSystem));
   }
 });

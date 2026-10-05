@@ -1,6 +1,11 @@
 <!--
-  Panel, Divider, Button, ButtonIcon, and ButtonLabel come from the bundled
-  Horizon kit. RectangleGoggles and LogIn are bundled Lucide icon components.
+  SpatialQL's welcome screen: the browser entry point. Panel, Divider,
+  Button, ButtonIcon, and ButtonLabel come from the bundled Horizon kit;
+  RectangleGoggles is a bundled Lucide icon component.
+
+  Every text here is replaced at startup from `WELCOME` in src/data/copy.ts
+  (panel.ts); the text below is the same copy, as a fallback. The progress
+  lines are hidden in free play.
 -->
 <style>
   .panel-root {
@@ -30,6 +35,19 @@
     color: rgba(255, 255, 255, 0.9);
   }
 
+  .mode {
+    text-align: center;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 22px;
+    color: #3b4f9c;
+    margin-bottom: 10px;
+  }
+
+  .mode:dark {
+    color: #aab8f0;
+  }
+
   .sub-heading {
     color: #272727;
     font-size: 14px;
@@ -43,11 +61,37 @@
     color: rgba(255, 255, 255, 0.9);
   }
 
+  .line {
+    color: #272727;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 17px;
+    width: 100%;
+    margin-top: 4px;
+  }
+
+  .line:dark {
+    color: rgba(255, 255, 255, 0.85);
+  }
+
+  .progress {
+    flex-direction: column;
+    width: 100%;
+    margin-top: 10px;
+  }
+
   .button {
     justify-content: flex-start;
     margin-left: 24px;
     margin-right: 24px;
     margin-top: 16px;
+  }
+
+  .button-last {
+    justify-content: flex-start;
+    margin-left: 24px;
+    margin-right: 24px;
+    margin-top: 8px;
     margin-bottom: 24px;
   }
 
@@ -57,23 +101,31 @@
 </style>
 <Panel class="panel-root">
   <div class="panel-content">
-    <div class="heading">Hello, Immersive Web!</div>
+    <div id="title" class="heading">SpatialQL</div>
+    <!-- Free play only: says which mode this is, right under the title. -->
+    <div id="mode-line" class="mode" style="display: none">Free play</div>
     <Divider></Divider>
-    <div class="sub-heading">
-      Build interactive browser, mixed-reality, and virtual-reality experiences
-      with Immersive Web SDK.
+    <div id="description" class="sub-heading">Join two tables with your hands.</div>
+    <div id="description-mode" class="line">A new SQL puzzle every day.</div>
+    <div id="setup-line" class="line">Sit at a desk. No controllers needed.</div>
+    <div id="progress" class="progress">
+      <div id="daily-line" class="line" style="font-weight: 700">Start with 3 short practice puzzles.</div>
+      <!-- Hidden until set; the text is a placeholder, so the element has a text node to set. -->
+      <div id="streak-line" class="line" style="display: none">Streak: 0 days</div>
+      <div id="practice-line" class="line">Practice 0/20</div>
+      <div id="save-line" class="line" style="display: none">Progress can't be saved in this browser.</div>
     </div>
   </div>
   <Button id="xr-button" class="button">
     <ButtonIcon>
       <RectangleGoggles></RectangleGoggles>
     </ButtonIcon>
-    <ButtonLabel class="button-label">Enter XR</ButtonLabel>
+    <ButtonLabel id="xr-label" class="button-label">Start</ButtonLabel>
   </Button>
-  <Button id="exit-button" class="button" style="display: none">
-    <ButtonIcon>
-      <LogIn></LogIn>
-    </ButtonIcon>
+  <Button id="mode-button" class="button-last">
+    <ButtonLabel id="mode-label" class="button-label">Free play</ButtonLabel>
+  </Button>
+  <Button id="exit-button" class="button-last" style="display: none">
     <ButtonLabel class="button-label">Exit to Browser</ButtonLabel>
   </Button>
 </Panel>

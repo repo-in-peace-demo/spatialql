@@ -82,6 +82,7 @@ import {
   slabBorderColor,
   slabBottomLocalY,
   slabTopLocalY,
+  slabVisualTopLocalY,
   type CellOffset,
   type JoinTypeControlView,
   type TableSlabDocument,
@@ -208,8 +209,21 @@ const RESULT_GAP_ABOVE_METERS = 0.08;
 const RESULT_BEHIND_METERS = 0.02;
 /** Legibility cap: the result slab's center is never farther than this from the eyes. */
 const RESULT_MAX_DISTANCE_METERS = 0.85;
-/** Push-back steps that bring the result slab's top edge inside the view. */
+/** Push-back steps that bring the result slab's top edge (and the card above it) inside the view. */
 const RESULT_FIT_ITERATIONS = 6;
+/**
+ * Pushing the result slab back to fit the card above it never takes its row
+ * text below this angle (measured at the slab's center): legibility wins
+ * over the last degree of the view window.
+ */
+const RESULT_MIN_PUSHED_ROW_TEXT_DEG = 1.05;
+/** The result slab's (and silhouette's) row font: sized by angle at the planned result distance. */
+const RESULT_ROW_FONT_METERS = slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS).rowFontCm / 100;
+/** The farthest the result slab's center may be pushed: the legibility cap, or where its rows reach the minimum angle. */
+const RESULT_MAX_PUSHED_DISTANCE_METERS = Math.min(
+  RESULT_MAX_DISTANCE_METERS,
+  RESULT_ROW_FONT_METERS / (2 * Math.tan(MathUtils.degToRad(RESULT_MIN_PUSHED_ROW_TEXT_DEG) / 2)),
+);
 const PARKED_Y = -100;
 
 // --- Join-type control ----------------------------------------------------------
@@ -2199,9 +2213,17 @@ export class JoinSystem
     if (this.challengeLayout) {
       this.placeBarBesideControl(this.challengeLayout.bar);
     }
-    this.placeAboveBand(view.object, view.doc.heightMeters, this.control.document, this.control.heightMeters);
-    if (this.challengeLayout) {
-      this.placeCard(view.object, this.challengeLayout.card);
+    // In challenge mode the card sits on the result slab: it must fit the view too.
+    const card = this.challengeLayout?.card;
+    this.placeAboveBand(
+      view.object,
+      view.doc.heightMeters,
+      this.control.document,
+      this.control.heightMeters,
+      card ? CARD_GAP_METERS + card.heightMeters : 0,
+    );
+    if (card) {
+      this.placeCard(view.object, card);
     }
   }
 
@@ -2212,7 +2234,7 @@ export class JoinSystem
    * leaning to face the eyes, pushed back if its top would leave the view.
    * Overwrites `_c`.
    */
-  private placeAboveBand(object: Object3D, height: number, band: Object3D, bandHeight: number): void {
+  private placeAboveBand(object: Object3D, height: number, band: Object3D, bandHeight: number, above = 0): void {
     this._up.copy(UP).applyQuaternion(this._q1);
     this._normal.set(0, 0, 1).applyQuaternion(this._q1);
     this._c.addScaledVector(this._up, RESULT_GAP_ABOVE_METERS).addScaledVector(this._normal, -RESULT_BEHIND_METERS);
@@ -2256,15 +2278,18 @@ export class JoinSystem
       pulled += pull;
     }
 
-    // With the pair close to the eyes, the slab's top edge can rise past the
-    // top of the group's view window: push it back (horizontally) until the
-    // top edge fits, but never so far that its center passes the cap.
+    // With the pair close to the eyes, the slab's top edge -- or the top of
+    // what sits on it (`above`: the card, in challenge mode) -- can rise past
+    // the top of the group's view window: push it back (horizontally) until
+    // that top fits, but never so far that its center passes the cap, nor so
+    // far that its rows drop below RESULT_MIN_PUSHED_ROW_TEXT_DEG.
     const maxAboveRad = MathUtils.degToRad(VIEW_MAX_ABOVE_GAZE_DEG) - this.headPitchDown;
+    const reach = height + above;
     for (let i = 0; i < RESULT_FIT_ITERATIONS && maxAboveRad > 0.05; i++) {
       this._a
         .copy(this._c)
-        .addScaledVector(this._b, height * Math.sin(lean))
-        .addScaledVector(UP, height * Math.cos(lean));
+        .addScaledVector(this._b, reach * Math.sin(lean))
+        .addScaledVector(UP, reach * Math.cos(lean));
       const rise = this._a.y - this._head.y;
       this._d.subVectors(this._a, this._head);
       this._d.y = 0;
@@ -2276,7 +2301,7 @@ export class JoinSystem
         .copy(this._c)
         .addScaledVector(this._b, (height / 2) * Math.sin(lean))
         .addScaledVector(UP, (height / 2) * Math.cos(lean));
-      const step = Math.min(push, RESULT_MAX_DISTANCE_METERS - this._e.distanceTo(this._head));
+      const step = Math.min(push, RESULT_MAX_PUSHED_DISTANCE_METERS - this._e.distanceTo(this._head));
       if (step <= 1e-3) {
         break;
       }
@@ -2405,7 +2430,11 @@ export class JoinSystem
     this._a.setFromMatrixPosition(b.object.matrixWorld);
     a.object.worldToLocal(this._a);
     const midX = this._a.x / 2;
-    const topY = Math.max(a.doc.heightMeters / 2, this._a.y + b.doc.heightMeters / 2);
+    // The pair's highest point, name tabs included.
+    const topY = Math.max(
+      a.doc.heightMeters / 2 + a.doc.tabHeightMeters,
+      this._a.y + b.doc.heightMeters / 2 + b.doc.tabHeightMeters,
+    );
 
     this._d.set(midX, topY, 0);
     a.object.localToWorld(this._d);
@@ -2418,7 +2447,13 @@ export class JoinSystem
     a.object.getWorldQuaternion(this._q1);
     this._c.set(midX, topY, 0);
     a.object.localToWorld(this._c);
-    this.placeAboveBand(slot.object, slot.heightMeters, layout.bar.object, layout.bar.heightMeters);
+    this.placeAboveBand(
+      slot.object,
+      slot.heightMeters,
+      layout.bar.object,
+      layout.bar.heightMeters,
+      CARD_GAP_METERS + layout.card.heightMeters,
+    );
     this.placeCard(slot.object, layout.card);
   }
 
@@ -2610,12 +2645,12 @@ export class JoinSystem
         this._head,
         this.headPitchDown,
         slab.object,
-        slabTopLocalY(slab.doc),
+        slabVisualTopLocalY(slab.doc),
         slabBottomLocalY(slab.doc),
         this._a,
         this._edges,
       );
-      const edges = edgeNote(`${slab.id} slab`, this._edges.topDeg, this._edges.bottomDeg);
+      const edges = edgeNote(`${slab.id} slab (name tab included)`, this._edges.topDeg, this._edges.bottomDeg);
       this._a.setFromMatrixPosition(slab.object.matrixWorld);
       const distance = this._a.distanceTo(this._head);
       sourceDistance = Math.max(sourceDistance, distance);
@@ -3025,11 +3060,15 @@ function updateRowSlots(view: ResultView): void {
 }
 
 /**
- * Local Y (in the LEFT slab's frame) of the docked pair's higher top edge.
- * Docked slabs align their bottom edges, so the taller slab's top is higher.
+ * Local Y (in the LEFT slab's frame) of the docked pair's highest point:
+ * the taller slab's name tab (docked slabs align their bottom edges). The
+ * control band sits above it, so the control never covers a tab.
  */
 function pairTopLocalY(left: SourceSlab, right: SourceSlab): number {
-  return Math.max(left.doc.heightMeters / 2, -left.doc.heightMeters / 2 + right.doc.heightMeters);
+  return Math.max(
+    left.doc.heightMeters / 2 + left.doc.tabHeightMeters,
+    -left.doc.heightMeters / 2 + right.doc.heightMeters + right.doc.tabHeightMeters,
+  );
 }
 
 function cm(meters: number): string {

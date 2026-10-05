@@ -45,6 +45,15 @@ export function tableAlias(table: Table): string {
 }
 
 /**
+ * A source slab's name tab: the table's name and alias exactly as the SQL
+ * caption writes them (`FROM customers c`), so the slab, the caption and the
+ * result headers (`C.ID`) read as one. Hints name tables through these.
+ */
+export function tableLabel(table: Table): { name: string; alias: string } {
+  return { name: table.id, alias: tableAlias(table) };
+}
+
+/**
  * A column's header exactly as a slab displays it: its label (or key),
  * uppercased. Works for source tables and for join result tables (whose
  * `columnLabels` hold the result labels, e.g. `o.id`). Hints name columns

@@ -27,6 +27,8 @@ import type { Row, Table } from './data/types.js';
 import {
   BASE_PANEL_BORDER_WIDTH,
   BASE_ROW_FONT_CM,
+  CONTROL_OPTION_MIN_HEIGHT_CM,
+  CONTROL_OPTION_MIN_WIDTH_CM,
   DATA_METRICS,
   displayValue,
   FIT_EPSILON_CM,
@@ -72,6 +74,14 @@ const BASE_GUTTER_WIDTH = 2.2;
 const BASE_OUTLINE_WIDTH = 0.12;
 /** The dataset accent stripe on a slab's header bar, at the base font (~0.25 cm at the source size). */
 const ACCENT_STRIPE_CM = 0.36;
+/** The name tab's fill without a dataset accent (free play): dark, like the accents, for the same light text. */
+const COLOR_TAB_NEUTRAL = '#4a4538';
+const COLOR_TAB_TEXT = '#f7f4ee';
+/** The tab's alias (after the name): lighter than the name, so it reads as secondary. */
+const TAB_ALIAS_OPACITY = 0.72;
+/** Name tab padding, as fractions of its font size. */
+const TAB_PADDING_X_EM = 0.5;
+const TAB_PADDING_Y_EM = 0.12;
 
 /** Challenge win look for a result slab's border. */
 export function slabBorderColor(win: boolean): string {
@@ -161,6 +171,13 @@ export type TableSlabDocument = {
   headerFontMeters: number;
   /** Panel height in cm when built with `animatedHeight` (null otherwise). */
   panelHeightCm: Signal<number> | null;
+  /**
+   * How far the name tab rises above the panel's top edge (meters; 0
+   * without one). Not part of the panel's layout size or of `heightMeters`
+   * (rows, docking and grab distances use the panel); view and band
+   * placement add it (`slabVisualTopLocalY`).
+   */
+  tabHeightMeters: number;
   /** Panel height (meters) with `visibleRows` data rows displayed. */
   heightForRowsMeters: (visibleRows: number) => number;
 };
@@ -202,8 +219,14 @@ export type SlabBuildOptions = {
   reserveRows?: number;
   /** Challenge silhouette: rows are empty outlines, except `revealRow`, which keeps its text. */
   silhouette?: { revealRow: number | null };
-  /** Challenge mode: the dataset's accent, as a thin stripe on the header bar. */
+  /** Challenge mode: the dataset's accent, as a thin stripe on the header bar (and the name tab's fill). */
   accent?: string;
+  /**
+   * Source slabs: a name tab on the top edge, left-aligned, showing the
+   * table's name and (lighter) alias as the SQL caption writes them. It's
+   * part of the slab's own document, so grabbing it grabs the slab.
+   */
+  title?: { name: string; alias: string };
 };
 
 /** Rows shown for `table` under `maxRows`, and whether a "+N more" row follows. */
@@ -337,6 +360,15 @@ export function slabTopLocalY(doc: TableSlabDocument): number {
 export function slabBottomLocalY(doc: TableSlabDocument): number {
   return doc.anchor === 'top' ? -doc.heightMeters : -doc.heightMeters / 2;
 }
+/** Local Y (meters) of the slab's highest visible point: the name tab's top, else the panel's top edge. */
+export function slabVisualTopLocalY(doc: TableSlabDocument): number {
+  return slabTopLocalY(doc) + doc.tabHeightMeters;
+}
+
+/** Height (cm) of a name tab at `fontCm` (one line, its vertical padding). */
+function tabHeightCm(fontCm: number): number {
+  return fontCm * LINE_HEIGHT_FACTOR + 2 * TAB_PADDING_Y_EM * fontCm;
+}
 
 /**
  * Builds the full UIKit tree for one table: optional caption, header row,
@@ -402,6 +434,49 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     paddingLeft: m.panelPadding,
     paddingRight: m.panelPadding,
   });
+
+  // The name tab: on an absolute layer above the top edge, so the panel's
+  // layout (and its measured size) doesn't change. Header-sized text.
+  let tabCm = 0;
+  if (options.title) {
+    const font = m.headerFont;
+    tabCm = tabHeightCm(font);
+    const tab = new UIKit.Container({
+      positionType: 'absolute',
+      positionTop: -tabCm,
+      positionLeft: m.borderRadius,
+      height: tabCm,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gapColumn: font * 0.45,
+      paddingLeft: TAB_PADDING_X_EM * font,
+      paddingRight: TAB_PADDING_X_EM * font,
+      backgroundColor: options.accent ?? COLOR_TAB_NEUTRAL,
+      borderTopLeftRadius: m.borderRadius,
+      borderTopRightRadius: m.borderRadius,
+      opacity: fade,
+    });
+    tab.add(
+      new UIKit.Text({
+        text: options.title.name,
+        fontSize: font,
+        fontWeight: 'bold',
+        color: COLOR_TAB_TEXT,
+        wordBreak: 'keep-all',
+        flexShrink: 0,
+        opacity: fade,
+      }),
+      new UIKit.Text({
+        text: options.title.alias,
+        fontSize: font,
+        color: COLOR_TAB_TEXT,
+        wordBreak: 'keep-all',
+        flexShrink: 0,
+        opacity: computed(() => TAB_ALIAS_OPACITY * fade.value),
+      }),
+    );
+    root.add(tab);
+  }
 
   const captionHeightCm = captionHeightCmFor(options, m);
   const captionLines: Text[] = [];
@@ -649,6 +724,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     headerFontMeters: m.headerFont / 100,
     panelHeightCm: panelHeight,
     heightForRowsMeters,
+    tabHeightMeters: tabCm / 100,
   };
 }
 
@@ -674,12 +750,8 @@ export type JoinTypeControlView = {
   labelFontMeters: number;
 };
 
-/**
- * Fingertip-sized targets: each option is at least this wide and tall (cm).
- * A touch target, not text, so it doesn't scale with the label font.
- */
-export const CONTROL_OPTION_MIN_WIDTH_CM = 4.0;
-export const CONTROL_OPTION_MIN_HEIGHT_CM = 2.5;
+// Fingertip-sized targets (cm), shared with the puzzle bar; in slab-metrics.ts so tests can use them.
+export { CONTROL_OPTION_MIN_HEIGHT_CM, CONTROL_OPTION_MIN_WIDTH_CM };
 const BASE_CONTROL_FONT_CM = 1.6;
 const BASE_CONTROL_OPTION_PADDING_X = 1.0;
 const CONTROL_TRACK_PADDING = 0.3;

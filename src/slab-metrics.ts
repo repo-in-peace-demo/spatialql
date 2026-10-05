@@ -137,6 +137,29 @@ function ellipsisFor(metrics: GlyphMetrics): string {
   return metrics.has('…') ? '…' : '...';
 }
 
+/**
+ * Fingertip-sized targets: every control and bar button is at least this
+ * wide and tall (cm). A touch target, not text, so it doesn't scale with the
+ * label font.
+ */
+export const CONTROL_OPTION_MIN_WIDTH_CM = 4.0;
+export const CONTROL_OPTION_MIN_HEIGHT_CM = 2.5;
+/** A bar button's horizontal padding around its label, in label-font ems. */
+export const BAR_BUTTON_PADDING_EM = 0.6;
+
+/**
+ * A bar button's width: its widest label (bold, at `labelFontCm`) plus
+ * padding, at least the touch-target minimum. A button whose label changes
+ * (Hint) is sized for every label it shows, so relabeling never resizes it.
+ */
+export function barButtonWidthCm(labels: readonly string[], labelFontCm: number): number {
+  let widest = 0;
+  for (const label of labels) {
+    widest = Math.max(widest, measureTextCm(label, HEADER_METRICS, labelFontCm));
+  }
+  return Math.max(CONTROL_OPTION_MIN_WIDTH_CM, widest + 2 * BAR_BUTTON_PADDING_EM * labelFontCm);
+}
+
 /** Whether `text` fits a column of at most `m.columnMaxWidth` (with cell padding) without an ellipsis. */
 export function fitsColumn(text: string, metrics: GlyphMetrics, fontSizeCm: number, m: SlabMetrics): boolean {
   return measureTextCm(text, metrics, fontSizeCm) <= m.columnMaxWidth - 2 * m.cellPaddingX + FIT_EPSILON_CM;

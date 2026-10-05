@@ -21,6 +21,7 @@ import { Coffee } from '@pmndrs/uikit-lucide/dist/Coffee.js';
 import { School } from '@pmndrs/uikit-lucide/dist/School.js';
 import { ShoppingBag } from '@pmndrs/uikit-lucide/dist/ShoppingBag.js';
 import type { DatasetIcon } from './data/datasets.js';
+import { BAR_BUTTON_PADDING_EM, barButtonWidthCm } from './slab-metrics.js';
 import {
   CONTROL_OPTION_MIN_HEIGHT_CM,
   CONTROL_OPTION_MIN_WIDTH_CM,
@@ -233,8 +234,33 @@ export function setCardWin(card: PuzzleCardView, win: CardWin | null): void {
   card.goal.setProperties({ display: win ? 'none' : 'flex' });
   card.headline.setProperties({ display: win ? 'flex' : 'none', text: win?.headline ?? '' });
   card.message.setProperties({ text: win?.takeaway ?? '' });
-  card.query.setProperties({ display: win ? 'flex' : 'none', text: win?.query ?? '' });
-  card.note.setProperties({ display: win?.note ? 'flex' : 'none', text: win?.note ?? '' });
+  card.query.setProperties({
+    display: win ? 'flex' : 'none',
+    text: win?.query ?? '',
+    fontWeight: 'bold',
+    color: COLOR_TEXT,
+  });
+  card.note.setProperties({
+    display: win?.note ? 'flex' : 'none',
+    text: win?.note ?? '',
+    color: COLOR_TEXT_SECONDARY,
+  });
+}
+
+/**
+ * While playing, a lead-in in the message line and up to two one-line
+ * intros below it (the daily ahead of practice), in the rows the win's
+ * query and note use. Empty `lines` hides them. Call after `setCardWin(card, null)`.
+ */
+export function setCardIntro(card: PuzzleCardView, lead: string, lines: readonly string[]): void {
+  card.message.setProperties({ text: lead });
+  card.query.setProperties({
+    display: lines[0] ? 'flex' : 'none',
+    text: lines[0] ?? '',
+    fontWeight: 'normal',
+    color: COLOR_TEXT,
+  });
+  card.note.setProperties({ display: lines[1] ? 'flex' : 'none', text: lines[1] ?? '', color: COLOR_TEXT });
 }
 
 // --- Puzzle bar ---------------------------------------------------------------------
@@ -250,6 +276,8 @@ export type PuzzleBarView = {
   fade: Signal<number>;
   root: Container;
   hint: Container;
+  /** The hint button's label: what it shows next (see `setHintLabel`). */
+  hintText: Text;
   next: Container;
   /** The filter chip's label (the WHERE clause): not a target. */
   chip: Container;
@@ -281,16 +309,20 @@ const COLOR_CLEAR_BORDER = '#6b6355';
 const NEXT_WAITING_OPACITY = 0.7;
 const CLEAR_BORDER_WIDTH = 0.15;
 
-/** `labelFontCm`: the label size (the control's, sized by angle by the caller). */
+/**
+ * `labelFontCm`: the label size (the control's, sized by angle by the
+ * caller). `labels.hint` lists every label the hint button shows; it starts
+ * on the first and is sized for the widest.
+ */
 export function buildPuzzleBar(
   labelFontCm: number,
-  labels: { hint: string; next: string; clear: string },
+  labels: { hint: readonly string[]; next: string; clear: string },
 ): PuzzleBarView {
-  const paddingX = labelFontCm * 0.6;
+  const paddingX = labelFontCm * BAR_BUTTON_PADDING_EM;
   const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, labelFontCm * LINE_HEIGHT_FACTOR);
-  const hintWidth = barButtonWidth(labels.hint, labelFontCm, paddingX);
-  const nextWidth = barButtonWidth(labels.next, labelFontCm, paddingX);
-  const clearWidth = barButtonWidth(labels.clear, labelFontCm, paddingX);
+  const hintWidth = barButtonWidthCm(labels.hint, labelFontCm);
+  const nextWidth = barButtonWidthCm([labels.next], labelFontCm);
+  const clearWidth = barButtonWidthCm([labels.clear], labelFontCm);
   const heightCm = buttonHeight + 2 * BAR_INSET;
 
   const fade = signal(1);
@@ -341,7 +373,7 @@ export function buildPuzzleBar(
     root.add(container);
     return { container, text };
   };
-  const hint = button(labels.hint, hintWidth, false, null);
+  const hint = button(labels.hint[0] ?? '', hintWidth, false, null);
   const next = button(labels.next, nextWidth, true, nextOpacity);
   // The filter chip: the WHERE clause as a flat label on the track (no fill,
   // regular weight: it reads as the filter's text, not a button), then its
@@ -365,6 +397,7 @@ export function buildPuzzleBar(
     fade,
     root,
     hint: hint.container,
+    hintText: hint.text,
     next: next.container,
     chip: chip.container,
     chipText: chip.text,
@@ -380,8 +413,9 @@ export function buildPuzzleBar(
   return bar;
 }
 
-function barButtonWidth(label: string, labelFontCm: number, paddingX: number): number {
-  return Math.max(CONTROL_OPTION_MIN_WIDTH_CM, measureHeaderTextCm(label, labelFontCm) + 2 * paddingX);
+/** The hint button's label (its width already fits every label, so nothing resizes). */
+export function setHintLabel(bar: PuzzleBarView, label: string): void {
+  bar.hintText.setProperties({ text: label });
 }
 
 /**

@@ -1,7 +1,7 @@
 # Plan: challenge mode
 
-Status: **approved** (with the decisions below). Phase 1 (the pure core
-and its tests) is written; phases 2-5 aren't started.
+Status: **approved** (with the decisions below). Phases 1-4 are committed,
+with the follow-ups listed under "After phase 4".
 
 ## Decisions (from review)
 
@@ -586,6 +586,183 @@ nothing; their row count is the clue.
 If phase 3 runs late, the fallback is a plain fade between datasets instead of
 the sink and rise. If even that slips, ship the 5 shop puzzles plus the daily
 (shop only), so the daily would repeat every 5 days.
+
+## After phase 4
+
+- **Name tabs on the source slabs** (`tableLabel`: the SQL name and alias,
+  e.g. `customers c`), on an absolute layer above the top edge, in the
+  dataset accent. The result slab stays unlabeled (its caption names it).
+  Placement and the readouts count the tab as the slabs' top. Test:
+  `table-names.test.ts`.
+- **Fit:** with the tabs the shop's card reached 40.3 deg. A per-dataset
+  result reserve was tried and dropped: the shop really needs all 12 rows
+  (puzzle 5's wrong state shows 11 rows plus 1 placeholder). Instead, the
+  result slab (and the silhouette) is pushed back until the card fits, never
+  past where its row text (at its center) would drop below 1.05 deg; the top
+  limit stays 40 deg. Seated: shop top 40.0 deg, extent 74.5 deg (result
+  0.58 m, rows 1.10 deg); library 38.5 / 72.0; school 37.1 / 70.9; cafe
+  38.4 / 73.5.
+- **Takeaways** rewritten in plain words about the rows (`order 108`,
+  `Odalys`); columns only through placeholders (puzzles 8, 15, 20).
+- **Hint button** says what comes next: Hint, Another hint, Show answer
+  (`BAR.hintLabels`; sized for the longest, tested).
+- **Switch:** the card, bar and silhouette fade out with the leaving tables
+  and in once placed for the new ones.
+- **Free play** is labeled on the welcome screen ("Free play" under the
+  title, "Start free play").
+
+## Phase 4 status (implemented)
+
+Approved with: challenge mode is the production default now (the sandbox
+via Free play); the Enter XR button says "Start"; the daily is offered after
+practice 1-3, and a daily that uses concepts practice hasn't reached shows
+their intro lines; the welcome screen always shows "Sit at a desk. No
+controllers needed." below the description.
+
+Changes from the plan below:
+
+- **The pure logic lives in `src/data/daily-flow.ts`** (`startPuzzle`,
+  `nextPuzzle`, `aheadConcepts`, `welcomeLines`), not in
+  `desk-session.ts`. Tests: `daily-flow.test.ts`.
+- **Daily ahead of practice:** the card shows "Today's puzzle uses something
+  new:", then the intro of each concept practice hasn't introduced (its
+  own, then `direction` for a missing-parent daily), at most two, in the
+  rows the win's query and note use. These don't mark the concept seen, so
+  practice still introduces it. A hint replaces them.
+- **The `nullfk` intro** was shortened to fit one line.
+- **A daily is never the resume point:** practice resumes where it was.
+- **The welcome screen reads the session's progress** (published by the
+  challenge system), so it updates after XR even when storage is blocked.
+- **Saving is probed at load,** so "Progress can't be saved" shows when
+  storage reads but refuses writes.
+
+## Phase 4 plan: daily puzzle, streak and welcome screen (approved)
+
+Scope: the daily puzzle and its streak, in XR and on a real welcome screen
+that replaces the scaffold's "Hello, Immersive Web!" panel. The pure pieces
+(`daily.ts`, the streak in `progress.ts`, `WELCOME` copy) exist from phase 1;
+this phase wires them in. It ends at a checkpoint, like phases 2 and 3.
+
+**1. Which puzzle a session starts on** (pure, tested: `startPuzzle` in
+`src/data/desk-session.ts`, next to `resumePuzzle`)
+
+- `today` is fixed when the page loads (`localDay(new Date())`), so a solve
+  after midnight counts for the day it was loaded (§3).
+- **First launches go to practice:** until practice 1-3 are solved, the
+  session resumes practice, as now (§0.6). A judge never meets day one's
+  daily (it could be the trap puzzle) before the tutorial.
+- **After that:** if today's daily isn't solved, the session starts on it;
+  otherwise it resumes practice (the first unsolved, or the last played).
+- The daily may be any of the 20, locked or not: it's the one puzzle that
+  ignores the unlock order. Solving it records it as solved (`markSolved`)
+  and extends the streak (`markDailySolved`), but unlocks nothing out of
+  order (`isUnlocked` already works that way).
+- `challengeStart()` uses `startPuzzle` instead of `resumePuzzle`, so the
+  desk still loads the right dataset first.
+- **Sanitizing changes:** with dailies, solves no longer come only in
+  practice order, so `sanitizeProgress(..., inOrderOnly)` is called with
+  `false`. It still drops unknown ids and an invalid resume point.
+
+**2. In XR**
+
+- **Card title:** "Today's puzzle: Library" (`CARD.dailyTitle`) instead of
+  "Puzzle 9: Library".
+- **Next:** after a practice win, Next goes to today's daily if it's
+  unsolved (and practice 1-3 are done); otherwise to the next practice
+  puzzle. After the daily's win, Next resumes practice. The bar doesn't
+  change (no extra button; `BAR.daily` stays unused).
+- **Daily win:** the title row's right-hand slot shows the streak ("Streak:
+  3 days") instead of "Solved with N hints." The message block is already
+  full on fan-out wins (two-line takeaway plus the query line), so the
+  streak doesn't go there. The win sound and look are unchanged.
+- A daily solved again on the same day (e.g. after a reload) shows as won
+  but doesn't count twice (`recordDailySolve` already ignores it).
+
+**3. The welcome screen** (`public/ui/welcome.uikitml`, filled in by
+`panel.ts`)
+
+It stays the browser entry point: the same ScreenSpace panel, the same
+`xr-button` (Enter XR) and `exit-button` ids and behavior, and the
+unsupported-browser notice from `xr-support.ts` is untouched.
+
+```
+  SpatialQL
+  ------------------------------------------
+  Join two tables with your hands.
+  A new SQL puzzle every day.
+
+  Today's puzzle: Library            (or: Today's puzzle: solved)
+  Streak: 3 days. Solve today to keep it.
+  Practice 7/20
+
+  [ goggles  Start ]                 (the Enter XR button)
+  [ Free play ]
+  Progress can't be saved in this browser.   (only if storage fails)
+```
+
+- **Lines** come from `WELCOME` in `copy.ts`, set with `setProperties` on
+  elements with ids (`daily-line`, `streak-line`, `practice-line`,
+  `save-line`). Before practice 1-3 are done, the daily line says what
+  comes first instead ("Start with 3 short practice puzzles."). The streak
+  line is hidden while the streak is 0.
+- **Refreshed** when the panel comes back after XR, so a daily solved in the
+  session shows "solved" and the new streak at once.
+- **Free play:** the panel's second button reloads the page in the sandbox
+  (`?mode=free`; this phase makes it work in production too). The sandbox's
+  panel shows "Puzzles" instead, which reloads back. Changing mode
+  mid-page isn't worth it: both modes build their slab documents at
+  startup.
+- In free play the panel shows the title, the two description lines, Enter
+  XR and Puzzles, without the progress lines.
+
+**4. Dev support** (`import.meta.env.DEV` only)
+
+- `?day=YYYY-MM-DD` overrides today (`dayFromIso` exists), to test the
+  rotation and the streak across reloads.
+- The challenge readout logs the start choice ("start: daily library-on-shelf
+  for 2026-10-07, streak 2" / "start: practice, daily already solved").
+- Added to the `DEPLOY.md` grep list.
+
+**5. Copy** (new lines in `copy.ts`, for your review before I implement
+them): the welcome title and description ("SpatialQL"; "Join two tables
+with your hands." / "A new SQL puzzle every day."), "Start with 3 short
+practice puzzles.", "Puzzles" (back from free play), and the streak on the
+card (reusing `WELCOME.streak`).
+
+**6. Tests**
+
+- `startPuzzle`: first launch, practice 1-2 done, 1-3 done with the daily
+  unsolved (daily) and solved (practice), all 20 solved, a daily that's a
+  locked puzzle, and a daily equal to the next practice puzzle.
+- Next after a practice win and after a daily win (pure: the choice, not the
+  scene).
+- Sanitizing keeps an out-of-order daily solve.
+- A streak across simulated days through the same load / solve / save path
+  the app uses (consecutive, same day twice, a gap, the clock moved back).
+- The welcome lines for each state, and that each fits the panel's width.
+
+**7. Verify** (emulator, seated head)
+
+1. `typecheck`, `test`, build, and the grep.
+2. With `?day=` on consecutive days: solve the daily (`G`), reload, and see
+   the streak go 1, 2, 3 on the welcome screen and the card; skip a day and
+   it shows 0, then 1 after the next solve.
+3. Screenshots of the welcome screen: first launch, daily open with a
+   streak, daily solved, storage blocked, free play.
+4. Enter XR from Start with the daily open: the desk loads the daily's
+   dataset first, with no switch.
+5. Free play and back.
+
+**Decisions for you**
+
+1. **Production default:** switch production to challenge mode now that
+   the welcome screen has Start and Free play (recommended; this is when
+   phase 2 planned to switch), or keep the sandbox as the default with
+   `?challenge=1`?
+2. **The Enter XR button's label:** "Start" (recommended; it still enters
+   XR, with the goggles icon) or keep "Enter XR"?
+3. **When the daily is offered:** after practice 1-3 (recommended), or from
+   the first launch?
 
 ## Phase 3 status (implemented; at the checkpoint)
 

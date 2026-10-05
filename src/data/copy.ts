@@ -47,7 +47,7 @@ export const CONCEPT_INTROS: Readonly<Record<Concept, string>> = {
   antijoin: "New: poke a NULL to keep only the rows where it's NULL.",
   fanout: 'New: one row can match several rows.',
   direction: 'New: which table stays put decides what LEFT keeps.',
-  nullfk: "New: some rows point to nothing, or to something that isn't there.",
+  nullfk: 'New: some rows point to nothing, or to a missing row.',
   nullvalue: 'New: NULL can be stored in a table, too.',
 };
 
@@ -57,7 +57,7 @@ export const NULL_EXPLAINER = 'NULL means "nothing here".';
 export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   'shop-match': {
     goal: 'Match each order to the customer who placed it.',
-    takeaway: 'INNER keeps the rows that match on both sides.',
+    takeaway: 'Each order found its customer. INNER keeps only matches.',
     hints: [
       'Bring the two tables together.',
       'Any join works here. INNER keeps the rows that match on both sides.',
@@ -75,7 +75,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'shop-never-ordered': {
     goal: 'Which customer has never placed an order?',
-    takeaway: 'LEFT plus IS NULL finds rows with no match.',
+    takeaway: 'LEFT kept Odalys; her NULL showed she never ordered.',
     hints: [
       'A LEFT join fills in NULL where nothing matched.',
       'Join with LEFT, then poke a NULL to keep only the rows with no match.',
@@ -93,7 +93,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'shop-every-order': {
     goal: 'Show every order and who placed it, even an order with no customer.',
-    takeaway: 'Orders stayed put, so LEFT kept the lost order.',
+    takeaway: 'Orders stayed put, so LEFT kept order 108.',
     hints: [
       'LEFT keeps every row of the table that stayed put. Which one should stay?',
       'This time, leave the orders table where it is and bring the customers table over.',
@@ -102,7 +102,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'library-on-shelf': {
     goal: 'Which books are still on the shelf?',
-    takeaway: 'No borrower means the book is on the shelf.',
+    takeaway: 'No borrower, so those books are still on the shelf.',
     hints: [
       'A book on the shelf has no borrower.',
       'Keep the books table still, bring the borrowers table over, choose LEFT, and look for NULL borrowers.',
@@ -111,7 +111,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'library-nothing-out': {
     goal: 'Which borrower has nothing checked out?',
-    takeaway: 'No matching book means nothing checked out.',
+    takeaway: 'No book matched, so this borrower has nothing out.',
     hints: [
       'A LEFT join fills in NULL where nothing matched.',
       'Keep the borrowers table still, choose LEFT, then poke a NULL in a book column.',
@@ -125,7 +125,8 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
       'Any join with INNER works. Then look at the {source:clubs.id} column of the clubs table.',
       'Bring the students table over to the clubs table (or the other way) and let go.',
     ],
-    takeaway: 'Choir and Drama share club ID 3, so Ines appears twice. A duplicated ID makes a join repeat rows.',
+    takeaway:
+      'Choir and Drama share {source:clubs.id} 3, so Ines appears twice. A duplicated ID makes a join repeat rows.',
   },
   'library-every-book': {
     goal: 'List every book, and who has it, if anyone.',
@@ -138,7 +139,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'library-no-due': {
     goal: 'Which borrowed book has no due date?',
-    takeaway: 'That NULL was in the table, not made by the join.',
+    takeaway: 'This NULL was in the table, not made by the join.',
     hints: [
       'NULL can be stored in a table, too. Look at the {books.due} column.',
       'INNER keeps only borrowed books. Then poke the NULL under {books.due}.',
@@ -147,7 +148,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'shop-no-customer': {
     goal: 'Which order has no customer on file?',
-    takeaway: 'LEFT plus IS NULL works from either table.',
+    takeaway: 'Same trick, other side: order 108 has no customer.',
     hints: [
       'One order points to no customer.',
       'Keep the orders table still, choose LEFT, then poke a NULL in a customer column.',
@@ -165,7 +166,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'school-empty-club': {
     goal: 'Which club has no members yet?',
-    takeaway: 'No student matched, so the club has no members.',
+    takeaway: 'No student matched, so this club has no members.',
     hints: [
       'A LEFT join fills in NULL where nothing matched.',
       'Keep the clubs table still, choose LEFT, then poke a NULL in a student column.',
@@ -183,7 +184,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'school-no-club': {
     goal: "Which students aren't in any club we know of?",
-    takeaway: 'An empty ID and an unknown ID both match nothing.',
+    takeaway: 'A blank {source:students.clubId} and an unknown one both match nothing.',
     hints: [
       "Look at the {source:students.clubId} column: one is empty, and one points to a club that doesn't exist.",
       'Keep the students table still, choose LEFT, then poke a NULL in a club column.',
@@ -201,7 +202,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'cafe-missing-drink': {
     goal: 'Which ticket is missing its drink?',
-    takeaway: 'The ticket points to no drink, so nothing matched.',
+    takeaway: 'This ticket points to no drink, so nothing matched.',
     hints: [
       'One ticket points to no drink.',
       'Keep the tickets table still, choose LEFT, then poke a NULL in a drink column.',
@@ -210,7 +211,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'cafe-no-milk': {
     goal: 'Which tickets were made without milk?',
-    takeaway: 'Those NULLs were stored, not made by the join.',
+    takeaway: 'These NULLs were in the table, not made by the join.',
     hints: [
       'NULL can be stored in a table, too. Look at the {tickets.milk} column.',
       'Join with INNER, then poke a NULL under {tickets.milk}.',
@@ -228,7 +229,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
   },
   'cafe-never-ordered': {
     goal: 'Which drink has never been ordered?',
-    takeaway: 'Testing {tickets.id}, not {tickets.milk}, ignores stored NULLs.',
+    takeaway: "The NULL under {tickets.id} means no match; {tickets.milk}'s doesn't.",
     hints: [
       'A LEFT join fills in NULL where nothing matched. But {tickets.milk} can be NULL, too.',
       'Keep the drinks table still, choose LEFT, then poke the NULL under {tickets.id}, not one under {tickets.milk}.',
@@ -256,12 +257,22 @@ export const CARD = {
   morePuzzlesSoon: 'More puzzles soon.',
   /** Next was pressed while a table is held: the switch waits for the release. */
   letGo: 'Let go of the table to continue.',
+  /**
+   * A daily ahead of practice: this lead-in, then one `CONCEPT_INTROS` line
+   * per concept practice hasn't introduced yet (at most two).
+   */
+  dailyAhead: "Today's puzzle uses something new:",
 };
 
 // --- The puzzle bar (next to INNER | LEFT) --------------------------------------------
 
 export const BAR = {
-  hint: 'Hint',
+  /**
+   * The hint button says what it shows next: the first hint, another one,
+   * then the full answer (`hints[0..2]`). Its width fits the longest, so
+   * relabeling never resizes the bar (tested).
+   */
+  hintLabels: ['Hint', 'Another hint', 'Show answer'] as const,
   next: 'Next',
   prev: 'Prev',
   daily: 'Today',
@@ -281,11 +292,26 @@ export const DIFF = {
 // --- Welcome panel (browser) -----------------------------------------------------------
 
 export const WELCOME = {
+  title: 'SpatialQL',
+  description: 'Join two tables with your hands.',
+  descriptionPuzzles: 'A new SQL puzzle every day.',
+  descriptionFreePlay: 'Free play: no puzzles, just tables.',
+  /** Always shown, below the description. */
+  setup: 'Sit at a desk. No controllers needed.',
+  /** The Enter XR button. */
   start: 'Start',
+  /** The Enter XR button in free play. */
+  startFreePlay: 'Start free play',
+  /** Free play only: shown prominently under the title. */
+  freePlayHeading: 'Free play',
   freePlay: 'Free play',
+  /** In free play: back to challenge mode. */
+  puzzles: 'Puzzles',
+  /** Before the daily is offered (practice 1-3 not all solved). */
+  practiceFirst: 'Start with 3 short practice puzzles.',
   practiceProgress: (solved: number, total: number) => `Practice ${solved}/${total}`,
   dailyOpen: (dataset: DatasetId) => `Today's puzzle: ${DATASET_TITLES[dataset]}`,
-  dailyDone: "Today's puzzle: solved",
+  dailyDone: "Today's puzzle: solved. New one tomorrow.",
   streak: (days: number) => (days === 1 ? 'Streak: 1 day' : `Streak: ${days} days`),
   streakAtRisk: 'Solve today to keep it.',
   saveUnavailable: "Progress can't be saved in this browser.",
