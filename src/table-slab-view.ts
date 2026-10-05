@@ -22,90 +22,36 @@
  */
 
 import { computed, signal, UIKit, UIKitDocument, type Signal } from '@iwsdk/core';
-import { firaCode } from '@pmndrs/msdfonts/firaCode';
-import { inter } from '@pmndrs/msdfonts/inter';
 import { columnHeaderText } from './data/join-result.js';
-import type { CellValue, Row, Table } from './data/types.js';
+import type { Row, Table } from './data/types.js';
+import {
+  BASE_PANEL_BORDER_WIDTH,
+  BASE_ROW_FONT_CM,
+  DATA_METRICS,
+  displayValue,
+  FIT_EPSILON_CM,
+  FONT_FAMILIES,
+  HEADER_METRICS,
+  LINE_HEIGHT_FACTOR,
+  measureTextCm,
+  MONO_METRICS,
+  slabMetrics,
+  truncateToWidth,
+  type SlabMetrics,
+  type SlabTextSizes,
+} from './slab-metrics.js';
+
+export { DEFAULT_SLAB_TEXT_SIZES, FONT_FAMILIES, type SlabTextSizes } from './slab-metrics.js';
 
 /** Source slabs show at most this many rows (the last becomes "+N more"). */
 export const MAX_VISIBLE_ROWS = 8;
 /** Join result slabs may show this many rows before overflowing. */
 export const MAX_RESULT_ROWS = 12;
 
-// All numeric sizes below are UIKit units == centimeters (pixelSize
-// defaults to 0.01 in @pmndrs/uikit, i.e. 100 units = 1 meter).
-//
-// Text is sized by angle, not by centimeters: callers pass the row and
-// header font sizes (see `slabTextSizeAt` in view-comfort.ts), and every
-// other layout size scales with the row font. The base layout below was
-// designed at a 1.6 cm row font.
-const BASE_ROW_FONT_CM = 1.6;
-const BASE_HEADER_FONT_CM = 1.8;
-// Slightly smaller than row text, never smaller than this: a caption wider
-// than the columns widens the slab instead of shrinking.
-const BASE_CAPTION_FONT_CM = 1.4;
-const BASE_PANEL_PADDING = 1.2;
-const BASE_PANEL_BORDER_WIDTH = 0.15;
-const BASE_PANEL_BORDER_RADIUS = 1.2;
-const BASE_CELL_PADDING_X = 1.0;
-const BASE_CELL_PADDING_Y = 0.6;
-const BASE_COLUMN_MIN_WIDTH = 5;
-const BASE_COLUMN_MAX_WIDTH = 14;
-const BASE_COLUMN_GAP = 0.6;
-const BASE_CAPTION_GAP_BELOW = 0.9;
-// UIKit's default `lineHeight` is '120%' of fontSize; a single-line Text is
-// exactly one line tall, so every row's height is known before layout.
-const LINE_HEIGHT_FACTOR = 1.2;
-// The control's border (not scaled: it isn't a slab).
+// Layout sizes and text measurement live in the pure slab-metrics.ts (so
+// data tests can check that every cell fits). The control's border isn't
+// scaled: it isn't a slab.
 const PANEL_BORDER_WIDTH = BASE_PANEL_BORDER_WIDTH;
-
-/** Physical font sizes (cm) a slab is built with. */
-export type SlabTextSizes = { rowFontCm: number; headerFontCm: number };
-/** The original fixed sizes, for callers that don't size by angle. */
-export const DEFAULT_SLAB_TEXT_SIZES: SlabTextSizes = { rowFontCm: BASE_ROW_FONT_CM, headerFontCm: BASE_HEADER_FONT_CM };
-
-/** Every layout size of one slab, in cm, derived from its font sizes. */
-type SlabMetrics = {
-  rowFont: number;
-  headerFont: number;
-  captionFont: number;
-  panelPadding: number;
-  borderWidth: number;
-  borderRadius: number;
-  cellPaddingX: number;
-  cellPaddingY: number;
-  columnMinWidth: number;
-  columnMaxWidth: number;
-  columnGap: number;
-  captionGapBelow: number;
-  headerRowHeight: number;
-  dataRowHeight: number;
-};
-
-function slabMetrics(text: SlabTextSizes = DEFAULT_SLAB_TEXT_SIZES): SlabMetrics {
-  const s = text.rowFontCm / BASE_ROW_FONT_CM;
-  const cellPaddingY = BASE_CELL_PADDING_Y * s;
-  return {
-    rowFont: text.rowFontCm,
-    headerFont: text.headerFontCm,
-    captionFont: BASE_CAPTION_FONT_CM * s,
-    panelPadding: BASE_PANEL_PADDING * s,
-    borderWidth: BASE_PANEL_BORDER_WIDTH * s,
-    borderRadius: BASE_PANEL_BORDER_RADIUS * s,
-    cellPaddingX: BASE_CELL_PADDING_X * s,
-    cellPaddingY,
-    columnMinWidth: BASE_COLUMN_MIN_WIDTH * s,
-    columnMaxWidth: BASE_COLUMN_MAX_WIDTH * s,
-    columnGap: BASE_COLUMN_GAP * s,
-    captionGapBelow: BASE_CAPTION_GAP_BELOW * s,
-    headerRowHeight: text.headerFontCm * LINE_HEIGHT_FACTOR + 2 * cellPaddingY,
-    dataRowHeight: text.rowFontCm * LINE_HEIGHT_FACTOR + 2 * cellPaddingY,
-  };
-}
-
-// Absorbs float rounding between this measurement and yoga's layout so a
-// string that exactly fills its column isn't truncated.
-const FIT_EPSILON_CM = 1e-3;
 
 const COLOR_PANEL_BACKGROUND = '#f5f3ef';
 const COLOR_PANEL_BORDER = '#c9c2b0';
@@ -124,6 +70,8 @@ const COLOR_OUTLINE = '#a89f8c';
 /** Width of the diff gutter (a narrow first column for the `+` marker), at the base font. */
 const BASE_GUTTER_WIDTH = 2.2;
 const BASE_OUTLINE_WIDTH = 0.12;
+/** The dataset accent stripe on a slab's header bar, at the base font (~0.25 cm at the source size). */
+const ACCENT_STRIPE_CM = 0.36;
 
 /** Challenge win look for a result slab's border. */
 export function slabBorderColor(win: boolean): string {
@@ -134,40 +82,6 @@ export function slabBorderColor(win: boolean): string {
 export function captionColor(win: boolean): string {
   return win ? COLOR_CAPTION_WIN : COLOR_CAPTION;
 }
-
-// The exact MSDF font data UIKit renders with. UIKit's default family is this
-// same Inter package, but it resolves `fontWeight` to the nearest available
-// weight at runtime; pinning `fontFamilies` on the root to only these
-// entries guarantees the fonts we measure are the fonts that get drawn
-// ('normal' = 400 resolves to light = 300, 'bold' = 700 to bold). `inter`
-// stays the first key so it remains the default family; the SQL caption
-// opts into `mono` (a single weight, so every weight resolves to it).
-type MsdfFontInfo = typeof inter.light;
-const DATA_FONT_INFO: MsdfFontInfo = inter.light;
-const HEADER_FONT_INFO: MsdfFontInfo = inter.bold;
-const MONO_FONT_INFO: MsdfFontInfo = firaCode.light;
-export const FONT_FAMILIES = {
-  inter: { light: DATA_FONT_INFO, bold: HEADER_FONT_INFO },
-  mono: { light: MONO_FONT_INFO },
-};
-
-// UIKit's advance for a glyph missing from the font (its MISSING_GLYPH), in ems.
-const MISSING_GLYPH_ADVANCE_EM = 0.6;
-
-type GlyphMetrics = Map<string, number>;
-
-/** Per-glyph advance widths in ems, normalized exactly as UIKit's `Font` does. */
-function buildGlyphMetrics(info: MsdfFontInfo): GlyphMetrics {
-  const advances: GlyphMetrics = new Map();
-  for (const glyph of info.chars) {
-    advances.set(glyph.char, glyph.xadvance / info.info.size);
-  }
-  return advances;
-}
-
-const DATA_METRICS = buildGlyphMetrics(DATA_FONT_INFO);
-const HEADER_METRICS = buildGlyphMetrics(HEADER_FONT_INFO);
-const MONO_METRICS = buildGlyphMetrics(MONO_FONT_INFO);
 
 type Container = InstanceType<typeof UIKit.Container>;
 type ContainerProps = NonNullable<ConstructorParameters<typeof UIKit.Container>[0]>;
@@ -288,6 +202,8 @@ export type SlabBuildOptions = {
   reserveRows?: number;
   /** Challenge silhouette: rows are empty outlines, except `revealRow`, which keeps its text. */
   silhouette?: { revealRow: number | null };
+  /** Challenge mode: the dataset's accent, as a thin stripe on the header bar. */
+  accent?: string;
 };
 
 /** Rows shown for `table` under `maxRows`, and whether a "+N more" row follows. */
@@ -316,46 +232,8 @@ function panelHeightCm(options: SlabBuildOptions, m: SlabMetrics, rows: number, 
   return firstRowTopCm + m.dataRowHeight * (rows + (overflow ? 1 : 0)) + m.panelPadding + m.borderWidth;
 }
 
-function displayValue(value: CellValue): string {
-  return value === null ? 'NULL' : String(value);
-}
-
 function headerLabel(table: Table, column: string): string {
   return columnHeaderText(table, column);
-}
-
-/**
- * Single-line text width, matching UIKit's own measurement: whitespace is
- * collapsed and trimmed (`whiteSpace: 'normal'`), then each glyph contributes
- * `xadvance * fontSize` (letterSpacing is 0; UIKit's measure ignores kerning).
- */
-function measureTextCm(text: string, metrics: GlyphMetrics, fontSizeCm: number): number {
-  const normalized = text.replace(/[\t\n ]+/g, ' ').trim();
-  let widthEm = 0;
-  for (const char of normalized) {
-    widthEm += metrics.get(char) ?? MISSING_GLYPH_ADVANCE_EM;
-  }
-  return widthEm * fontSizeCm;
-}
-
-function ellipsisFor(metrics: GlyphMetrics): string {
-  return metrics.has('…') ? '…' : '...';
-}
-
-/** Returns `text` unchanged if it fits, else the longest prefix + ellipsis that does. */
-function truncateToWidth(text: string, metrics: GlyphMetrics, fontSizeCm: number, maxWidthCm: number): string {
-  if (measureTextCm(text, metrics, fontSizeCm) <= maxWidthCm + FIT_EPSILON_CM) {
-    return text;
-  }
-  const ellipsis = ellipsisFor(metrics);
-  const chars = Array.from(text);
-  for (let length = chars.length - 1; length > 0; length--) {
-    const candidate = chars.slice(0, length).join('').trimEnd() + ellipsis;
-    if (measureTextCm(candidate, metrics, fontSizeCm) <= maxWidthCm + FIT_EPSILON_CM) {
-      return candidate;
-    }
-  }
-  return ellipsis;
 }
 
 /**
@@ -596,6 +474,23 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     borderTopLeftRadius: m.borderRadius * 0.6,
     borderTopRightRadius: m.borderRadius * 0.6,
   });
+  if (options.accent) {
+    // The dataset's accent: a thin stripe along the header's top edge, on an
+    // absolute layer so it never changes the layout. Never on rows.
+    header.add(
+      new UIKit.Container({
+        pointerEvents: 'none',
+        positionType: 'absolute',
+        positionTop: 0,
+        positionLeft: 0,
+        positionRight: 0,
+        height: ACCENT_STRIPE_CM * (m.rowFont / BASE_ROW_FONT_CM),
+        backgroundColor: options.accent,
+        borderTopLeftRadius: m.borderRadius * 0.6,
+        borderTopRightRadius: m.borderRadius * 0.6,
+      }),
+    );
+  }
   if (options.diffGutter) {
     header.add(buildCell('', m.headerFont, gutterWidthCm, COLOR_TEXT, true, m));
   }
@@ -612,6 +507,8 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
   root.add(header);
 
   const rowViews = new Map<number, RowView>();
+  // Dev only: values cut off with an ellipsis (a dataset test prevents these).
+  const truncatedCells: string[] = [];
 
   visibleRows.forEach((dataRow, rowIndex) => {
     const rowBackground = rowIndex % 2 === 0 ? COLOR_ROW_BACKGROUND_EVEN : COLOR_ROW_BACKGROUND_ODD;
@@ -664,6 +561,9 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
         m.rowFont,
         columnWidth - 2 * m.cellPaddingX,
       );
+      if (import.meta.env.DEV && truncated !== displayValue(raw)) {
+        truncatedCells.push(displayValue(raw));
+      }
       const side = options.cellSides?.[columnIndex];
       const offset = flight && side ? flight[side] : null;
       const color = raw === null ? COLOR_TEXT_NULL : COLOR_TEXT;
@@ -723,6 +623,11 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
   }
 
   const firstRowTopCm = m.borderWidth + m.panelPadding + captionHeightCm + m.headerRowHeight;
+  if (import.meta.env.DEV && truncatedCells.length > 0) {
+    console.warn(
+      `[Slab] ${table.id}: ${truncatedCells.length} cell(s) cut off with an ellipsis: ${truncatedCells.slice(0, 4).join(', ')}`,
+    );
+  }
 
   const document = new UIKitDocument(root);
 

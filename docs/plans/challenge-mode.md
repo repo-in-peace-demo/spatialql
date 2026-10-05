@@ -587,6 +587,201 @@ If phase 3 runs late, the fallback is a plain fade between datasets instead of
 the sink and rise. If even that slips, ship the 5 shop puzzles plus the daily
 (shop only), so the daily would repeat every 5 days.
 
+## Phase 3 status (implemented; at the checkpoint)
+
+Approved with: shorten the library titles (a test now fails any value that
+would be cut off), include theming (four icons imported individually), and
+wait for the release when Next is pressed while a table is held (the card
+says "Let go of the table to continue." and Next looks pressed).
+
+Changes from the plan below:
+
+- **Dev key `G`, not `A`,** applies the solution: `A` is one of the
+  emulator's WASD movement keys. `X` applies the wrong state as planned.
+- **Text sizing and measurement** moved to pure modules
+  (`src/text-angles.ts`, `src/slab-metrics.ts`) so the fit test runs in
+  Node; `view-comfort.ts` and `table-slab-view.ts` import them.
+- **Fan-out wins** now also pulse the rows that repeat (`fanOutGroups`),
+  as decided in phase 2.
+
+Emulator results (seated head; `X`, then `G`, then `N`, for 1-20):
+
+- Every wrong state showed exactly its expected diff (§5's table) and lost;
+  every solution won; the traps (10, 18, 20) lost on the trap.
+- **Switch:** 0.80-0.81 s from the slabs leaving to the new ones landing
+  (both new source documents and both result directions built one per
+  frame); about 1.3 s from Next, including the separation. No long tasks in
+  any switch; no truncated cells on any dataset.
+- **Fit, per dataset** (group extent with card, control, bar and the result
+  at its reserved 12-row height): shop 71.4 deg, library 70.9 deg, school
+  69.7-72.1 deg, cafe 72.4-74.2 deg (top edge 39.2 deg of 40: the tightest).
+  Slabs 0.56-0.58 m from the eyes; band targets 0.45-0.47 m, clearance
+  10.1-11.6 cm; control-to-bar gap 1.5 cm.
+- **Slab sizes:** customers 22.5 x 17.1 cm, orders 28.4 x 21.4, borrowers
+  22.1 x 15.0, books 28.2 x 21.4, clubs 18.2 x 15.0, students 27.0 x 19.3,
+  drinks 17.9 x 15.0, tickets 17.7 x 21.4.
+- **Never-yank:** with a slab held, Next showed the let-go line and a
+  pressed Next and the tables stayed; on release the switch ran.
+- **Reload** mid-ladder resumed on the right dataset (the desk built the
+  cafe tables directly).
+
+Not yet verified: the fan-out row pulse on a live win (added after the
+run); bundle size before and after the icons (needs a build).
+
+## Phase 3 plan: all datasets and table switching (approved)
+
+Scope: puzzles 1–20 in practice order on all four datasets, with the desk
+switching tables between datasets. It ends at a checkpoint, like phase 2.
+
+**1. A pure desk state, with tests** (`src/data/desk-session.ts`)
+
+- **States:** `ready(dataset)`, `leaving(from, to)`, `building(to)`, and
+  `arriving(to)`.
+- **Events:** `request(to)` (a no-op for the dataset already loaded),
+  `leftDone`, `built` and `arrived`.
+- **`canEvaluate(desk, puzzle, joinedTables)`:** true only when the desk is
+  `ready` on the puzzle's dataset *and* the joined tables are the puzzle's.
+  `canActivatePuzzle` (phase 2's guard) gains the same desk condition.
+- **`startupDataset(progress, playable)`:** after a reload, the desk first
+  loads the resume puzzle's dataset, not always the shop.
+- **Tests:**
+  - phase 2's guard tests, kept;
+  - mid-join: a request while joined is deferred until separated, and the
+    old shop join can't be evaluated against the pending library puzzle;
+  - during the animation: no activation or evaluation in `leaving`,
+    `building` or `arriving`;
+  - after a reload: the resume puzzle's dataset loads first, and nothing is
+    evaluated before it's `ready`.
+
+**2. Switching tables** (`desk-placement.ts`, `join-system.ts`, `challenge-system.ts`)
+
+- **Order of events:** Next on a puzzle with another dataset:
+  1. Separate if joined, and glide home (the existing path). Then wait until
+     no slab is held and nothing is gliding or docking.
+  2. **Leave:** the card cross-fades to the next puzzle, and Hint and Next go
+     inactive. Both slabs lose `OneHandGrabbable`, sink 6 cm along their own
+     up axis and fade out (0.35 s), with a soft descending sweep
+     (`playTablesOut`). Then their entities are disposed with
+     `entity.dispose()`.
+  3. **Build:** the new source documents, one per frame. The join system
+     builds the two result directions' documents from a queue, one per frame,
+     instead of all at once on registration. That's four frames in all,
+     timed with the long-task readout.
+  4. **Arrive:** placement re-runs for the new slab sizes. It uses the
+     surface and head pose it already committed (no new search), under the
+     same reach and view rules. The slabs rise 6 cm and fade in, 0.08 s
+     apart, with `playTablesIn` and a drop tap as each lands. They become
+     grabbable once they land.
+  5. **Activate:** the session starts, the silhouette is built for the new
+     tables, and the bar comes back.
+- **Same dataset:** the phase 2 home glide, unchanged.
+- **Never-yank and grabs:**
+  - a switch never starts while a slab is held, and waits for the release;
+  - new slabs start un-touched, so placement places them;
+  - after that, the existing never-yank rule applies as now.
+- **Join system:**
+  - tables come from a registry over all datasets (`tableById`), not
+    `SOURCE_TABLES`;
+  - a disposed source unregisters cleanly: its result views and their
+    listeners, home poses and glides;
+  - proximity and grab events are ignored while the desk isn't `ready`;
+  - `J` / `Shift+J` act on the loaded dataset's parent and child tables.
+- **Free play:** unchanged (shop only).
+
+**3. Every dataset fits**
+
+- The source slabs are at most 8 rows, the same as orders today. The
+  result slab reserves the 12-row cap (`RESULT_ROW_CAP`) for every dataset.
+  The card, control and bar don't change size. So each dataset's view
+  extent should be at most the shop's measured 71.4° of 80°. The readout
+  will confirm it, per dataset.
+- The arrival readout logs, per dataset:
+  - each slab's size, distance from the eyes and edge angles;
+  - reach for the slabs and band targets;
+  - the group extent with the card, control and bar, and the result slab at
+    its reserved 12-row height (its largest).
+- **New:** a dev warning for every cell truncated with an ellipsis.
+- **Known risk: library titles.** Several are 16–17 characters ("The Glass
+  Orchard", "North of Nowhere"). That's past what fits in the 9.7 cm column
+  maximum at the source text size, about 15 characters, so they'd truncate.
+  Options:
+  - (a) **Shorten the titles** to at most 14 characters, e.g. "Glass
+    Orchard", "Quiet Engine". Recommended: the layout limits stay as they
+    are. The tests' expected rows change to match.
+  - (b) Raise the column maximum for text columns by about 2 cm. That widens
+    the library slabs and result.
+
+**4. Copy:** all text already comes from `copy.ts`. The fan-out takeaways
+(puzzles 4 and 8) will now render on their real tables.
+
+**5. Verification support**
+
+- **`src/data/puzzle-checks.ts`:** per puzzle, one authored *wrong* state
+  and its expected diff (rows shown, extra, missing). For puzzles 10, 18 and
+  20, the wrong state is the trap. Tests assert the expected diffs:
+
+| # | Wrong state | Shown / extra / missing |
+| --- | --- | --- |
+| 1 | customers <- orders LEFT | 11 / 1 / 0 |
+| 2 | INNER | 10 / 0 / 1 |
+| 3 | customers <- orders LEFT, no filter | 11 / 10 / 0 |
+| 4 | borrowers <- books LEFT | 7 / 1 / 0 |
+| 5 | customers <- orders LEFT | 11 / 1 / 1 |
+| 6 | books <- borrowers LEFT, no filter | 8 / 6 / 0 |
+| 7 | borrowers <- books LEFT, no filter | 7 / 6 / 0 |
+| 8 | students <- clubs LEFT | 8 / 2 / 0 |
+| 9 | borrowers <- books LEFT | 7 / 1 / 2 |
+| 10 | **trap:** books <- borrowers LEFT WHERE due IS NULL | 3 / 2 / 0 |
+| 11 | orders <- customers LEFT, no filter | 11 / 10 / 0 |
+| 12 | INNER | 6 / 0 / 1 |
+| 13 | clubs <- students LEFT, no filter | 7 / 6 / 0 |
+| 14 | clubs <- students LEFT | 7 / 1 / 2 |
+| 15 | students <- clubs LEFT, no filter | 8 / 6 / 0 |
+| 16 | INNER | 7 / 0 / 1 |
+| 17 | tickets <- drinks LEFT, no filter | 8 / 7 / 0 |
+| 18 | **trap:** drinks <- tickets LEFT WHERE milk IS NULL | 3 / 1 / 0 |
+| 19 | drinks <- tickets LEFT | 8 / 1 / 1 |
+| 20 | **trap:** drinks <- tickets LEFT WHERE milk IS NULL | 3 / 2 / 0 |
+
+- **Dev keys** (with `debug`):
+  - `A` applies the active puzzle's solution, through the same transitions
+    as real input: separate, commit in the solution's direction, set the join
+    type, set the filter;
+  - `X` applies its wrong state;
+  - `N` / `P` stay limited to unlocked puzzles.
+- **Runtime run** (seated head):
+  1. For each of the 20 puzzles: `X`, then check the logged diff against
+     the table; then `A`, and check it's solved.
+  2. Screenshots: the first puzzle of each dataset (1, 4, 8, 16), and the
+     win cards of puzzles 4 and 8 on their tables.
+  3. A switch while joined, and a reload mid-ladder (resumes on the right
+     dataset).
+  4. Long tasks during every switch.
+
+**6. Optional: dataset theming**
+
+- **Accent per dataset:** used only on the card border and as a 0.25 cm
+  stripe on the slab header bars, never on rows.
+  - The accents are deep tones (lightness at most 40%), against the key
+    tints' pastels (at least 80%). So they differ by lightness and position,
+    not by hue alone.
+  - Proposed: shop indigo `#3b4f9c`, library plum `#7a3e8f`, school deep teal
+    `#1f6f78`, café coffee `#8a5a2b`.
+  - The win look's gold border still takes over the card on a win.
+- **Icon on the card title:** a vector icon from `@pmndrs/uikit-lucide`,
+  already a dependency (no image files): shopping bag, open book, school,
+  coffee cup. It's sized to the title text.
+- **Data:** `accent` and `icon` per dataset in the data layer, with a test
+  that every dataset has both and that each accent is at least 2.5× darker
+  (relative luminance) than every key tint.
+
+**Decisions for you**
+
+1. **Library titles:** shorten them (recommended) or widen text columns?
+2. **Theming:** include it in phase 3 (recommended; about half a day)?
+3. **Next while a slab is held:** wait for the release (recommended,
+   never-yank), or force-release it?
+
 ## Phase 2 status (implemented; at the checkpoint)
 
 Approved with: sandbox stays the production default, and `?challenge=1`

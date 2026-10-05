@@ -252,8 +252,10 @@ export const CARD = {
   missingRows: (count: number) => (count === 1 ? '1 row missing' : `${count} rows missing`),
   extraRows: (count: number) => (count === 1 ? '1 row not in the answer' : `${count} rows not in the answer`),
   emptyResult: 'No rows',
-  /** After the last available puzzle (phase 2: puzzle 3). */
+  /** After the last available puzzle. */
   morePuzzlesSoon: 'More puzzles soon.',
+  /** Next was pressed while a table is held: the switch waits for the release. */
+  letGo: 'Let go of the table to continue.',
 };
 
 // --- The puzzle bar (next to INNER | LEFT) --------------------------------------------

@@ -73,7 +73,10 @@ Daily and practice puzzles over four small datasets; design and phases in
 layer and tests: datasets, 20 puzzles, query and NULL filter, result
 comparison and diff, daily selection, streak, progress, copy) is committed.
 Phase 2 (shop puzzles 1-3 playable: card, silhouette, diff, NULL poke, bar,
-win, progress) is implemented and emulator-tested, at its checkpoint.
+win, progress) is committed. Phase 3 (all 20 puzzles on four datasets, with
+the desk switching tables, dataset theming, and guards so nothing is judged
+mid-switch or on the wrong tables) is implemented and emulator-tested, at
+its checkpoint.
 Challenge mode is on in dev and with `?challenge=1` in production; the
 production default is still the sandbox.
 

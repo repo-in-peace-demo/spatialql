@@ -32,7 +32,9 @@ export type SoundName =
   | 'slideOut'
   | 'release'
   | 'win'
-  | 'hint';
+  | 'hint'
+  | 'tablesOut'
+  | 'tablesIn';
 
 /** Dev-only observer: name, scheduled delay (s), measured peak (dBFS, or null if not measurable). */
 export type SoundHook = (name: SoundName, delaySeconds: number, peakDb: number | null) => void;
@@ -59,6 +61,9 @@ const RESOLVE_GAIN = 0.42;
 const WIN_GAIN = 0.4;
 /** Hint: a soft chime, quieter than the win. */
 const HINT_GAIN = 0.22;
+/** Dataset switch: soft, below the snap (it accompanies a 0.35 s animation, not an event). */
+const TABLES_SWEEP_GAIN = 0.16;
+const TABLES_TONE_GAIN = 0.28;
 const HUM_MAX_GAIN = 0.12;
 const HUM_BASE_HZ = 160;
 const HUM_RISE_HZ = 100;
@@ -275,6 +280,30 @@ class JoinSounds {
     });
   }
 
+  /** A dataset switch: the old tables sink away (a soft, falling sweep over a low tone). */
+  playTablesOut(at: Position, delay = 0): void {
+    this.oneShot('tablesOut', at, delay, (ctx, out, t) => {
+      this.sweep(ctx, out, t, 1400, 400, 0.35, TABLES_SWEEP_GAIN);
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(220, t);
+      osc.frequency.exponentialRampToValueAtTime(110, t + 0.3);
+      envelope(ctx, osc, out, t, TABLES_TONE_GAIN, 0.02, 0.32);
+    });
+  }
+
+  /** The new tables rise into place (the sweep rising). */
+  playTablesIn(at: Position, delay = 0): void {
+    this.oneShot('tablesIn', at, delay, (ctx, out, t) => {
+      this.sweep(ctx, out, t, 400, 1400, 0.35, TABLES_SWEEP_GAIN);
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(130, t);
+      osc.frequency.exponentialRampToValueAtTime(220, t + 0.3);
+      envelope(ctx, osc, out, t + 0.03, TABLES_TONE_GAIN, 0.03, 0.32);
+    });
+  }
+
   /** Hint shown: one soft, bell-like chime. */
   playHint(at: Position, delay = 0): void {
     this.oneShot('hint', at, delay, (ctx, out, t) => {
@@ -348,6 +377,29 @@ class JoinSounds {
   }
 
   // --- Internals -----------------------------------------------------------------
+
+  /** Band-passed noise swept from `from` to `to` Hz over `length` s, peaking at `peak`. */
+  private sweep(ctx: AudioContext, out: AudioNode, t: number, from: number, to: number, length: number, peak: number): void {
+    if (!this.noise) {
+      return;
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = this.noise;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.Q.value = 2;
+    filter.frequency.setValueAtTime(from, t);
+    filter.frequency.exponentialRampToValueAtTime(to, t + length);
+    source.connect(filter);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(peak, t + 0.06);
+    gain.gain.linearRampToValueAtTime(0, t + length);
+    filter.connect(gain);
+    gain.connect(out);
+    source.start(t);
+    source.stop(t + length + 0.02);
+  }
 
   /** Runs `build` with a panner at `at` as its output, `delay` s from now. */
   private oneShot(

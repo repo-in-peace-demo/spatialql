@@ -8,52 +8,47 @@
  * difference on the result slab; the first match wins. Progress is saved
  * per device (guarded localStorage).
  *
- * Phase 2 scope: the first three practice puzzles (shop data), so the
- * tables never change; after puzzle 3 the card says more puzzles are coming
- * and Next is inactive.
+ * All 20 practice puzzles, over four datasets. A puzzle on another dataset
+ * switches the desk first (`desk-placement.ts`): Next separates and glides
+ * the slabs home, waits until no table is held (the never-yank rule; the
+ * card says so), then the old tables leave and the new ones arrive; only
+ * then does the puzzle become active. Nothing is evaluated mid-switch, or
+ * against a puzzle whose tables aren't the joined ones (`canEvaluate`).
  *
  * Inert in free play (`CHALLENGE_MODE` false): it builds nothing.
  */
 
 import { createSystem, PokeInteractable, RayInteractable, Vector3, type Entity } from '@iwsdk/core';
 import { CHALLENGE_MODE } from './challenge-mode.js';
+import { challengeStart, PLAYABLE } from './challenge-start.js';
 import {
   buildPuzzleBar,
   buildPuzzleCard,
   setBarChip,
+  setCardTheme,
   setCardWin,
   setNextAvailable,
+  setNextWaiting,
   type BarButton,
   type PuzzleBarView,
   type PuzzleCardView,
 } from './challenge-view.js';
-import { compareToTarget, type Comparison } from './data/compare.js';
+import { compareToTarget, fanOutGroups, type Comparison } from './data/compare.js';
 import { BAR, CARD, CONCEPT_INTROS, NULL_EXPLAINER } from './data/copy.js';
 import { localDay } from './data/daily.js';
+import { DATASETS } from './data/datasets.js';
+import { canEvaluate, canStartSwitch, deskTableIds, type DeskState } from './data/desk-session.js';
 import type { JoinState } from './data/join-state.js';
 import { buildWhereSql } from './data/join-sql.js';
-import {
-  isSolved,
-  isUnlocked,
-  loadProgress,
-  markConceptSeen,
-  markSolved,
-  nextPracticePuzzle,
-  sanitizeProgress,
-  saveProgress,
-  emptyProgress,
-  type KeyValueStorage,
-  type Progress,
-} from './data/progress.js';
+import { isSolved, markConceptSeen, markSolved, saveProgress, type KeyValueStorage, type Progress } from './data/progress.js';
+import { PUZZLE_CHECKS } from './data/puzzle-checks.js';
 import { latestHintIndex, sessionTransition, startSession, type PuzzleSession } from './data/puzzle-session.js';
 import { puzzleText, type PuzzleText } from './data/puzzle-text.js';
 import {
   canActivatePuzzle,
   getPuzzle,
   introducesConcept,
-  isPuzzleId,
   PRACTICE_ORDER,
-  puzzleMatchesTables,
   puzzleTables,
   puzzleTarget,
   runPuzzleQuery,
@@ -62,6 +57,7 @@ import {
 } from './data/puzzles.js';
 import { visibleRowIndices, type QueryOutput } from './data/query.js';
 import type { Table } from './data/types.js';
+import { deskBridge } from './desk-bridge.js';
 import { devFlag } from './dev-flags.js';
 import { ChallengeDebug, type ChallengeDebugHost } from './challenge-debug.js';
 import { joinBridge, type ChallengeHooks, type ChallengeLayout, type JoinControls } from './join-bridge.js';
@@ -69,27 +65,18 @@ import { sounds } from './sound.js';
 import { buildTableSlabDocument, MAX_RESULT_ROWS, type TableSlabDocument } from './table-slab-view.js';
 import { PLANNED_CONTROL_DISTANCE_METERS, PLANNED_RESULT_DISTANCE_METERS, slabTextSizeAt } from './view-comfort.js';
 
-/** Phase 2: the first three practice puzzles. */
-const AVAILABLE: readonly PuzzleId[] = PRACTICE_ORDER.slice(0, 3);
-
 /** A pinch presses a bar button within this of it in plane, and this far off its surface. */
 const BAR_PINCH_MARGIN_METERS = 0.015;
 const BAR_PINCH_DEPTH_METERS = 0.03;
 /** A ray select and a pinch on the same press count once. */
 const BAR_PRESS_DEBOUNCE_SECONDS = 0.3;
-
-function safeStorage(): KeyValueStorage | null {
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
+/** The card fades back in this fast when it changes puzzle (per second). */
+const CARD_FADE_IN_PER_SECOND = 3;
 
 export class ChallengeSystem extends createSystem({}) implements ChallengeHooks, ChallengeDebugHost {
   private join: JoinControls | null = null;
   private storage: KeyValueStorage | null = null;
-  private progress: Progress = emptyProgress();
+  private progress!: Progress;
 
   private card!: PuzzleCardView;
   private bar!: PuzzleBarView;
@@ -99,16 +86,23 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private barEntity!: Entity;
   private silhouette: { doc: TableSlabDocument; entity: Entity } | null = null;
 
+  /** The active puzzle (its tables are on the desk). */
   private puzzle!: Puzzle;
   private text!: PuzzleText;
   private target!: QueryOutput;
   private session!: PuzzleSession;
+  /** A puzzle on another dataset, waiting for the desk to switch to it. */
+  private pending: PuzzleId | null = null;
+  private switchRequested = false;
   /** The antijoin intro waits for the first NULLs to appear. */
   private nullCoachPending = false;
   private lastComparison: { output: QueryOutput; comparison: Comparison } | null = null;
   private lastState: JoinState | null = null;
   private lastPress = -Infinity;
   private clock = 0;
+  /** The card's message text and puzzle, as last set. */
+  private messageText = '';
+  private cardPuzzleId: PuzzleId | null = null;
   private debug: ChallengeDebug | null = null;
   private readonly _point = new Vector3();
   private readonly _local = new Vector3();
@@ -118,22 +112,16 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       return;
     }
     this.join = joinBridge.join;
-    if (!this.join) {
-      console.warn('[challenge] the join system is not registered; challenge mode is off.');
+    if (!this.join || !deskBridge.desk) {
+      console.warn('[challenge] the join or desk system is not registered; challenge mode is off.');
       return;
     }
 
-    this.storage = safeStorage();
-    if (import.meta.env.DEV && new URLSearchParams(window.location.search).has('resetProgress')) {
-      saveProgress(this.storage, emptyProgress());
-    }
-    // Drop anything this build couldn't have produced: solves beyond the
-    // playable range, or out of strict order (no daily yet).
-    const loaded = loadProgress(this.storage, isPuzzleId);
-    this.progress = sanitizeProgress(loaded, AVAILABLE, PRACTICE_ORDER, true);
-    if (this.progress !== loaded) {
-      saveProgress(this.storage, this.progress);
-    }
+    // Progress was loaded and sanitized once, shared with desk placement
+    // (which already put the start puzzle's tables on the desk).
+    const start = challengeStart();
+    this.storage = start.storage;
+    this.progress = start.progress;
 
     // The card and bar, each on its own non-grabbable entity.
     this.card = buildPuzzleCard();
@@ -170,10 +158,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
     this.debug = import.meta.env.DEV && devFlag('debug') ? new ChallengeDebug(this) : null;
     if (import.meta.env.DEV && this.debug) {
-      const solved = Object.keys(this.progress.solved).join(', ') || 'none';
+      const solved = Object.keys(this.progress.solved).length;
       this.debug.note(
-        `progress: solved ${solved}; resume at ${this.progress.lastPuzzle ?? 'none'}` +
-          (this.progress !== loaded ? ' (sanitized: dropped entries this build cannot have made)' : ''),
+        `progress: ${solved} solved; starting at ${start.puzzleId} on ${start.datasetId}` +
+          (start.sanitized ? ' (sanitized: dropped entries this build cannot have made)' : ''),
       );
     }
 
@@ -190,15 +178,25 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       }
     });
 
-    this.loadPuzzle(this.startPuzzle());
+    this.loadPuzzle(start.puzzleId);
   }
 
   update(delta: number): void {
     const join = this.join;
-    if (!join || !this.puzzle) {
+    if (!join || !this.card) {
       return;
     }
     this.clock += delta;
+    if (this.card.fade.peek() < 1) {
+      this.card.fade.value = Math.min(1, this.card.fade.peek() + delta * CARD_FADE_IN_PER_SECOND);
+    }
+    if (this.pending) {
+      this.updatePendingSwitch(join);
+      return;
+    }
+    if (!this.puzzle) {
+      return;
+    }
     const state = join.joinState;
     if (state !== this.lastState) {
       this.lastState = state;
@@ -215,15 +213,16 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   onSettled(): void {
     const join = this.join;
     const state = join?.joinState;
-    if (!join || !state || state.phase !== 'joined') {
+    if (!join || !state || state.phase !== 'joined' || !this.puzzle) {
       return;
     }
-    // Never judge a result against a puzzle on other tables: no diff, no win.
-    if (!puzzleMatchesTables(this.puzzle, [state.left, state.right])) {
+    // Never judge a result mid-switch, or against a puzzle on other tables: no diff, no win.
+    if (this.pending || !canEvaluate(this.deskState(), this.puzzle, state)) {
       if (import.meta.env.DEV && this.debug) {
         this.debug.error(
           `evaluation refused: the active puzzle ${this.puzzle.id} is on ${this.puzzle.tables.join(' + ')}, ` +
-            `but the join is ${state.left} + ${state.right}`,
+            `the join is ${state.left} + ${state.right}, the desk is ${this.deskState().phase}` +
+            (this.pending ? ` (switching to ${this.pending})` : ''),
         );
       }
       this.lastComparison = null;
@@ -264,7 +263,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   }
 
   onPhase(phase: JoinState['phase']): void {
-    if (phase === 'separating' || phase === 'idle') {
+    if ((phase === 'separating' || phase === 'idle') && this.session && !this.pending) {
       this.card.status.setProperties({ text: this.session.solved ? this.solvedStatus() : '' });
       this.lastComparison = null;
     }
@@ -296,15 +295,28 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   }
 
   debugPrev(): void {
-    const index = AVAILABLE.indexOf(this.puzzle.id);
-    if (index > 0 && this.canLoad(AVAILABLE[index - 1])) {
+    const index = PLAYABLE.indexOf(this.puzzle.id);
+    if (index > 0 && !this.pending) {
       this.join?.resetToHome();
-      this.loadPuzzle(AVAILABLE[index - 1]);
+      this.loadPuzzle(PLAYABLE[index - 1]);
     }
   }
 
   debugPoke(): boolean {
     return this.join?.debugPokeFirstNull() ?? false;
+  }
+
+  /** Dev only (`G` / `X`, from ChallengeDebug): applies the puzzle's solution or its authored wrong state. */
+  debugApply(which: 'solution' | 'wrong'): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    const switching = !!this.pending || this.deskState().phase !== 'ready';
+    const check = PUZZLE_CHECKS[this.puzzle.id];
+    this.debug.noteApply(this.puzzle.id, which, check, switching);
+    if (!switching) {
+      this.join?.debugApply(which === 'solution' ? this.puzzle.solution : check.wrong);
+    }
   }
 
   debugSnapshot(): { puzzle: Puzzle; output: QueryOutput; comparison: Comparison } | null {
@@ -313,50 +325,95 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   // --- Puzzles -----------------------------------------------------------------------------
 
-  /**
-   * The puzzle to open: a dev `?puzzle=<id>`, else the last one played if
-   * unlocked, else the next unsolved -- each only if it can load on the desk
-   * (`canLoad`); else the first that can.
-   */
-  private startPuzzle(): PuzzleId {
-    if (import.meta.env.DEV) {
-      const requested = new URLSearchParams(window.location.search).get('puzzle');
-      if (requested && this.canLoad(requested)) {
-        return requested;
-      }
-    }
-    const last = this.progress.lastPuzzle;
-    if (last && this.canLoad(last) && isUnlocked(this.progress, last, AVAILABLE)) {
-      return last;
-    }
-    const next = nextPracticePuzzle(this.progress, AVAILABLE) ?? AVAILABLE[AVAILABLE.length - 1];
-    return this.canLoad(next) ? next : (AVAILABLE.find((id) => this.canLoad(id)) ?? AVAILABLE[0]);
+  private deskState(): DeskState {
+    return deskBridge.desk?.deskState ?? { phase: 'ready', dataset: 'shop' };
   }
 
   /**
-   * The one gate for making a puzzle active: in this phase's playable range,
-   * and on the tables on the desk (phase 2 never changes them; from phase 3,
-   * loading a puzzle loads its dataset first).
+   * The one gate for making a puzzle active: in the playable range, and on
+   * exactly the tables of the ready desk (mid-switch, no tables count).
    */
   private canLoad(id: string): id is PuzzleId {
-    return canActivatePuzzle(id, AVAILABLE, this.join?.deskTableIds() ?? []);
+    return canActivatePuzzle(id, PLAYABLE, deskTableIds(this.deskState()));
+  }
+
+  /**
+   * Opens `id`: at once if its tables are on the desk, else switches the
+   * desk to its dataset first (the puzzle becomes active once they've
+   * arrived). The card shows the coming puzzle right away.
+   */
+  private loadPuzzle(id: PuzzleId): void {
+    if (!PLAYABLE.includes(id)) {
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.error(`load refused: ${id} is outside the playable puzzles`);
+      }
+      return;
+    }
+    if (this.canLoad(id)) {
+      this.activate(id);
+      return;
+    }
+    // Another dataset: the switch runs in update(); the card shows what's coming.
+    this.pending = id;
+    this.switchRequested = false;
+    const puzzle = getPuzzle(id);
+    this.showCardFor(puzzle);
+    this.setMessage('');
+    this.silhouette?.entity.dispose();
+    this.silhouette = null;
+    this.join?.setSilhouette(null);
+    this.lastComparison = null;
+    setNextAvailable(this.bar, false);
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`switching to ${puzzle.datasetId} for ${id}`);
+    }
+  }
+
+  /**
+   * While a switch is pending: separate and glide home first (Next already
+   * asked), then wait until no table is held -- the card says so, and Next
+   * looks pressed -- then ask the desk to switch, and activate the puzzle
+   * once its tables are ready.
+   */
+  private updatePendingSwitch(join: JoinControls): void {
+    const desk = deskBridge.desk;
+    const id = this.pending;
+    if (!desk || !id) {
+      return;
+    }
+    const target = getPuzzle(id).datasetId;
+    const state = desk.deskState;
+    if (state.phase === 'ready' && state.dataset === target) {
+      this.pending = null;
+      this.activate(id);
+      return;
+    }
+    const held = desk.anySlabHeld();
+    if (held && state.phase === 'ready') {
+      // Never-yank: the switch waits for the release, with feedback.
+      if (this.messageText !== CARD.letGo) {
+        this.setMessage(CARD.letGo);
+        setNextWaiting(this.bar);
+      }
+    } else if (this.messageText === CARD.letGo) {
+      this.setMessage('');
+      setNextAvailable(this.bar, false);
+    }
+    if (!this.switchRequested && canStartSwitch(join.joinState, held, join.isGliding())) {
+      this.switchRequested = true;
+      desk.requestDataset(target);
+    }
   }
 
   /** Makes `id` the active puzzle; refused (and logged) unless `canLoad` allows it. */
-  private loadPuzzle(id: PuzzleId): void {
+  private activate(id: PuzzleId): void {
     const join = this.join;
     if (!join) {
       return;
     }
     if (!this.canLoad(id)) {
       if (import.meta.env.DEV && this.debug) {
-        this.debug.error(
-          `load refused: ${id} is outside this phase's puzzles or not on the desk's tables ` +
-            `(${join.deskTableIds().join(' + ')})`,
-        );
-      }
-      if (this.puzzle) {
-        this.setMessage(CARD.morePuzzlesSoon);
+        this.debug.error(`load refused: ${id} isn't on the desk's tables (${deskTableIds(this.deskState()).join(' + ')})`);
       }
       return;
     }
@@ -365,6 +422,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.target = puzzleTarget(this.puzzle);
     this.session = startSession(id);
     this.lastComparison = null;
+    this.lastState = null;
 
     // The silhouette: the target's headers and row outlines, in the result slot.
     this.silhouette?.entity.dispose();
@@ -374,11 +432,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     join.setSilhouette({ object: doc.document, widthMeters: doc.widthMeters, heightMeters: doc.heightMeters });
 
     // The card.
-    const number = PRACTICE_ORDER.indexOf(id) + 1;
-    this.card.title.setProperties({ text: CARD.practiceTitle(number, this.puzzle.datasetId) });
-    this.card.goal.setProperties({ text: this.text.goal });
-    this.card.status.setProperties({ text: '' });
-    setCardWin(this.card, null);
+    this.showCardFor(this.puzzle);
     const concept = this.puzzle.concept;
     const freshConcept = introducesConcept(this.puzzle) && !this.progress.seenConcepts.includes(concept);
     // The antijoin intro waits until NULLs are on screen (see onSettled).
@@ -394,7 +448,24 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     saveProgress(this.storage, this.progress);
     this.updateNextLook();
     if (import.meta.env.DEV && this.debug) {
-      this.debug.note(`puzzle ${number} (${id}) loaded; target ${visibleRowIndices(this.target).length} rows`);
+      this.debug.note(
+        `puzzle ${PRACTICE_ORDER.indexOf(id) + 1} (${id}) loaded on ${this.puzzle.datasetId}; ` +
+          `target ${visibleRowIndices(this.target).length} rows`,
+      );
+    }
+  }
+
+  /** The card for `puzzle`: its dataset's look, title and goal, not won; it fades in when the puzzle changes. */
+  private showCardFor(puzzle: Puzzle): void {
+    const fresh = this.cardPuzzleId !== puzzle.id;
+    this.cardPuzzleId = puzzle.id;
+    setCardTheme(this.card, DATASETS[puzzle.datasetId].theme);
+    setCardWin(this.card, null);
+    this.card.title.setProperties({ text: CARD.practiceTitle(PRACTICE_ORDER.indexOf(puzzle.id) + 1, puzzle.datasetId) });
+    this.card.goal.setProperties({ text: puzzleText(puzzle).goal });
+    this.card.status.setProperties({ text: '' });
+    if (fresh) {
+      this.card.fade.value = 0;
     }
   }
 
@@ -405,13 +476,22 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       headline: CARD.headline,
       takeaway: this.text.takeaway,
       query: this.session.solvedWithAnswer ? CARD.winWithAnswer : CARD.win,
-      note: this.isLastAvailable() ? CARD.morePuzzlesSoon : null,
+      note: this.isLastPlayable() ? CARD.morePuzzlesSoon : null,
     });
     // The title row's right-hand slot (the diff summary while playing).
     this.card.status.setProperties({ text: this.solvedStatus() });
     this.card.document.updateWorldMatrix(true, false);
     this._point.setFromMatrixPosition(this.card.document.matrixWorld);
     sounds.playWin(this._point);
+    // A fan-out win explains its surprise: the rows that repeat pulse while
+    // the takeaway says why.
+    const cause = this.puzzle.fanOutHighlight;
+    if (cause && this.lastComparison) {
+      const rows = fanOutGroups(this.lastComparison.output)
+        .filter((group) => group.cause === cause)
+        .flatMap((group) => group.resultRows);
+      this.join?.pulseRows(rows);
+    }
 
     this.progress = markSolved(this.progress, this.puzzle.id, localDay(new Date()), this.session.hintsShown);
     saveProgress(this.storage, this.progress);
@@ -419,6 +499,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   }
 
   private showHint(): void {
+    if (this.pending) {
+      return;
+    }
     const before = this.session;
     this.session = sessionTransition(this.session, { type: 'showHint' });
     const index = latestHintIndex(this.session);
@@ -439,8 +522,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (!this.nextAvailable()) {
       return;
     }
-    const index = AVAILABLE.indexOf(this.puzzle.id);
-    const nextId = AVAILABLE[index + 1];
+    const nextId = PLAYABLE[PLAYABLE.indexOf(this.puzzle.id) + 1];
     this.join?.resetToHome();
     this.loadPuzzle(nextId);
   }
@@ -451,17 +533,12 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   }
 
   private nextAvailable(): boolean {
-    const index = AVAILABLE.indexOf(this.puzzle.id);
-    const nextId = AVAILABLE[index + 1];
-    return (
-      nextId !== undefined &&
-      this.canLoad(nextId) &&
-      (this.session.solved || isSolved(this.progress, this.puzzle.id))
-    );
+    const nextId = PLAYABLE[PLAYABLE.indexOf(this.puzzle.id) + 1];
+    return !this.pending && nextId !== undefined && (this.session.solved || isSolved(this.progress, this.puzzle.id));
   }
 
-  private isLastAvailable(): boolean {
-    return AVAILABLE.indexOf(this.puzzle.id) === AVAILABLE.length - 1;
+  private isLastPlayable(): boolean {
+    return PLAYABLE.indexOf(this.puzzle.id) === PLAYABLE.length - 1;
   }
 
   private updateNextLook(): void {
@@ -469,6 +546,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   }
 
   private setMessage(text: string): void {
+    this.messageText = text;
     this.card.message.setProperties({ text });
   }
 
@@ -520,6 +598,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
    */
   private barButtonAt(point: Vector3): BarButton | null {
     const bar = this.bar;
+    if (!bar) {
+      return null;
+    }
     bar.document.updateWorldMatrix(true, false);
     this._local.copy(point);
     bar.document.worldToLocal(this._local);
@@ -572,5 +653,6 @@ function buildSilhouette(puzzle: Puzzle, target: QueryOutput): TableSlabDocument
     anchorTop: true,
     text: slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS),
     silhouette: { revealRow: reveal >= 0 ? reveal : null },
+    accent: DATASETS[puzzle.datasetId].theme.accent,
   });
 }

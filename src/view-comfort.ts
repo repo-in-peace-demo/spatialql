@@ -36,39 +36,23 @@ export const TOUCH_REACH_IDEAL_METERS = 0.5;
 export const MIN_ROW_TEXT_DEG = 1.0;
 
 // --- Text sized by angle ----------------------------------------------------
-// Physical font sizes come from these angular targets at each slab's
-// planned eye distance, so text reads the same wherever a slab sits and
-// slabs aren't physically oversized at arm's length. Tune on a headset.
-/** Row text should subtend this many degrees. */
-export const ROW_TEXT_TARGET_DEG = 1.15;
-/** Header text should subtend this many degrees. */
-export const HEADER_TEXT_TARGET_DEG = 1.3;
-/** Row text is never physically smaller than this (cm). */
-export const MIN_ROW_FONT_CM = 0.9;
-/**
- * Planned eye distances the fonts are sized for: computed once at startup
- * (slab documents aren't rebuilt when placed). The placement and join
- * readouts log the actual distance and resulting angle.
- */
-export const PLANNED_SOURCE_DISTANCE_METERS = 0.55;
-// Measured at join in the emulator (seated, desk); 0.65 m gave 1.33° text.
-export const PLANNED_RESULT_DISTANCE_METERS = 0.56;
-export const PLANNED_CONTROL_DISTANCE_METERS = 0.45;
-/** Challenge mode's puzzle card, just above the result slot (view only). */
-export const PLANNED_CARD_DISTANCE_METERS = 0.6;
+// Physical font sizes come from angular targets at each slab's planned eye
+// distance, so text reads the same wherever a slab sits and slabs aren't
+// physically oversized at arm's length. Defined in the pure text-angles.ts
+// (so data tests can use them) and re-exported here.
+export {
+  fontCmForAngle,
+  HEADER_TEXT_TARGET_DEG,
+  MIN_ROW_FONT_CM,
+  PLANNED_CARD_DISTANCE_METERS,
+  PLANNED_CONTROL_DISTANCE_METERS,
+  PLANNED_RESULT_DISTANCE_METERS,
+  PLANNED_SOURCE_DISTANCE_METERS,
+  ROW_TEXT_TARGET_DEG,
+  slabTextSizeAt,
+} from './text-angles.js';
 /** Readouts warn when a slab's actual row text angle is this far off target. */
 export const TEXT_ANGLE_TOLERANCE = 0.15;
-
-/** Physical font size (cm) that subtends `angleDeg` at `distance` meters. */
-export function fontCmForAngle(angleDeg: number, distance: number): number {
-  return 2 * distance * Math.tan(MathUtils.degToRad(angleDeg) / 2) * 100;
-}
-
-/** Row and header font sizes (cm) for a slab `distance` meters from the eyes. */
-export function slabTextSizeAt(distance: number): { rowFontCm: number; headerFontCm: number } {
-  const rowFontCm = Math.max(MIN_ROW_FONT_CM, fontCmForAngle(ROW_TEXT_TARGET_DEG, distance));
-  return { rowFontCm, headerFontCm: Math.max(rowFontCm, fontCmForAngle(HEADER_TEXT_TARGET_DEG, distance)) };
-}
 
 /** Slabs never lie flatter or stand straighter than these (degrees from flat). */
 export const SLAB_MIN_TILT_FROM_FLAT_DEG = 30;

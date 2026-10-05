@@ -24,11 +24,18 @@ import {
   XRPlane,
   type Entity,
 } from '@iwsdk/core';
-import { CUSTOMERS_TABLE, ORDERS_TABLE } from './data/sample-data.js';
+import { CHALLENGE_MODE } from './challenge-mode.js';
+import { challengeStart } from './challenge-start.js';
+import { DATASETS, type DatasetId } from './data/datasets.js';
+import { deskTransition, type DeskState } from './data/desk-session.js';
+import type { Table } from './data/types.js';
+import { deskBridge, type DeskControls } from './desk-bridge.js';
 import { devFlag } from './dev-flags.js';
 import { PlacementDebug, type PlacementKind, type SlabReport } from './placement-debug.js';
+import { sounds } from './sound.js';
 import { JoinDocked, TableSlab, TableSlabRuntime } from './table-slab-component.js';
 import { buildTableSlabDocument, type TableSlabDocument } from './table-slab-view.js';
+import { easeInCubic, easeOutCubic } from './tween.js';
 import {
   eyeFacingLean,
   eyeFacingLeanFromBottom,
@@ -96,6 +103,26 @@ const FORCE_SURFACE_HEIGHT_BELOW_HEAD = 0.45;
 // Dev-only `debug` flag: logs placement decisions and outlines surface
 // candidates in the scene. Stripped from production builds the same way.
 
+// Challenge mode's dataset switch: the old slabs sink and fade, the new ones
+// are built one per frame, then rise and fade in, a little apart.
+const SWITCH_SINK_METERS = 0.06;
+const SWITCH_LEAVE_SECONDS = 0.35;
+const SWITCH_ARRIVE_SECONDS = 0.35;
+const SWITCH_ARRIVE_STAGGER_SECONDS = 0.08;
+
+/** One source slab on the desk: the dataset's parent table is slabs[0] (left), the child slabs[1] (right). */
+type Slab = {
+  table: Table;
+  doc: TableSlabDocument;
+  entity: Entity;
+  /** Grabbed this session: placement never moves it again (never-yank). */
+  touched: boolean;
+  // Switch animation: from / to positions along the slab's own up axis.
+  from: Vector3;
+  to: Vector3;
+  landed: boolean;
+};
+
 const REJECT_NO_OBJECT = 'no object3D';
 const REJECT_NOT_BOUNDED = 'not a bounded 3D mesh';
 const REJECT_LABEL = 'label is not table/desk';
@@ -153,18 +180,26 @@ function createAssessment(): SurfaceAssessment {
   };
 }
 
-export class DeskPlacementSystem extends createSystem({
-  tableMeshes: { required: [XRMesh] },
-  tablePlanes: { required: [XRPlane] },
-  grabbedSlabs: { required: [TableSlab, Grabbed] },
-}) {
-  private customersEntity!: Entity;
-  private ordersEntity!: Entity;
-  private customersDoc!: TableSlabDocument;
-  private ordersDoc!: TableSlabDocument;
-
-  private touchedCustomers = false;
-  private touchedOrders = false;
+export class DeskPlacementSystem
+  extends createSystem({
+    tableMeshes: { required: [XRMesh] },
+    tablePlanes: { required: [XRPlane] },
+    grabbedSlabs: { required: [TableSlab, Grabbed] },
+  })
+  implements DeskControls
+{
+  /** The two source slabs of the dataset on the desk (empty mid-switch, between leaving and building). */
+  private slabs: Slab[] = [];
+  private deskStateValue: DeskState = { phase: 'ready', dataset: 'shop' };
+  /** A requested dataset, waiting for the join to be idle and no slab held. */
+  private pendingDataset: DatasetId | null = null;
+  private switchClock = 0;
+  private switchStartMs = 0;
+  /** True only while placing new slabs for a switch (placement is otherwise paused mid-switch). */
+  private placingForSwitch = false;
+  /** The surface last snapped to (its top Y, and its assessment if detected), reused when tables switch. */
+  private lastSurfaceY: number | null = null;
+  private lastSurface: SurfaceAssessment | null = null;
 
   private sessionActive = false;
   private headPoseValid = false;
@@ -199,29 +234,23 @@ export class DeskPlacementSystem extends createSystem({
   init(): void {
     // Each slab keeps its natural height; their bottom edges share one line
     // (on a desk, both rest on it), like two sheets of different lengths.
-    // Text is sized by angle for the planned seated distance, once: slab
+    // Text is sized by angle for the planned seated distance, once per slab:
     // documents aren't rebuilt when placed (the readout logs the real angle).
-    const text = slabTextSizeAt(PLANNED_SOURCE_DISTANCE_METERS);
-    this.customersDoc = buildTableSlabDocument(CUSTOMERS_TABLE, { text });
-    this.ordersDoc = buildTableSlabDocument(ORDERS_TABLE, { text });
-
-    this.customersEntity = this.world.createTransformEntity(this.customersDoc.document);
-    this.customersEntity.addComponent(TableSlab, { tableId: CUSTOMERS_TABLE.id });
-    this.customersEntity.addComponent(TableSlabRuntime, {
-      document: this.customersDoc.document,
-      rowViews: this.customersDoc.rowViews,
-      layout: this.customersDoc,
-    });
-    this.customersEntity.addComponent(OneHandGrabbable, {});
-
-    this.ordersEntity = this.world.createTransformEntity(this.ordersDoc.document);
-    this.ordersEntity.addComponent(TableSlab, { tableId: ORDERS_TABLE.id });
-    this.ordersEntity.addComponent(TableSlabRuntime, {
-      document: this.ordersDoc.document,
-      rowViews: this.ordersDoc.rowViews,
-      layout: this.ordersDoc,
-    });
-    this.ordersEntity.addComponent(OneHandGrabbable, {});
+    // Free play is the shop; challenge mode starts on the resume puzzle's
+    // dataset (after a reload, not always the shop).
+    const dataset: DatasetId = CHALLENGE_MODE ? challengeStart().datasetId : 'shop';
+    this.deskStateValue = { phase: 'ready', dataset };
+    for (const table of DATASETS[dataset].tables) {
+      this.slabs.push(this.createSlab(table, true));
+    }
+    if (CHALLENGE_MODE) {
+      deskBridge.desk = this;
+      this.cleanupFuncs.push(() => {
+        if (deskBridge.desk === this) {
+          deskBridge.desk = null;
+        }
+      });
+    }
 
     this.forceSurfaceRequested = import.meta.env.DEV && devFlag('forceSurface');
     this.debug = import.meta.env.DEV && devFlag('debug') ? new PlacementDebug(this.world) : null;
@@ -239,10 +268,9 @@ export class DeskPlacementSystem extends createSystem({
     this.reportPlacement('cold start (floating, default head pose)', 'floating', null);
 
     this.queries.grabbedSlabs.subscribe('qualify', (entity) => {
-      if (entity === this.customersEntity) {
-        this.touchedCustomers = true;
-      } else if (entity === this.ordersEntity) {
-        this.touchedOrders = true;
+      const slab = this.slabs.find((s) => s.entity === entity);
+      if (slab) {
+        slab.touched = true;
       }
     });
 
@@ -259,7 +287,174 @@ export class DeskPlacementSystem extends createSystem({
     );
   }
 
+  // --- Desk: the dataset on it, and switching (challenge mode) -------------------------
+
+  get deskState(): DeskState {
+    return this.deskStateValue;
+  }
+
+  requestDataset(dataset: DatasetId): void {
+    const state = this.deskStateValue;
+    if (state.phase === 'ready' && state.dataset !== dataset) {
+      this.pendingDataset = dataset;
+    }
+  }
+
+  anySlabHeld(): boolean {
+    return this.queries.grabbedSlabs.entities.size > 0;
+  }
+
+  /** Builds one source slab's document and entity (grabbable now, or once it has landed). */
+  private createSlab(table: Table, grabbable: boolean): Slab {
+    const text = slabTextSizeAt(PLANNED_SOURCE_DISTANCE_METERS);
+    const dataset = DATASETS[this.deskDatasetFor(table)];
+    const doc = buildTableSlabDocument(table, { text, ...(CHALLENGE_MODE ? { accent: dataset.theme.accent } : {}) });
+    const entity = this.world.createTransformEntity(doc.document);
+    entity.addComponent(TableSlab, { tableId: table.id });
+    entity.addComponent(TableSlabRuntime, { document: doc.document, rowViews: doc.rowViews, layout: doc });
+    if (grabbable) {
+      entity.addComponent(OneHandGrabbable, {});
+    }
+    return { table, doc, entity, touched: false, from: new Vector3(), to: new Vector3(), landed: grabbable };
+  }
+
+  private deskDatasetFor(table: Table): DatasetId {
+    return (Object.keys(DATASETS) as DatasetId[]).find((id) => DATASETS[id].tables.includes(table)) ?? 'shop';
+  }
+
+  /** The slab's up axis (leaning back with it), into `out`. */
+  private slabUp(slab: Slab, out: Vector3): Vector3 {
+    const object = slab.entity.object3D;
+    return object ? out.set(0, 1, 0).applyQuaternion(object.quaternion) : out.set(0, 1, 0);
+  }
+
+  /**
+   * The switch, a phase per frame: waits for a quiet desk (no slab held or
+   * docked, no surface search), then the old slabs sink and fade and are
+   * disposed; the new ones are built one per frame, placed for their sizes
+   * on the surface already found, then rise and fade in, becoming
+   * grabbable as each lands.
+   */
+  private updateSwitch(delta: number): void {
+    const state = this.deskStateValue;
+    if (state.phase === 'ready') {
+      const target = this.pendingDataset;
+      const docked = this.slabs.some((slab) => slab.entity.hasComponent(JoinDocked));
+      if (target === null || this.anySlabHeld() || docked || this.searching) {
+        return;
+      }
+      this.pendingDataset = null;
+      this.deskStateValue = deskTransition(state, { type: 'request', dataset: target });
+      this.switchClock = 0;
+      this.switchStartMs = performance.now();
+      for (const slab of this.slabs) {
+        slab.entity.removeComponent(OneHandGrabbable);
+        slab.from.copy(slab.entity.object3D?.position ?? slab.from);
+        this.slabUp(slab, slab.to);
+      }
+      this.slabMidpoint(this._center);
+      sounds.playTablesOut(this._center);
+      return;
+    }
+
+    if (state.phase === 'leaving') {
+      this.switchClock += delta;
+      const t = Math.min(1, this.switchClock / SWITCH_LEAVE_SECONDS);
+      for (const slab of this.slabs) {
+        // `to` holds the slab's up axis while leaving.
+        slab.entity.object3D?.position.copy(slab.from).addScaledVector(slab.to, -SWITCH_SINK_METERS * easeInCubic(t));
+        slab.doc.fade.value = 1 - t;
+      }
+      if (t >= 1) {
+        for (const slab of this.slabs) {
+          slab.entity.dispose();
+        }
+        this.slabs = [];
+        this.deskStateValue = deskTransition(state, { type: 'leftDone' });
+      }
+      return;
+    }
+
+    if (state.phase === 'building') {
+      // One document per frame, so no frame does all of them.
+      const tables = DATASETS[state.to].tables;
+      const table = tables[this.slabs.length];
+      const slab = this.createSlab(table, false);
+      slab.doc.fade.value = 0;
+      this.slabs.push(slab);
+      if (this.slabs.length < tables.length) {
+        return;
+      }
+      // Both built: place them for their sizes, then start them one sink-depth down.
+      this.placingForSwitch = true;
+      if (this.lastSurfaceY !== null) {
+        this.placeOnSurface(this.lastSurfaceY, this.lastSurface);
+      } else {
+        this.placeFloating();
+      }
+      this.placingForSwitch = false;
+      for (const slab of this.slabs) {
+        const object = slab.entity.object3D;
+        if (!object) {
+          continue;
+        }
+        slab.to.copy(object.position);
+        this.slabUp(slab, this._local);
+        slab.from.copy(slab.to).addScaledVector(this._local, -SWITCH_SINK_METERS);
+        object.position.copy(slab.from);
+      }
+      this.deskStateValue = deskTransition(state, { type: 'built' });
+      this.switchClock = 0;
+      this.slabMidpoint(this._center);
+      sounds.playTablesIn(this._center);
+      return;
+    }
+
+    // Arriving.
+    this.switchClock += delta;
+    let allLanded = true;
+    this.slabs.forEach((slab, i) => {
+      const t = MathUtils.clamp((this.switchClock - i * SWITCH_ARRIVE_STAGGER_SECONDS) / SWITCH_ARRIVE_SECONDS, 0, 1);
+      const object = slab.entity.object3D;
+      object?.position.lerpVectors(slab.from, slab.to, easeOutCubic(t));
+      slab.doc.fade.value = t;
+      if (t >= 1 && !slab.landed) {
+        slab.landed = true;
+        slab.entity.addComponent(OneHandGrabbable, {});
+        if (object) {
+          sounds.playDropTap(object.position);
+        }
+      }
+      allLanded &&= slab.landed;
+    });
+    if (allLanded) {
+      this.deskStateValue = deskTransition(state, { type: 'arrived' });
+      if (import.meta.env.DEV && this.debug) {
+        const ms = performance.now() - this.switchStartMs;
+        const sizes = this.slabs
+          .map((slab) => `${slab.table.id} ${(slab.doc.widthMeters * 100).toFixed(1)} x ${(slab.doc.heightMeters * 100).toFixed(1)} cm`)
+          .join(', ');
+        console.log(`[DeskPlacement debug] switched to ${state.to} in ${ms.toFixed(0)} ms; slabs ${sizes}`);
+        this.reportPlacement(`dataset ${state.to} arrived`, this.lastSurfaceY === null ? 'floating' : 'surface', this.lastSurface);
+      }
+    }
+  }
+
+  /** Midpoint of the slabs (for the switch sounds). */
+  private slabMidpoint(out: Vector3): Vector3 {
+    out.set(0, 0, 0);
+    for (const slab of this.slabs) {
+      if (slab.entity.object3D) {
+        out.addScaledVector(slab.entity.object3D.position, 1 / this.slabs.length);
+      }
+    }
+    return out;
+  }
+
   update(delta: number): void {
+    if (CHALLENGE_MODE) {
+      this.updateSwitch(delta);
+    }
     if (this.sessionActive && !this.headPoseValid) {
       this.headPoseWaitElapsed += delta;
       this.player.head.updateWorldMatrix(true, false);
@@ -277,8 +472,9 @@ export class DeskPlacementSystem extends createSystem({
   }
 
   private onSessionStart(): void {
-    this.touchedCustomers = false;
-    this.touchedOrders = false;
+    for (const slab of this.slabs) {
+      slab.touched = false;
+    }
     this.headPoseValid = false;
     this.headPoseWaitElapsed = 0;
     this.searching = false;
@@ -310,7 +506,7 @@ export class DeskPlacementSystem extends createSystem({
   private updateSurfaceSearch(delta: number): void {
     this.searchElapsed += delta;
 
-    if (this.touchedCustomers && this.touchedOrders) {
+    if (this.slabs.length > 0 && this.slabs.every((slab) => slab.touched)) {
       // Nothing left to place -- cancel the snap entirely.
       this.searching = false;
       return;
@@ -488,6 +684,8 @@ export class DeskPlacementSystem extends createSystem({
       return;
     }
 
+    this.lastSurfaceY = this._best.surfaceY;
+    this.lastSurface = this._best;
     this.placeOnSurface(this._best.surfaceY, this._best);
     this.reportPlacement(`snapped to detected ${kind}`, 'surface', this._best);
   }
@@ -495,7 +693,9 @@ export class DeskPlacementSystem extends createSystem({
   private commitForcedSurface(): void {
     this.searching = false;
     this.readHeadPose();
-    this.placeOnSurface(this._headPos.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD, null);
+    this.lastSurfaceY = this._headPos.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD;
+    this.lastSurface = null;
+    this.placeOnSurface(this.lastSurfaceY, null);
     this.reportPlacement('forced surface (SYNTHETIC, ?forceSurface)', 'synthetic', null);
   }
 
@@ -520,6 +720,11 @@ export class DeskPlacementSystem extends createSystem({
    */
   private isFrozen(entity: Entity, touched: boolean): boolean {
     return touched || entity.hasComponent(JoinDocked);
+  }
+
+  /** Placement runs on a full, settled desk (or for the switch's new slabs). */
+  private canPlace(): boolean {
+    return this.slabs.length === 2 && (this.placingForSwitch || this.deskStateValue.phase === 'ready');
   }
 
   private slabHeightMeters(doc: TableSlabDocument): number {
@@ -570,11 +775,15 @@ export class DeskPlacementSystem extends createSystem({
    * either slab would leave the comfortable view -- but never past reach.
    */
   private placeFloating(): void {
+    if (!this.canPlace()) {
+      return;
+    }
+    const [leftSlab, rightSlab] = this.slabs;
     this.setYawAxes(this._headYaw);
-    const customersHalf = this.slabHeightMeters(this.customersDoc) / 2;
-    const ordersHalf = this.slabHeightMeters(this.ordersDoc) / 2;
-    const leftOffset = SLAB_GAP_METERS / 2 + this.customersDoc.widthMeters / 2;
-    const rightOffset = SLAB_GAP_METERS / 2 + this.ordersDoc.widthMeters / 2;
+    const customersHalf = this.slabHeightMeters(leftSlab.doc) / 2;
+    const ordersHalf = this.slabHeightMeters(rightSlab.doc) / 2;
+    const leftOffset = SLAB_GAP_METERS / 2 + leftSlab.doc.widthMeters / 2;
+    const rightOffset = SLAB_GAP_METERS / 2 + rightSlab.doc.widthMeters / 2;
     const reachForward = Math.max(
       FLOATING_FORWARD_METERS,
       Math.min(
@@ -606,19 +815,19 @@ export class DeskPlacementSystem extends createSystem({
     // Up along a slab leaning back by `lean`: up, and away from the viewer.
     this._local.set(0, Math.cos(lean), 0).addScaledVector(this._forward, Math.sin(lean));
 
-    if (!this.isFrozen(this.customersEntity, this.touchedCustomers)) {
+    if (!this.isFrozen(leftSlab.entity, leftSlab.touched)) {
       this._slabCenter
         .copy(this._anchor)
         .addScaledVector(this._right, -leftOffset)
         .addScaledVector(this._local, customersHalf - tallerHalf);
-      this.applySlabTransform(this.customersEntity, this._slabCenter, lean);
+      this.applySlabTransform(leftSlab.entity, this._slabCenter, lean);
     }
-    if (!this.isFrozen(this.ordersEntity, this.touchedOrders)) {
+    if (!this.isFrozen(rightSlab.entity, rightSlab.touched)) {
       this._slabCenter
         .copy(this._anchor)
         .addScaledVector(this._right, rightOffset)
         .addScaledVector(this._local, ordersHalf - tallerHalf);
-      this.applySlabTransform(this.ordersEntity, this._slabCenter, lean);
+      this.applySlabTransform(rightSlab.entity, this._slabCenter, lean);
     }
     this.warnIfOutOfView();
   }
@@ -632,13 +841,17 @@ export class DeskPlacementSystem extends createSystem({
    * surface's footprint.
    */
   private placeOnSurface(surfaceY: number, surface: SurfaceAssessment | null): void {
+    if (!this.canPlace()) {
+      return;
+    }
+    const [leftSlab, rightSlab] = this.slabs;
     this.setYawAxes(this._headYaw);
 
-    const customersHeight = this.slabHeightMeters(this.customersDoc);
-    const ordersHeight = this.slabHeightMeters(this.ordersDoc);
+    const customersHeight = this.slabHeightMeters(leftSlab.doc);
+    const ordersHeight = this.slabHeightMeters(rightSlab.doc);
     const eyeRise = this._headPos.y - (surfaceY + SURFACE_LIFT_METERS);
-    const leftOffset = SLAB_GAP_METERS / 2 + this.customersDoc.widthMeters / 2;
-    const rightOffset = SLAB_GAP_METERS / 2 + this.ordersDoc.widthMeters / 2;
+    const leftOffset = SLAB_GAP_METERS / 2 + leftSlab.doc.widthMeters / 2;
+    const rightOffset = SLAB_GAP_METERS / 2 + rightSlab.doc.widthMeters / 2;
 
     // Each slab leans to face the eyes from its own center; the bottom-edge
     // distance keeps both edges of both slabs in view, unless that would put
@@ -683,15 +896,15 @@ export class DeskPlacementSystem extends createSystem({
     this._local.subVectors(this._anchor, this._headPos);
     const anchorForward = Math.max(0.05, this._local.dot(this._forward));
     const anchorEyeRise = this._headPos.y - (this._anchor.y + SURFACE_LIFT_METERS);
-    if (!this.isFrozen(this.customersEntity, this.touchedCustomers)) {
+    if (!this.isFrozen(leftSlab.entity, leftSlab.touched)) {
       const lean = eyeFacingLeanFromBottom(anchorEyeRise, anchorForward, customersHeight);
       this.proppedCenter(-leftOffset, customersHeight / 2, Math.sin(lean), Math.cos(lean));
-      this.applySlabTransform(this.customersEntity, this._slabCenter, lean);
+      this.applySlabTransform(leftSlab.entity, this._slabCenter, lean);
     }
-    if (!this.isFrozen(this.ordersEntity, this.touchedOrders)) {
+    if (!this.isFrozen(rightSlab.entity, rightSlab.touched)) {
       const lean = eyeFacingLeanFromBottom(anchorEyeRise, anchorForward, ordersHeight);
       this.proppedCenter(rightOffset, ordersHeight / 2, Math.sin(lean), Math.cos(lean));
-      this.applySlabTransform(this.ordersEntity, this._slabCenter, lean);
+      this.applySlabTransform(rightSlab.entity, this._slabCenter, lean);
     }
     this.warnIfOutOfView();
   }
@@ -755,10 +968,7 @@ export class DeskPlacementSystem extends createSystem({
     if (!import.meta.env.DEV || !this.debug) {
       return;
     }
-    this.debug.warnOutOfView([
-      this.slabReport('customers', this.customersEntity, this.customersDoc, this.touchedCustomers),
-      this.slabReport('orders', this.ordersEntity, this.ordersDoc, this.touchedOrders),
-    ]);
+    this.debug.warnOutOfView(this.slabs.map((slab) => this.slabReport(slab.table.id, slab.entity, slab.doc, slab.touched)));
   }
 
   /** Dev-only: evaluates every current candidate into fresh records. */
@@ -781,10 +991,9 @@ export class DeskPlacementSystem extends createSystem({
     if (!import.meta.env.DEV || !this.debug) {
       return;
     }
-    const slabs: SlabReport[] = [
-      this.slabReport('customers', this.customersEntity, this.customersDoc, this.touchedCustomers),
-      this.slabReport('orders', this.ordersEntity, this.ordersDoc, this.touchedOrders),
-    ];
+    const slabs: SlabReport[] = this.slabs.map((slab) =>
+      this.slabReport(slab.table.id, slab.entity, slab.doc, slab.touched),
+    );
     const syntheticY = kind === 'synthetic' ? this._headPos.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD : null;
     this._basePos.copy(this._headPos);
     this.debug.logPlacement({

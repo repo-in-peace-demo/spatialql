@@ -9,6 +9,7 @@
 import type { Object3D, Vector3 } from '@iwsdk/core';
 import type { RowStatus } from './data/compare.js';
 import type { JoinState } from './data/join-state.js';
+import type { QuerySpec } from './data/query.js';
 
 /** A challenge element the join system places, with its size (meters). */
 export type PlacedElement = { object: Object3D; widthMeters: number; heightMeters: number };
@@ -60,10 +61,16 @@ export interface JoinControls {
   setWinLook(won: boolean): void;
   /** Briefly pulses the shown rows that hold a NULL (the coach for the NULL poke). */
   pulseNullRows(): void;
+  /** Briefly pulses these result rows (e.g. the rows a fan-out repeats). */
+  pulseRows(rows: readonly number[]): void;
   /** Whether any shown result row holds a NULL. */
   hasVisibleNull(): boolean;
   /** Dev (`F`): pokes the first shown NULL cell; false if there's none. */
   debugPokeFirstNull(): boolean;
+  /** Dev (`A` / `X`): puts the join into a query's state through the real transitions. */
+  debugApply(spec: QuerySpec): void;
+  /** Whether a slab is still gliding home (a switch waits for it). */
+  isGliding(): boolean;
 }
 
 export const joinBridge: { join: JoinControls | null; challenge: ChallengeHooks | null } = {

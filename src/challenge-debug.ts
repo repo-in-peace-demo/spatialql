@@ -9,9 +9,12 @@
  *   N  next puzzle
  *   P  previous puzzle
  *   I  print the last diff, row by row
+ *   G  apply the active puzzle's solution (through the real transitions)
+ *   X  apply its authored wrong state (data/puzzle-checks.ts)
  */
 
 import type { Comparison } from './data/compare.js';
+import type { PuzzleCheck } from './data/puzzle-checks.js';
 import { rowLabel, type Puzzle } from './data/puzzles.js';
 import { visibleRowIndices, type QueryOutput } from './data/query.js';
 
@@ -19,6 +22,7 @@ export interface ChallengeDebugHost {
   debugHint(): void;
   debugNext(): void;
   debugPrev(): void;
+  debugApply(which: 'solution' | 'wrong'): void;
   debugPoke(): boolean;
   debugSnapshot(): { puzzle: Puzzle; output: QueryOutput; comparison: Comparison } | null;
 }
@@ -31,6 +35,8 @@ const KEY_HELP = [
   'N  next puzzle',
   'P  previous puzzle (dev only; ignores the unlock order)',
   'I  print the diff',
+  'G  apply the puzzle\'s solution (the goal)',
+  'X  apply its authored wrong state (the trap, for puzzles 10, 18, 20)',
 ];
 
 export class ChallengeDebug {
@@ -58,6 +64,21 @@ export class ChallengeDebug {
       `${puzzle.id}: ${spec.left} <- ${spec.right} ${spec.joinType.toUpperCase()}${filter}: ` +
         `${comparison.visibleCount} rows shown, ${extra} extra, ${comparison.missing.length} missing -> ` +
         (comparison.solved ? 'SOLVED' : 'not yet'),
+    );
+  }
+
+  /** G / X: what's being applied, and what the diff should then show. */
+  noteApply(puzzleId: string, which: 'solution' | 'wrong', check: PuzzleCheck, switching: boolean): void {
+    if (switching) {
+      this.note(`${which} not applied: the tables are switching`);
+      return;
+    }
+    const { shown, extra, missing } = check.expect;
+    this.note(
+      which === 'solution'
+        ? `applying the solution for ${puzzleId} (expect SOLVED)`
+        : `applying the wrong state for ${puzzleId}${check.trap ? ' (the trap)' : ''} ` +
+            `(expect ${shown} shown, ${extra} extra, ${missing} missing)`,
     );
   }
 
@@ -109,6 +130,13 @@ export class ChallengeDebug {
         break;
       case 'p':
         this.host.debugPrev();
+        break;
+      // G, not A as planned: A is one of the emulator's WASD movement keys.
+      case 'g':
+        this.host.debugApply('solution');
+        break;
+      case 'x':
+        this.host.debugApply('wrong');
         break;
       case 'i':
         this.printDiff();

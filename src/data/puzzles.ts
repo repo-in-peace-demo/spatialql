@@ -91,12 +91,12 @@ const SHOP_MATCHED = [
   'Jun Park / 106',
 ];
 const LIBRARY_MATCHED = [
-  'Wren Halloway / The Glass Orchard',
+  'Wren Halloway / Glass Orchard',
   'Wren Halloway / A Map of Rain',
-  'Mirela Okafor / Salt and Lantern',
+  'Mirela Okafor / Salt Lantern',
   'Mirela Okafor / Tidewater',
-  'Ikaika Dunn / North of Nowhere',
-  'Sunniva Lake / The Quiet Engine',
+  'Ikaika Dunn / Far North',
+  'Sunniva Lake / Quiet Engine',
 ];
 const SCHOOL_MATCHED = [
   'Choir / Ines Vale',
@@ -216,7 +216,7 @@ export const PUZZLES: readonly Puzzle[] = [
     tables: LIBRARY,
     concept: 'nullvalue',
     solution: { ...inner('borrowers', 'books'), filter: { tableId: 'books', column: 'due' } },
-    expected: ['Ikaika Dunn / North of Nowhere'],
+    expected: ['Ikaika Dunn / Far North'],
   },
   // 11. orders <- customers, LEFT, WHERE c.id IS NULL.
   {

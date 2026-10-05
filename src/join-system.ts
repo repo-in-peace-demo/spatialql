@@ -61,8 +61,10 @@ import { INITIAL_JOIN_STATE, transition, type JoinEvent, type JoinState } from '
 import { assignKeyTints } from './data/key-tints.js';
 import { RESULT_ROW_CAP } from './data/puzzles.js';
 import { filterForColumn, nullFilterMask, sameFilter } from './data/query.js';
-import { CUSTOMERS_TABLE, ORDERS_TABLE } from './data/sample-data.js';
+import { DATASETS, datasetOfTable, tableById } from './data/datasets.js';
+import type { QuerySpec } from './data/query.js';
 import type { CellValue, JoinType, NullFilter, Table } from './data/types.js';
+import { deskReady } from './desk-bridge.js';
 import { devFlag } from './dev-flags.js';
 import { joinBridge, type ChallengeLayout, type JoinControls, type PlacedElement } from './join-bridge.js';
 import { JoinDebug, type JoinDebugHost, type JoinStats } from './join-debug.js';
@@ -113,11 +115,6 @@ import {
   VIEW_MAX_BELOW_GAZE_DEG,
   type SlabEdgeAngles,
 } from './view-comfort.js';
-
-const SOURCE_TABLES = new Map<string, Table>([
-  [CUSTOMERS_TABLE.id, CUSTOMERS_TABLE],
-  [ORDERS_TABLE.id, ORDERS_TABLE],
-]);
 
 // --- Approach / preview -----------------------------------------------------
 // Measured in the stationary slab's frame. Entering needs the tighter
@@ -299,6 +296,8 @@ type ResultView = {
   nullColumns: number[][];
   /** Challenge mode: placeholder rows shown for rows the answer still needs. */
   placeholdersShown: number;
+  /** Removes this view's listeners (when its tables leave the desk, or at shutdown). */
+  cleanup: (() => void)[];
 };
 
 type DockAnimation = {
@@ -338,6 +337,8 @@ export class JoinSystem
   private state: JoinState = INITIAL_JOIN_STATE;
   private readonly sources = new Map<string, SourceSlab>();
   private readonly results = new Map<string, ResultView>();
+  /** Result directions still to build (left id, right id), one per frame. */
+  private pendingResults: [string, string][] = [];
   private active: ResultView | null = null;
 
   /** Sign of the RIGHT slab's x in the LEFT slab's frame (+1: docked on its right). */
@@ -481,6 +482,9 @@ export class JoinSystem
         this.winGlowRight.dispose();
         visualsEntity.dispose();
         this.debug?.dispose();
+        for (const view of this.results.values()) {
+          view.cleanup.forEach((fn) => fn());
+        }
       },
     );
 
@@ -488,6 +492,8 @@ export class JoinSystem
       this.registerSource(entity);
     }
     this.queries.sources.subscribe('qualify', (entity) => this.registerSource(entity));
+    // A dataset switch disposes the old slabs: forget them and their result views.
+    this.queries.sources.subscribe('disqualify', (entity) => this.unregisterSource(entity));
     this.queries.held.subscribe('disqualify', (entity) => this.onRelease(entity));
 
     if (CHALLENGE_MODE) {
@@ -520,6 +526,11 @@ export class JoinSystem
     this.updateGlides(delta);
     sounds.update();
     this.unlockSoundOnPinch();
+    // Result slabs for newly arrived tables: one document per frame.
+    const pending = this.pendingResults.shift();
+    if (pending) {
+      this.resultViewFor(pending[0], pending[1]);
+    }
     if (this.challengeLayout) {
       this.updateChallengeLayout();
       this.updateWinGlow();
@@ -529,7 +540,12 @@ export class JoinSystem
     switch (this.state.phase) {
       case 'idle':
       case 'previewing':
-        this.updateProximity(delta);
+        // Mid-switch (challenge mode), tables are leaving or arriving: no joins.
+        if (deskReady()) {
+          this.updateProximity(delta);
+        } else if (this.state.phase === 'previewing') {
+          this.applyTransition({ type: 'exitRange' });
+        }
         break;
       case 'joined':
         this.updateJoined();
@@ -669,17 +685,76 @@ export class JoinSystem
     this.playJoinSequence(view, left, right, this.state.joinType);
   }
 
-  /** Dev: join without grabbing. `reverse` brings customers to orders instead. */
+  /**
+   * Dev: join without grabbing: brings the loaded dataset's child table to
+   * its parent (e.g. orders to customers); `reverse` brings the parent to
+   * the child instead.
+   */
   debugJoin(reverse: boolean): void {
-    const moving = this.sources.get(reverse ? CUSTOMERS_TABLE.id : ORDERS_TABLE.id);
-    const stationary = this.sources.get(reverse ? ORDERS_TABLE.id : CUSTOMERS_TABLE.id);
-    if (!moving || !stationary || this.state.phase !== 'idle') {
-      this.debug?.note(`join ignored in phase "${this.state.phase}"`);
+    const [parent, child] = this.parentAndChild();
+    const moving = reverse ? parent : child;
+    const stationary = reverse ? child : parent;
+    if (!moving || !stationary || this.state.phase !== 'idle' || !deskReady()) {
+      this.debug?.note(`join ignored in phase "${this.state.phase}"${deskReady() ? '' : ' (tables switching)'}`);
       return;
     }
     this.measureProximity(moving, stationary);
     this.dockSide = this._prox.side;
     this.applyTransition({ type: 'commit', left: stationary.id, right: moving.id });
+  }
+
+  /** The loaded dataset's parent (referenced) and child slabs, in its table order. */
+  private parentAndChild(): [SourceSlab | undefined, SourceSlab | undefined] {
+    const first = this.sources.values().next().value;
+    const datasetId = first ? datasetOfTable(first.id) : null;
+    if (!datasetId) {
+      return [undefined, undefined];
+    }
+    const [parent, child] = DATASETS[datasetId].tables;
+    return [this.sources.get(parent.id), this.sources.get(child.id)];
+  }
+
+  /** Dev (`A` / `X` in challenge mode): a query to apply once the pair is separated. */
+  private pendingApply: QuerySpec | null = null;
+
+  /**
+   * Dev: puts the join into `spec`'s state through the same transitions as
+   * real input: separate if joined, then commit with `spec.left` staying
+   * put, then the join type, then the NULL filter.
+   */
+  debugApply(spec: QuerySpec): void {
+    if (!deskReady()) {
+      this.debug?.note('apply ignored: tables switching');
+      return;
+    }
+    if (this.state.phase === 'joined') {
+      this.pendingApply = spec;
+      this.applyTransition({ type: 'pullApart' });
+      return;
+    }
+    if (this.state.phase !== 'idle') {
+      this.debug?.note(`apply ignored in phase "${this.state.phase}"`);
+      return;
+    }
+    const stationary = this.sources.get(spec.left);
+    const moving = this.sources.get(spec.right);
+    if (!stationary || !moving) {
+      this.debug?.note(`apply ignored: ${spec.left} / ${spec.right} aren't on the desk`);
+      return;
+    }
+    this.measureProximity(moving, stationary);
+    this.dockSide = this._prox.side;
+    this.applyTransition({ type: 'commit', left: stationary.id, right: moving.id });
+    if (spec.joinType === 'left') {
+      this.applyTransition({ type: 'setJoinType', joinType: 'left' });
+    }
+    if (spec.filter) {
+      this.applyTransition({ type: 'setFilter', filter: spec.filter });
+    }
+  }
+
+  isGliding(): boolean {
+    return this.gliding();
   }
 
   /** Dev: slide the RIGHT slab away and separate. */
@@ -757,7 +832,7 @@ export class JoinSystem
 
   private registerSource(entity: Entity): void {
     const tableId = entity.getValue(TableSlab, 'tableId') ?? '';
-    const table = SOURCE_TABLES.get(tableId);
+    const table = tableById(tableId);
     const doc = entity.getValue(TableSlabRuntime, 'layout') as TableSlabDocument | undefined;
     const object = entity.object3D;
     if (!table || !doc || !object || this.sources.has(tableId)) {
@@ -767,13 +842,42 @@ export class JoinSystem
     this.homes.set(tableId, { pos: new Vector3(), quat: new Quaternion(), set: false });
     this.glides.set(tableId, dockAnimation(HOME_GLIDE_SECONDS));
     this.layoutDirty = true;
-    // Build every join direction's result slab up front (startup, not mid-interaction).
+    // Build every join direction's result slab ahead of any join (at startup,
+    // or while new tables arrive), one per frame from update(); a join that
+    // starts sooner builds its view on demand.
     for (const other of this.sources.values()) {
       if (other.id !== tableId) {
-        this.resultViewFor(tableId, other.id);
-        this.resultViewFor(other.id, tableId);
+        this.pendingResults.push([tableId, other.id], [other.id, tableId]);
       }
     }
+  }
+
+  /** A slab left the desk (a dataset switch disposed it): forget it, its result views and its home. */
+  private unregisterSource(entity: Entity): void {
+    const source = this.sourceFor(entity);
+    if (!source) {
+      return;
+    }
+    this.sources.delete(source.id);
+    this.homes.delete(source.id);
+    this.glides.delete(source.id);
+    if (this.dock.slab === source) {
+      this.dock.active = false;
+      this.dock.slab = null;
+    }
+    this.pendingResults = this.pendingResults.filter(([left, right]) => left !== source.id && right !== source.id);
+    for (const [key, view] of this.results) {
+      if (view.leftId !== source.id && view.rightId !== source.id) {
+        continue;
+      }
+      if (this.active === view) {
+        this.active = null;
+      }
+      view.cleanup.forEach((fn) => fn());
+      view.entity.dispose();
+      this.results.delete(key);
+    }
+    this.layoutDirty = true;
   }
 
   private sourceFor(entity: Entity): SourceSlab | null {
@@ -823,7 +927,12 @@ export class JoinSystem
         ? { lines: [...sql.inner, whereLines[0] ?? ''], fitLines: [...sql.inner, ...sql.left, ...whereLines] }
         : { lines: [...sql.inner], fitLines: [...sql.inner, ...sql.left] },
       ...(CHALLENGE_MODE
-        ? { diffGutter: true, placeholderRows: RESULT_ROW_CAP, reserveRows: RESULT_ROW_CAP }
+        ? {
+            diffGutter: true,
+            placeholderRows: RESULT_ROW_CAP,
+            reserveRows: RESULT_ROW_CAP,
+            accent: DATASETS[datasetOfTable(leftId) ?? 'shop'].theme.accent,
+          }
         : {}),
       anchorTop: true,
       // Same angular text size as the source slabs, at the result's own distance.
@@ -853,6 +962,7 @@ export class JoinSystem
     const nullColumns = result.table.rows.map((row) =>
       result.columns.flatMap((column, index) => (row[column.key] === null ? [index] : [])),
     );
+    const cleanup: (() => void)[] = [];
     if (CHALLENGE_MODE) {
       // Interactable from the start (it's parked out of sight until shown);
       // the slab itself is never grabbable.
@@ -860,7 +970,7 @@ export class JoinSystem
       entity.addComponent(RayInteractable, {});
       const onClick = (event: unknown) => this.onResultClick(key, event);
       doc.root.addEventListener('click', onClick);
-      this.cleanupFuncs.push(() => doc.root.removeEventListener('click', onClick));
+      cleanup.push(() => doc.root.removeEventListener('click', onClick));
     }
     // JoinResultSlab first, so the entity never qualifies as a source slab.
     entity.addComponent(JoinResultSlab, {});
@@ -936,6 +1046,7 @@ export class JoinSystem
       rowSlot: [],
       nullColumns,
       placeholdersShown: 0,
+      cleanup,
     };
     updateRowSlots(view);
     this.results.set(key, view);
@@ -1027,12 +1138,20 @@ export class JoinSystem
 
   pulseNullRows(): void {
     const view = this.active;
+    if (view) {
+      this.pulseRows(view.nullColumns.flatMap((columns, row) => (columns.length > 0 ? [row] : [])));
+    }
+  }
+
+  /** Briefly pulses these result rows (shown ones only): the NULL coach, or a fan-out win's repeats. */
+  pulseRows(rows: readonly number[]): void {
+    const view = this.active;
     if (!view) {
       return;
     }
-    view.nullColumns.forEach((columns, row) => {
+    rows.forEach((row) => {
       const rowView = view.doc.rowViews.get(row);
-      if (!rowView || !view.rowShown[row] || columns.length === 0) {
+      if (!rowView || !view.rowShown[row]) {
         return;
       }
       const restore = rowView.opacity.peek();
@@ -1116,7 +1235,14 @@ export class JoinSystem
    */
   private updateChallengeLayout(): void {
     const layout = this.challengeLayout;
-    if (!layout || this.state.phase !== 'idle' || this.queries.held.entities.size > 0 || this.dock.active || this.gliding()) {
+    if (
+      !layout ||
+      !deskReady() ||
+      this.state.phase !== 'idle' ||
+      this.queries.held.entities.size > 0 ||
+      this.dock.active ||
+      this.gliding()
+    ) {
       return;
     }
     // The first registered slab is the frame (the parent table, e.g. customers).
@@ -1855,6 +1981,12 @@ export class JoinSystem
     }
     this.layoutDirty = true;
     this.applyTransition({ type: 'separated' });
+    // Dev: an apply waiting for the separation.
+    const apply = this.pendingApply;
+    if (apply) {
+      this.pendingApply = null;
+      this.debugApply(apply);
+    }
   }
 
   private applySourceDim(

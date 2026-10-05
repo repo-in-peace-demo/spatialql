@@ -17,7 +17,13 @@ production.
 | The XR emulator (IWER) | Injected by the dev server only, never imported by app code |
 | Dev flags `debug` / `seated` / `forceSurface`, their `localStorage` reads and the Option+Shift hotkeys | `devFlag()` returns `false` and the hotkeys never install when `import.meta.env.DEV` is false |
 | Grab readout, seated head | Dynamically imported only inside `import.meta.env.DEV` checks |
-| Placement and join readouts, outlines, J / Shift+J / T / U keys | Only constructed when `import.meta.env.DEV` and the `debug` flag are on |
+| Placement and join readouts, outlines, J / Shift+J / T / U / R keys | Only constructed when `import.meta.env.DEV` and the `debug` flag are on |
+| Challenge mode's readouts and keys: H / F / N / P / I, G (apply the solution) and X (apply the wrong state) | `ChallengeDebug`, only constructed when `import.meta.env.DEV` and the `debug` flag are on |
+| Challenge `?resetProgress` and `?puzzle=` | Read only inside `import.meta.env.DEV` checks |
+| The `[Slab]` truncation warning | Inside an `import.meta.env.DEV` check |
+
+Challenge mode itself ships: it's off by default in production and turned on
+with `?challenge=1`.
 
 Vite sets `import.meta.env.DEV` to `false` in a production build, so the bundler
 can remove all of this. To confirm it did, see "Verify the build locally" below.
@@ -67,7 +73,7 @@ Then check that no dev-only code made it into `dist/`. This should print
 nothing:
 
 ```
-grep -rlE "\[Grab debug\]|\[Join debug\]|\[DeskPlacement|\[seated\]|\[dev flags\]|spatialql\.debug|Option\+Shift|join: bring orders|@iwer|slab \(touch\)|pinch evaluated|group: top" dist/
+grep -rlE "\[Grab debug\]|\[Join debug\]|\[DeskPlacement|\[seated\]|\[dev flags\]|spatialql\.debug|Option\+Shift|join: bring orders|@iwer|slab \(touch\)|pinch evaluated|group: top|\[Challenge debug\]|applying the solution|applying the wrong state|apply the puzzle|resetProgress|\[Slab\]|cut off with an ellipsis|switched to" dist/
 ```
 
 If it lists a file, some dev code survived the build (it can't run, because

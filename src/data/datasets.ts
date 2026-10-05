@@ -20,14 +20,24 @@ import type { Table } from './types.js';
 
 export type DatasetId = 'shop' | 'library' | 'school' | 'cafe';
 
+/** A dataset's card icon (drawn as a vector icon by the scene layer). */
+export type DatasetIcon = 'shopping-bag' | 'book-open' | 'school' | 'coffee';
+
 export type Dataset = {
   id: DatasetId;
+  /** Parent (referenced) table first: it's the left slab on the desk. */
   tables: readonly Table[];
   /**
    * Per table id, the column that names a row for people (a name or an id).
    * Used for readable row labels in tests and debug readouts.
    */
   labelColumns: Readonly<Record<string, string>>;
+  /**
+   * The dataset's light identity (challenge mode): a deep accent on the card
+   * border and the slab header stripe -- never on rows, which carry the
+   * pastel key tints -- and an icon on the card title.
+   */
+  theme: { accent: string; icon: DatasetIcon };
 };
 
 export const BORROWERS_TABLE: Table = {
@@ -50,13 +60,14 @@ export const BOOKS_TABLE: Table = {
   columnLabels: { borrowerId: 'Borrower' },
   foreignKeys: [{ column: 'borrowerId', references: { tableId: 'borrowers', column: 'id' } }],
   rows: [
-    { id: 201, title: 'The Glass Orchard', borrowerId: 1, due: 'Fri' },
-    { id: 202, title: 'Salt and Lantern', borrowerId: 3, due: 'Mon' },
+    // Titles are short enough to fit a column without an ellipsis (tested).
+    { id: 201, title: 'Glass Orchard', borrowerId: 1, due: 'Fri' },
+    { id: 202, title: 'Salt Lantern', borrowerId: 3, due: 'Mon' },
     { id: 203, title: 'Paper Moons', borrowerId: null, due: null },
     { id: 204, title: 'A Map of Rain', borrowerId: 1, due: 'Tue' },
-    { id: 205, title: 'The Quiet Engine', borrowerId: 5, due: 'Fri' },
+    { id: 205, title: 'Quiet Engine', borrowerId: 5, due: 'Fri' },
     { id: 206, title: 'Small Hours', borrowerId: null, due: null },
-    { id: 207, title: 'North of Nowhere', borrowerId: 2, due: null },
+    { id: 207, title: 'Far North', borrowerId: 2, due: null },
     { id: 208, title: 'Tidewater', borrowerId: 3, due: 'Wed' },
   ],
 };
@@ -127,20 +138,42 @@ export const DATASETS: Readonly<Record<DatasetId, Dataset>> = {
     id: 'shop',
     tables: [CUSTOMERS_TABLE, ORDERS_TABLE],
     labelColumns: { customers: 'name', orders: 'id' },
+    theme: { accent: '#3b4f9c', icon: 'shopping-bag' }, // indigo
   },
   library: {
     id: 'library',
     tables: [BORROWERS_TABLE, BOOKS_TABLE],
     labelColumns: { borrowers: 'name', books: 'title' },
+    theme: { accent: '#7a3e8f', icon: 'book-open' }, // plum
   },
   school: {
     id: 'school',
     tables: [CLUBS_TABLE, STUDENTS_TABLE],
     labelColumns: { clubs: 'club', students: 'name' },
+    theme: { accent: '#1f6f78', icon: 'school' }, // deep teal
   },
   cafe: {
     id: 'cafe',
     tables: [DRINKS_TABLE, TICKETS_TABLE],
     labelColumns: { drinks: 'drink', tickets: 'id' },
+    theme: { accent: '#8a5a2b', icon: 'coffee' }, // coffee brown
   },
 };
+
+export const DATASET_IDS: readonly DatasetId[] = ['shop', 'library', 'school', 'cafe'];
+
+/** The table with this id, from any dataset, or null. */
+export function tableById(id: string): Table | null {
+  for (const datasetId of DATASET_IDS) {
+    const table = DATASETS[datasetId].tables.find((t) => t.id === id);
+    if (table) {
+      return table;
+    }
+  }
+  return null;
+}
+
+/** The dataset a table belongs to, or null. */
+export function datasetOfTable(id: string): DatasetId | null {
+  return DATASET_IDS.find((datasetId) => DATASETS[datasetId].tables.some((t) => t.id === id)) ?? null;
+}

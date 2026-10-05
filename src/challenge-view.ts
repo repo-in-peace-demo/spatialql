@@ -14,6 +14,13 @@
  */
 
 import { computed, signal, UIKit, UIKitDocument, type Signal } from '@iwsdk/core';
+// Only the four icons used, each from its own module, so the bundle doesn't
+// pull in the whole icon set.
+import { BookOpen } from '@pmndrs/uikit-lucide/dist/BookOpen.js';
+import { Coffee } from '@pmndrs/uikit-lucide/dist/Coffee.js';
+import { School } from '@pmndrs/uikit-lucide/dist/School.js';
+import { ShoppingBag } from '@pmndrs/uikit-lucide/dist/ShoppingBag.js';
+import type { DatasetIcon } from './data/datasets.js';
 import {
   CONTROL_OPTION_MIN_HEIGHT_CM,
   CONTROL_OPTION_MIN_WIDTH_CM,
@@ -44,6 +51,15 @@ const COLOR_BAR_TRACK = '#e2ddd0';
 const COLOR_HEADLINE = '#8a4b00';
 /** The headline's size relative to the goal font (capped to fit the goal's two-line slot). */
 const HEADLINE_SCALE = 1.8;
+/** The dataset icon's size relative to the title text. */
+const ICON_SCALE = 1.25;
+/**
+ * The card border's width: thicker than a slab's, so the dataset accent
+ * reads. The padding gives up the same amount, so the card's height (and its
+ * place in the view budget) doesn't change.
+ */
+const CARD_BORDER_CM = 0.3;
+const PHASE2_CARD_BORDER_CM = 0.15;
 
 // --- Puzzle card ------------------------------------------------------------------
 
@@ -67,6 +83,10 @@ export type PuzzleCardView = {
   /** Once won: the query line, then an optional note. */
   query: Text;
   note: Text;
+  /** The four dataset icons; `setCardTheme` shows one. */
+  icons: Record<DatasetIcon, InstanceType<typeof ShoppingBag>>;
+  /** The current dataset accent (the border while not won). */
+  accent: string;
   widthMeters: number;
   heightMeters: number;
 };
@@ -74,9 +94,9 @@ export type PuzzleCardView = {
 export function buildPuzzleCard(): PuzzleCardView {
   const goalFont = Math.max(MIN_ROW_FONT_CM, fontCmForAngle(HEADER_TEXT_TARGET_DEG, PLANNED_CARD_DISTANCE_METERS));
   const smallFont = Math.max(MIN_ROW_FONT_CM, fontCmForAngle(ROW_TEXT_TARGET_DEG, PLANNED_CARD_DISTANCE_METERS));
-  const padding = smallFont * 0.8;
+  const border = CARD_BORDER_CM;
+  const padding = smallFont * 0.8 - (CARD_BORDER_CM - PHASE2_CARD_BORDER_CM);
   const gap = smallFont * 0.4;
-  const border = 0.15;
   const widthCm = CARD_WIDTH_EM * goalFont;
   const titleHeight = smallFont * LINE_HEIGHT_FACTOR;
   const goalHeight = CARD_GOAL_LINES * goalFont * LINE_HEIGHT_FACTOR;
@@ -112,9 +132,22 @@ export function buildPuzzleCard(): PuzzleCardView {
   const titleRow = new UIKit.Container({
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     height: titleHeight,
     flexShrink: 0,
   });
+  // The dataset's icon (one of four, shown by `setCardTheme`), then the title.
+  const titleGroup = new UIKit.Container({ flexDirection: 'row', alignItems: 'center', gapColumn: smallFont * 0.4 });
+  const iconSize = smallFont * ICON_SCALE;
+  const icons = {
+    'shopping-bag': new ShoppingBag({ width: iconSize, height: iconSize, display: 'none' }),
+    'book-open': new BookOpen({ width: iconSize, height: iconSize, display: 'none' }),
+    school: new School({ width: iconSize, height: iconSize, display: 'none' }),
+    coffee: new Coffee({ width: iconSize, height: iconSize, display: 'none' }),
+  } satisfies Record<DatasetIcon, InstanceType<typeof ShoppingBag>>;
+  for (const icon of Object.values(icons)) {
+    titleGroup.add(icon);
+  }
   const title = new UIKit.Text({
     text: '',
     fontSize: smallFont,
@@ -122,13 +155,14 @@ export function buildPuzzleCard(): PuzzleCardView {
     color: COLOR_TEXT_SECONDARY,
     wordBreak: 'keep-all',
   });
+  titleGroup.add(title);
   const status = new UIKit.Text({
     text: '',
     fontSize: smallFont,
     color: COLOR_TEXT_SECONDARY,
     wordBreak: 'keep-all',
   });
-  titleRow.add(title, status);
+  titleRow.add(titleGroup, status);
 
   const block = (height: number) =>
     new UIKit.Container({ flexDirection: 'column', height, flexShrink: 0, overflow: 'hidden' });
@@ -163,9 +197,24 @@ export function buildPuzzleCard(): PuzzleCardView {
     message,
     query,
     note,
+    icons,
+    accent: COLOR_CARD_BORDER,
     widthMeters: widthCm / 100,
     heightMeters: heightCm / 100,
   };
+}
+
+/**
+ * The dataset's identity on the card: its accent on the border (the win's
+ * gold still takes over while won) and its icon before the title, in the
+ * accent color.
+ */
+export function setCardTheme(card: PuzzleCardView, theme: { accent: string; icon: DatasetIcon }): void {
+  card.accent = theme.accent;
+  for (const [name, icon] of Object.entries(card.icons)) {
+    icon.setProperties({ display: name === theme.icon ? 'flex' : 'none', color: theme.accent });
+  }
+  card.root.setProperties({ borderColor: theme.accent });
 }
 
 /** The win's three parts; `note` is an optional extra line (e.g. "More puzzles soon."). */
@@ -179,7 +228,7 @@ export type CardWin = { headline: string; takeaway: string; query: string; note:
 export function setCardWin(card: PuzzleCardView, win: CardWin | null): void {
   card.root.setProperties({
     backgroundColor: win ? COLOR_CARD_WON : COLOR_CARD,
-    borderColor: win ? COLOR_CARD_BORDER_WON : COLOR_CARD_BORDER,
+    borderColor: win ? COLOR_CARD_BORDER_WON : card.accent,
   });
   card.goal.setProperties({ display: win ? 'none' : 'flex' });
   card.headline.setProperties({ display: win ? 'flex' : 'none', text: win?.headline ?? '' });
@@ -229,6 +278,7 @@ const COLOR_DISABLED_FILL = '#ece7db';
 const COLOR_DISABLED_TEXT = '#655d4f';
 /** The chip's Clear pill: a light fill with a firm border, so it reads as its own button. */
 const COLOR_CLEAR_BORDER = '#6b6355';
+const NEXT_WAITING_OPACITY = 0.7;
 const CLEAR_BORDER_WIDTH = 0.15;
 
 /** `labelFontCm`: the label size (the control's, sized by angle by the caller). */
@@ -371,6 +421,16 @@ export function setBarChip(bar: PuzzleBarView, where: string | null): void {
       width: clear / 100,
     });
   }
+}
+
+/**
+ * Next while its switch waits for the player to let go of a table: shown
+ * pressed (the accent fill, held dimmer, no pulse), so it reads as "working
+ * on it", not as broken.
+ */
+export function setNextWaiting(bar: PuzzleBarView): void {
+  bar.next.setProperties(controlOptionStyle(true));
+  bar.nextOpacity.value = NEXT_WAITING_OPACITY;
 }
 
 /** Next's look: the accent style while available; a light, clearly-off but readable style while not. */
