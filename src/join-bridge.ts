@@ -59,6 +59,8 @@ export interface JoinControls {
   /** Diff markers per result row, and how many placeholder rows to show; null clears them. */
   applyDiff(rowStatus: readonly RowStatus[] | null, missing: number): void;
   setWinLook(won: boolean): void;
+  /** The result slab's status badge, mirroring the card ("Solved!" in gold, "Completed", the diff summary); null hides it. */
+  setResultBadge(text: string | null, look: 'won' | 'neutral'): void;
   /** Briefly pulses the shown rows that hold a NULL (the coach for the NULL poke). */
   pulseNullRows(): void;
   /** Briefly pulses these result rows (e.g. the rows a fan-out repeats). */

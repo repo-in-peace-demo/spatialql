@@ -40,6 +40,16 @@ export function sessionTransition(session: PuzzleSession, event: SessionEvent): 
   }
 }
 
+/**
+ * Whether this attempt counts as "completed with the answer" rather than
+ * solved: won after the full answer was shown (or, before a win, the answer
+ * is showing). Such a completion gets the neutral "Completed" look, no
+ * streak credit, and is recorded as revealed.
+ */
+export function answerRevealed(session: PuzzleSession): boolean {
+  return session.solved ? session.solvedWithAnswer : session.hintsShown >= HINT_TIERS;
+}
+
 /** Index (0-2) of the latest hint shown, or null before the first. */
 export function latestHintIndex(session: PuzzleSession): number | null {
   return session.hintsShown === 0 ? null : session.hintsShown - 1;

@@ -13,8 +13,15 @@
 
 import { MathUtils, type Object3D, type Vector3 } from '@iwsdk/core';
 
-/** The natural seated gaze: this far below horizontal. Tune on a headset. */
-export const NATURAL_GAZE_PITCH_DEG = 18;
+/**
+ * The natural seated gaze: this far below horizontal. The one place to tune
+ * it: desk placement's view fits, the join's band / result / card placement
+ * and its fit push-back, every readout, the debug panel and the dev
+ * `seated` pose all read it. Was 18; on the Quest 3S, seated users held
+ * their heads 2-6 deg down (headset logs of 2026-10-06), so 8. The debug
+ * panel logs the head's pitch every 10 s to keep tuning from data.
+ */
+export const NATURAL_GAZE_PITCH_DEG = 8;
 export const NATURAL_GAZE_PITCH_RAD = MathUtils.degToRad(NATURAL_GAZE_PITCH_DEG);
 
 /** The whole group's vertical extent, centered on the natural gaze. Tune on a headset. */

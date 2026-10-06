@@ -29,7 +29,11 @@
  *   `?debugSide=left|right` overrides it. Default: left.
  * - **Frame line**: p50 / p95 / max frame time over the last HUD_FRAME_WINDOW
  *   frames (preallocated ring, sorted in place at refresh time), and the
- *   long-task count with the latest one.
+ *   long-task count with the latest one; written to the log file every 5 s.
+ * - **Log file** (`debug-log-sink.ts`): every mirrored line, complete, plus
+ *   whatever a tagged console group holds, goes to `logs/` via the dev
+ *   server. A head-height change of more than 25 cm after placement is
+ *   logged (e.g. sitting down after entering XR standing).
  *
  * No per-frame allocation: frame times go into a typed array; strings are
  * built only at refresh time (a few times a second) and on log lines.
@@ -37,13 +41,17 @@
 
 import {
   createSystem,
+  Euler,
+  Grabbed,
   OneHandGrabbable,
+  Quaternion,
   UIKit,
   UIKitDocument,
   Vector3,
   VisibilityState,
   type Entity,
 } from '@iwsdk/core';
+import { formatArgs, formatTable, logToFile, startLogSink } from './debug-log-sink.js';
 import { deskBridge } from './desk-bridge.js';
 import { DEV_FLAG_STORAGE_PREFIX } from './dev-flags.js';
 import { readJointsPoint, readPinchPoint } from './pinch.js';
@@ -59,7 +67,13 @@ import {
   slabTopLocalY,
   type TableSlabDocument,
 } from './table-slab-view.js';
-import { fontCmForAngle, MIN_ROW_FONT_CM, NATURAL_GAZE_PITCH_RAD, TOUCH_REACH_MAX_METERS } from './view-comfort.js';
+import {
+  fontCmForAngle,
+  MIN_ROW_FONT_CM,
+  NATURAL_GAZE_PITCH_DEG,
+  NATURAL_GAZE_PITCH_RAD,
+  TOUCH_REACH_MAX_METERS,
+} from './view-comfort.js';
 
 type Container = InstanceType<typeof UIKit.Container>;
 type Text = InstanceType<typeof UIKit.Text>;
@@ -87,6 +101,7 @@ const MIRRORED_TAGS: readonly (readonly [string, string])[] = [
   ['[DeskPlacement debug]', 'desk'],
   ['[DeskPlacement', 'desk'],
   ['[Challenge debug]', 'puzzle'],
+  ['[Touch debug]', 'touch'],
   [LOG_PREFIX, 'hud'],
 ];
 
@@ -99,8 +114,11 @@ const HUD_INNER_EDGE_DEG = 45;
 const HUD_TEXT_DEG = 1.0;
 const HUD_WIDTH_EM = 34;
 const HUD_REFRESH_HZ = 4;
-/** Re-place when the group's center direction moves this far from where the panel was placed for. */
+/** Re-place when the group's center direction moves this far from where the panel was placed for... */
 const HUD_REPLACE_YAW_DEG = 20;
+/** ...and only once no table is held and they've been still this long (within this tolerance). */
+const HUD_STILL_SECONDS = 1;
+const HUD_STILL_TOLERANCE_METERS = 0.01;
 /** Seconds into a session before the first placement (the head pose and the desk settle). */
 const HUD_SETTLE_SECONDS = 1;
 const LINE_HEIGHT_FACTOR = 1.25;
@@ -127,6 +145,12 @@ const SWAP_LABELS: Record<Side, string> = { left: 'Move right', right: 'Move lef
 // --- Frame time --------------------------------------------------------------------
 /** Frames in the frame-time window (~4-5 s at 72-90 Hz). */
 const HUD_FRAME_WINDOW = 360;
+/** The frame-time line goes to the log file every this many refreshes (every 5 s at HUD_REFRESH_HZ). */
+const HUD_FRAME_LOG_EVERY_REFRESHES = 20;
+/** Head pitch samples per pitch line: 10 s at HUD_REFRESH_HZ. */
+const HEAD_PITCH_SAMPLES = 40;
+/** After placement, a head-height change of more than this is logged (e.g. sitting down after entering standing). */
+const HEAD_HEIGHT_CHANGE_METERS = 0.25;
 
 const HANDS = ['left', 'right'] as const;
 const INDEX_TIP: readonly XRHandJoint[] = ['index-finger-tip'];
@@ -202,49 +226,101 @@ function taggedLine(arg: unknown): string | null {
 
 /**
  * Mirrors tagged `console.log/info` lines and every warning and error into
- * the HUD's ring (idempotent). Calls through to the original console.
+ * the HUD's ring, and sends them complete to the log file (idempotent).
+ * Inside a tagged `console.group`/`groupCollapsed` (e.g. a placement
+ * report), every line and `console.table` goes to the file too, indented
+ * under the group's title. Calls through to the original console.
  */
 export function installHudConsoleTap(): void {
   if (tapInstalled) {
     return;
   }
   tapInstalled = true;
+  startLogSink();
   let inTap = false;
+  /** Per open console group: whether it (or an enclosing group) is tagged. */
+  const groups: boolean[] = [];
+  const inTaggedGroup = () => groups.length > 0 && groups[groups.length - 1];
+  const indent = () => '  '.repeat(groups.length);
+  /** Runs `fn` guarded: a readout must never break the app, nor log itself. */
+  const guarded = (fn: () => void) => {
+    if (inTap) {
+      return;
+    }
+    inTap = true;
+    try {
+      fn();
+    } catch {
+      // Ignore.
+    } finally {
+      inTap = false;
+    }
+  };
+
   const wrap = (method: 'log' | 'info' | 'warn' | 'error', kind: LineKind) => {
     const original = console[method].bind(console);
     console[method] = (...args: unknown[]) => {
       original(...args);
-      if (inTap) {
-        return;
-      }
-      inTap = true;
-      try {
+      guarded(() => {
+        const tagged = taggedLine(args[0]);
         if (kind === 'info') {
-          const line = taggedLine(args[0]);
-          if (line !== null) {
-            pushLine('info', line);
+          if (tagged !== null) {
+            pushLine('info', tagged);
           }
-        } else {
-          const tagged = taggedLine(args[0]);
-          pushLine(kind, tagged ?? firstLine(args.map(describeArg).join(' ')));
+          if (tagged !== null || inTaggedGroup()) {
+            logToFile('info', indent() + formatArgs(args));
+          }
+          return;
         }
-      } catch {
-        // A readout must never break the app.
-      } finally {
-        inTap = false;
-      }
+        pushLine(kind, tagged ?? firstLine(args.map(describeArg).join(' ')));
+        logToFile(kind, indent() + formatArgs(args));
+      });
     };
   };
   wrap('log', 'info');
   wrap('info', 'info');
   wrap('warn', 'warn');
   wrap('error', 'error');
+
+  for (const method of ['group', 'groupCollapsed'] as const) {
+    const original = console[method].bind(console);
+    console[method] = (...args: unknown[]) => {
+      original(...args);
+      guarded(() => {
+        const tagged = taggedLine(args[0]) !== null;
+        if (tagged) {
+          pushLine('info', taggedLine(args[0]) as string);
+        }
+        if (tagged || inTaggedGroup()) {
+          logToFile('info', indent() + formatArgs(args));
+        }
+        groups.push(tagged || inTaggedGroup());
+      });
+    };
+  }
+  const originalGroupEnd = console.groupEnd.bind(console);
+  console.groupEnd = () => {
+    originalGroupEnd();
+    groups.pop();
+  };
+  const originalTable = console.table.bind(console);
+  console.table = (data?: unknown, columns?: string[]) => {
+    originalTable(data, columns);
+    guarded(() => {
+      if (inTaggedGroup()) {
+        logToFile('info', indent() + formatTable(data).replace(/\n/g, `\n${indent()}`));
+      }
+    });
+  };
+
   window.addEventListener('error', (event) => {
     const where = event.filename ? ` (${event.filename.split('/').pop()}:${event.lineno})` : '';
     pushLine('error', `uncaught: ${event.message}${where}`);
+    logToFile('error', `uncaught: ${event.message}${where}${event.error instanceof Error ? `\n${event.error.stack ?? ''}` : ''}`);
   });
   window.addEventListener('unhandledrejection', (event) => {
     pushLine('error', `unhandled rejection: ${firstLine(describeArg(event.reason))}`);
+    logToFile('error', `unhandled rejection: ${formatArgs([event.reason])}`);
   });
 }
 
@@ -422,8 +498,18 @@ function buildHud(): HudView {
 export class DebugHudSystem extends createSystem({
   // Grabbable source slabs (the result slab is view only).
   slabs: { required: [TableSlab, TableSlabRuntime, OneHandGrabbable], excluded: [JoinResultSlab] },
+  held: { required: [TableSlab, Grabbed] },
 }) {
   private hud!: HudView;
+  /** `?debugPanel=0`: no panel (to compare frame times without it); logging continues. */
+  private readonly panelHidden = new URLSearchParams(window.location.search).get('debugPanel') === '0';
+  private stillSince = 0;
+  private readonly _lastCenter = new Vector3();
+  /** Head pitch samples (degrees down) for the 10 s pitch line. */
+  private readonly pitchSamples = new Float32Array(HEAD_PITCH_SAMPLES);
+  private pitchCount = 0;
+  private readonly _quat = new Quaternion();
+  private readonly _euler = new Euler();
   private hudEntity: Entity | null = null;
   private side: Side = 'left';
   private placed = false;
@@ -444,6 +530,9 @@ export class DebugHudSystem extends createSystem({
   private frameIndex = 0;
   private frameCount = 0;
   private longTasks: PerformanceObserver | null = null;
+  private frameLogCounter = 0;
+  /** Head height the last head-height line was measured against (NaN until placed this session). */
+  private headRefY = NaN;
   private longTaskCount = 0;
   private lastLongTaskMs = 0;
   private lastLongTaskAt = -1;
@@ -488,6 +577,8 @@ export class DebugHudSystem extends createSystem({
         this.placed = false;
         this.frameCount = 0;
         this.frameIndex = 0;
+        // A new session: the head height is measured afresh once placed.
+        this.headRefY = NaN;
       }),
       () => {
         this.longTasks?.disconnect();
@@ -495,7 +586,9 @@ export class DebugHudSystem extends createSystem({
       },
     );
     console.info(
-      `${LOG_PREFIX} in-headset readout on the ${this.side} (swap with its button; ?debugSide=left|right overrides).`,
+      this.panelHidden
+        ? `${LOG_PREFIX} panel hidden (?debugPanel=0): logging and the frame-time line continue.`
+        : `${LOG_PREFIX} in-headset readout on the ${this.side} (swap with its button; ?debugSide=left|right overrides).`,
     );
   }
 
@@ -525,20 +618,72 @@ export class DebugHudSystem extends createSystem({
     }
     // Let the session's head pose and the desk placement settle first.
     this.immersiveSeconds += delta;
-    if (refresh && deskReady && this.immersiveSeconds >= HUD_SETTLE_SECONDS) {
+    const settled = this.immersiveSeconds >= HUD_SETTLE_SECONDS;
+    if (!this.panelHidden && refresh && deskReady && settled) {
       if (!this.placed) {
         this.place();
-      } else if (this.groupYawMoved()) {
+      } else if (this.groupAtRest() && this.groupYawMoved()) {
+        // Follows the tables only once they're put down and still: never
+        // while they're being carried around.
         this.place();
       }
     }
-    if (!this.placed) {
+    // Hidden (?debugPanel=0): the log file still gets the frame line and head-height changes.
+    if (!(this.placed || (this.panelHidden && settled))) {
       return;
     }
     if (refresh) {
       this.refreshText();
+      this.checkHeadHeight();
+      this.samplePitch();
     }
-    this.updateButton();
+    if (!this.panelHidden) {
+      this.updateButton();
+    }
+  }
+
+  /**
+   * The head's pitch while the tables are on screen, sampled at refresh rate;
+   * every HEAD_PITCH_SAMPLES (10 s) its median and range go to the log, so
+   * the natural gaze (NATURAL_GAZE_PITCH_DEG) can be tuned from real data.
+   */
+  private samplePitch(): void {
+    if (!this.groupCenter()) {
+      return;
+    }
+    this.player.head.updateWorldMatrix(true, false);
+    this._quat.setFromRotationMatrix(this.player.head.matrixWorld);
+    this._euler.setFromQuaternion(this._quat, 'YXZ');
+    this.pitchSamples[this.pitchCount++] = -(this._euler.x * 180) / Math.PI;
+    if (this.pitchCount < HEAD_PITCH_SAMPLES) {
+      return;
+    }
+    this.pitchCount = 0;
+    this.pitchSamples.sort();
+    const median = this.pitchSamples[Math.floor(HEAD_PITCH_SAMPLES / 2)];
+    const down = (deg: number) => `${deg.toFixed(1)}° ${deg >= 0 ? 'down' : 'up'}`;
+    console.info(
+      `${LOG_PREFIX} head pitch over ${(HEAD_PITCH_SAMPLES / HUD_REFRESH_HZ).toFixed(0)} s: median ${down(median)}, ` +
+        `range ${down(this.pitchSamples[0])} to ${down(this.pitchSamples[HEAD_PITCH_SAMPLES - 1])} ` +
+        `(natural gaze ${NATURAL_GAZE_PITCH_DEG}° down)`,
+    );
+  }
+
+  /**
+   * Whether the tables are at rest: none held, and their center hasn't
+   * moved for HUD_STILL_SECONDS (checked at refresh rate).
+   */
+  private groupAtRest(): boolean {
+    if (this.queries.held.entities.size > 0 || !this.groupCenter()) {
+      this.stillSince = this.clock;
+      return false;
+    }
+    if (this._center.distanceTo(this._lastCenter) > HUD_STILL_TOLERANCE_METERS) {
+      this._lastCenter.copy(this._center);
+      this.stillSince = this.clock;
+      return false;
+    }
+    return this.clock - this.stillSince >= HUD_STILL_SECONDS;
   }
 
   // --- Placement ----------------------------------------------------------------------
@@ -645,6 +790,28 @@ export class DebugHudSystem extends createSystem({
   private buttonCenter(out: Vector3): Vector3 {
     out.set(this.buttonCenterX(), this.hud.buttonCenterY, 0);
     return this.hud.document.localToWorld(out);
+  }
+
+  /**
+   * Logs a head-height change of more than HEAD_HEIGHT_CHANGE_METERS since
+   * placement (or since the last such line), with the time into the session.
+   * Checked at refresh rate, not per frame.
+   */
+  private checkHeadHeight(): void {
+    this.readHead();
+    if (Number.isNaN(this.headRefY)) {
+      this.headRefY = this._head.y;
+      return;
+    }
+    const change = this._head.y - this.headRefY;
+    if (Math.abs(change) > HEAD_HEIGHT_CHANGE_METERS) {
+      console.info(
+        `${LOG_PREFIX} head height changed by ${change > 0 ? '+' : ''}${change.toFixed(2)} m ` +
+          `(${this.headRefY.toFixed(2)} -> ${this._head.y.toFixed(2)} m) at ${this.immersiveSeconds.toFixed(1)} s ` +
+          `into the session; the tables were placed for the earlier height`,
+      );
+      this.headRefY = this._head.y;
+    }
   }
 
   // --- Swap button -------------------------------------------------------------------
@@ -757,14 +924,21 @@ export class DebugHudSystem extends createSystem({
           ? 'none'
           : `${this.longTaskCount}, last ${this.lastLongTaskMs.toFixed(0)} ms ` +
             `${((performance.now() - this.lastLongTaskAt) / 1000).toFixed(0)} s ago`;
-      this.hud.frameLine.setProperties({
-        text:
-          `frame p50 ${p50.toFixed(1)}  p95 ${p95.toFixed(1)}  max ${max.toFixed(1)} ms ` +
-          `(${(total / 1000).toFixed(1)} s) | long tasks ${longTask}`,
-      });
+      const frameText =
+        `frame p50 ${p50.toFixed(1)}  p95 ${p95.toFixed(1)}  max ${max.toFixed(1)} ms ` +
+        `(${(total / 1000).toFixed(1)} s) | long tasks ${longTask}`;
+      if (!this.panelHidden) {
+        this.hud.frameLine.setProperties({ text: frameText });
+      }
+      // The log file gets it every few seconds, not at every refresh.
+      if (++this.frameLogCounter >= HUD_FRAME_LOG_EVERY_REFRESHES) {
+        this.frameLogCounter = 0;
+        logToFile('info', `${LOG_PREFIX} ${frameText}`);
+      }
     }
 
-    if (ring.version === this.shownVersion) {
+    // With ?debugPanel=0 nothing is drawn: the panel's text costs nothing.
+    if (this.panelHidden || ring.version === this.shownVersion) {
       return;
     }
     this.shownVersion = ring.version;

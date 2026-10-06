@@ -90,7 +90,7 @@ const BOX_EDGES: ReadonlyArray<[number, number]> = [
 ];
 
 function fmt(value: number, digits = 2): string {
-  return Number.isFinite(value) ? value.toFixed(digits) : '—';
+  return Number.isFinite(value) ? value.toFixed(digits) : '-';
 }
 
 function fmtVec(v: Vector3): string {
@@ -161,7 +161,7 @@ export class PlacementDebug {
     if (report.synthetic) {
       console.log(
         `chosen: SYNTHETIC forced surface (not a detected surface) at world Y ${fmt(report.synthetic.y)} ` +
-          `= head − ${fmt(report.synthetic.heightBelowHead)} m`,
+          `= head - ${fmt(report.synthetic.heightBelowHead)} m`,
       );
     } else {
       const chosen = report.candidates.find((c) => c.entity !== null && c.entity === report.chosen);
@@ -233,7 +233,7 @@ export class PlacementDebug {
   logChosenChange(headPosition: Vector3, candidates: SurfaceAssessment[], chosen: Entity | null): void {
     const chosenRecord = candidates.find((c) => c.entity !== null && c.entity === chosen);
     console.groupCollapsed(
-      `${LOG_PREFIX} chosen surface changed → ${chosenRecord ? candidateId(chosenRecord) : 'none'}`,
+      `${LOG_PREFIX} chosen surface changed -> ${chosenRecord ? candidateId(chosenRecord) : 'none'}`,
     );
     console.log(`head position ${fmtVec(headPosition)}; reference space: ${this.referenceSpace}`);
     this.logCandidates(candidates, chosen);

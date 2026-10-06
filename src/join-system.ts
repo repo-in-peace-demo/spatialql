@@ -68,8 +68,17 @@ import { deskReady } from './desk-bridge.js';
 import { devFlag } from './dev-flags.js';
 import { joinBridge, type ChallengeLayout, type JoinControls, type PlacedElement } from './join-bridge.js';
 import { JoinDebug, type JoinDebugHost, type JoinStats } from './join-debug.js';
+import { isTouchPointerClick, setRect, touchProbe, type PressPath } from './touch-probe.js';
 import { COLOR_MATCH_LINE, COLOR_PREVIEW, EdgeGlow, lineColorForTint, SegmentBatch } from './join-visuals.js';
-import { readJointsPoint, readPinchPoint, readWristPoint } from './pinch.js';
+import {
+  BUTTON_PINCH_BACK_DEPTH_METERS,
+  BUTTON_PINCH_FRONT_DEPTH_METERS,
+  ContactPoke,
+  MIN_INDEX_STRAIGHTNESS,
+  POKE_TARGET_TOLERANCE_METERS,
+  type PokeVerdict,
+} from './contact-poke.js';
+import { indexStraightness, readJointsPoint, readPinchPoint, readWristPoint } from './pinch.js';
 import { JoinDocked, JoinResultSlab, TableSlab, TableSlabRuntime } from './table-slab-component.js';
 import {
   buildJoinTypeControl,
@@ -83,7 +92,9 @@ import {
   slabBottomLocalY,
   slabTopLocalY,
   slabVisualTopLocalY,
+  setSlabBadge,
   type CellOffset,
+  type SlabBadgeLook,
   type JoinTypeControlView,
   type TableSlabDocument,
 } from './table-slab-view.js';
@@ -105,6 +116,7 @@ import {
   MIN_ROW_TEXT_DEG,
   NATURAL_GAZE_PITCH_DEG,
   NATURAL_GAZE_PITCH_RAD,
+  PLANNED_CARD_DISTANCE_METERS,
   PLANNED_CONTROL_DISTANCE_METERS,
   PLANNED_RESULT_DISTANCE_METERS,
   ROW_TEXT_TARGET_DEG,
@@ -241,6 +253,7 @@ const CONTROL_VIEW_GAP_DEG = 1;
 /** A pinch selects an option when its pinch point is this close to it, in plane... */
 const CONTROL_PINCH_MARGIN_METERS = 0.015;
 /** ...and at most this far in front of / behind the control's surface. */
+/** A pinch on a NULL cell counts at most this far off the result slab's surface (buttons: contact-poke.ts). */
 const CONTROL_PINCH_DEPTH_METERS = 0.03;
 /** Grab sphere radius of IWSDK's grab pointer, for the clearance readout. */
 const GRAB_SPHERE_RADIUS_METERS = 0.07;
@@ -248,8 +261,14 @@ const GRAB_SPHERE_RADIUS_METERS = 0.07;
 // --- Challenge mode ------------------------------------------------------------------
 /** Clear gap between the join-type control and the puzzle bar, side by side in the band (never less). */
 const BAR_CONTROL_GAP_METERS = 0.015;
-/** Gap between the result slot's top edge and the puzzle card. */
-const CARD_GAP_METERS = 0.015;
+/** Gap (in view) between the result slot's side edge and the puzzle card beside it. */
+const CARD_SIDE_GAP_DEG = 2;
+/**
+ * Which side of the result the card goes: +1 = the viewer's right. The
+ * band's INNER | LEFT control sits left of center (the puzzle bar is on its
+ * right), so the card goes right, away from it.
+ */
+const CARD_SIDE = 1;
 /** A filter change: leaving rows fade out, then the rest slide to their new slots. */
 const FILTER_FADE_SECONDS = 0.2;
 const FILTER_SLIDE_SECONDS = 0.25;
@@ -262,11 +281,16 @@ const NULL_ACTIVATION_DEBOUNCE_SECONDS = 0.3;
 const NULL_PINCH_MARGIN_METERS = 0.01;
 /** A ray hit or fingertip counts as on a NULL cell within this of its rectangle. */
 const NULL_RAY_TOLERANCE_METERS = 0.003;
-/** A fingertip pokes when it crosses to within this of the result slab's surface. */
-const NULL_POKE_DEPTH_METERS = 0.01;
+/** A poke and its UIKit click (or a pinch) on the control within this count once. */
+const CONTROL_PRESS_DEBOUNCE_SECONDS = 0.3;
 const INDEX_TIP: readonly XRHandJoint[] = ['index-finger-tip'];
 /** Home glide on Next: both slabs return to where they started. */
 const HOME_GLIDE_SECONDS = 0.45;
+/** A pair joined high glides down at most this far to fit the group in view. */
+const JOIN_MAX_FIT_DROP_METERS = 0.3;
+/** The group may sit this far over the view's top before a join lowers it (readout rounding). */
+const FIT_DROP_TOLERANCE_DEG = 0.5;
+const FIT_DROP_SEARCH_STEPS = 10;
 const COLOR_WIN_GLOW = '#f0b43c';
 
 const UP = new Vector3(0, 1, 0);
@@ -384,7 +408,32 @@ export class JoinSystem
   private lastNullActivation = -Infinity;
   private readonly _nullHit = { row: -1, column: -1, distance: Infinity, depth: 0 };
   /** Per hand: the index fingertip's last distance in front of the result slab (for pokes). */
-  private readonly pokeDepth = { left: Infinity, right: Infinity };
+  /** Contact pokes (contact-poke.ts) on the NULL cells and on the control's options. */
+  private readonly nullPoke = new ContactPoke();
+  private readonly controlPoke = new ContactPoke();
+  /** The input source whose fingertip is being tested (for the index-straightness check). */
+  private _pokeSource: XRInputSource | null = null;
+  private readonly _pokeLocal = new Vector3();
+  private readonly _groupTop = new Vector3();
+  private readonly _straightA = new Vector3();
+  private readonly _straightB = new Vector3();
+  private lastControlPress = -Infinity;
+  /** Contact-poke hit tests, allocated once (the poke asks only at a contact). */
+  private readonly pokeOnNullCell = (): boolean => {
+    const view = this.active;
+    return !!view && this.nearestNullCell(view, this._pokeTip) && this._nullHit.distance <= POKE_TARGET_TOLERANCE_METERS;
+  };
+  private readonly pokeOnControl = (): boolean => {
+    const control = this.control;
+    const p = this._pokeLocal;
+    const dy = Math.max(0, Math.abs(p.y) - control.optionHeightMeters / 2);
+    const inner = Math.hypot(Math.max(0, Math.abs(p.x - control.innerCenterX) - control.optionWidthMeters / 2), dy);
+    const left = Math.hypot(Math.max(0, Math.abs(p.x - control.leftCenterX) - control.optionWidthMeters / 2), dy);
+    this.pokedOption = inner <= left ? 'inner' : 'left';
+    return Math.min(inner, left) <= POKE_TARGET_TOLERANCE_METERS;
+  };
+  private readonly pokeStraightness = (): number | null =>
+    this._pokeSource ? indexStraightness(this.world, this.player, this._pokeSource, this._straightA, this._straightB) : null;
   private readonly _rayOrigin = new Vector3();
   private readonly _rayDir = new Vector3();
   private readonly _pokeTip = new Vector3();
@@ -454,13 +503,25 @@ export class JoinSystem
     this.control.document.visible = false;
     this.control.document.position.set(0, PARKED_Y, 0);
     this.controlEntity = this.world.createTransformEntity(this.control.document);
+    this.debug = import.meta.env.DEV && devFlag('debug') ? new JoinDebug(this) : null;
+
     // Poke and ray select both arrive as UIKit clicks.
-    const onInner = () => this.requestJoinType('inner');
-    const onLeft = () => this.requestJoinType('left');
+    // Rays (and controllers) only: a fingertip presses through the contact poke.
+    const onInner = (event: unknown) => {
+      if (!isTouchPointerClick(event)) {
+        this.pressControl('inner', 'uikit-click');
+      }
+    };
+    const onLeft = (event: unknown) => {
+      if (!isTouchPointerClick(event)) {
+        this.pressControl('left', 'uikit-click');
+      }
+    };
     this.control.inner.addEventListener('click', onInner);
     this.control.left.addEventListener('click', onLeft);
-
-    this.debug = import.meta.env.DEV && devFlag('debug') ? new JoinDebug(this) : null;
+    if (import.meta.env.DEV && this.debug) {
+      this.registerTouchSurfaces();
+    }
 
     // Sound: built now (suspended); started by the first user gesture.
     sounds.init(this.world, { muted: import.meta.env.DEV && devFlag('mute') });
@@ -571,6 +632,7 @@ export class JoinSystem
     this.updatePreviewVisuals();
     this.updateLines();
     this.updatePinchSelect();
+    this.updateControlPoke();
     if (this.challengeLayout) {
       this.updateNullRayAndPoke();
     }
@@ -582,15 +644,15 @@ export class JoinSystem
    * result slab in the emulator, so this doesn't rely on them).
    * - Ray: on select start, each input's target ray is intersected with the
    *   slab's plane; a hit inside a NULL cell pokes it.
-   * - Poke: an index fingertip crossing the surface (from in front to within
-   *   NULL_POKE_DEPTH_METERS) over a NULL cell pokes it.
+   * - Poke: an index fingertip making contact with a NULL cell from the
+   *   viewer's side, by the same rules as the buttons (`contact-poke.ts`).
    * A pinch on the same press may also land; the activation debounce makes it count once.
    */
   private updateNullRayAndPoke(): void {
     const view = this.active;
     if (!view || this.state.phase !== 'joined' || view.doc.fade.peek() < 0.5) {
-      this.pokeDepth.left = Infinity;
-      this.pokeDepth.right = Infinity;
+      this.nullPoke.reset('left');
+      this.nullPoke.reset('right');
       return;
     }
     view.object.updateWorldMatrix(true, false);
@@ -614,30 +676,165 @@ export class JoinSystem
             if (import.meta.env.DEV && this.debug) {
               this.debug.note(`${hand} ray select on the NULL cell at row ${this._nullHit.row}, column ${this._nullHit.column}`);
             }
-            this.activateNullCell(view.key, this._nullHit.row, this._nullHit.column);
+            this.activateNullCell(view.key, this._nullHit.row, this._nullHit.column, 'ray');
           }
         }
       }
       // Poke.
       const source = this.input.xr.getPrimaryInputSource(hand);
       if (!source?.hand || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
-        this.pokeDepth[hand] = Infinity;
+        this.nullPoke.reset(hand);
         continue;
       }
+      this._pokeSource = source;
       this._a.copy(this._pokeTip);
       view.object.worldToLocal(this._a);
-      const depth = this._a.z;
-      const before = this.pokeDepth[hand];
-      this.pokeDepth[hand] = depth;
-      if (before > NULL_POKE_DEPTH_METERS && depth <= NULL_POKE_DEPTH_METERS && depth > -NULL_POKE_DEPTH_METERS) {
-        if (this.nearestNullCell(view, this._pokeTip) && this._nullHit.distance <= NULL_RAY_TOLERANCE_METERS) {
-          if (import.meta.env.DEV && this.debug) {
-            this.debug.note(`${hand} fingertip poke on the NULL cell at row ${this._nullHit.row}, column ${this._nullHit.column}`);
-          }
-          this.activateNullCell(view.key, this._nullHit.row, this._nullHit.column);
+      const verdict = this.nullPoke.update(hand, this._a, this.pokeOnNullCell, this.pokeStraightness);
+      if (verdict === 'press') {
+        if (import.meta.env.DEV && this.debug) {
+          this.debug.note(`${hand} fingertip poke on the NULL cell at row ${this._nullHit.row}, column ${this._nullHit.column}`);
         }
+        this.activateNullCell(view.key, this._nullHit.row, this._nullHit.column, 'poke');
+      } else if (verdict !== 'none' && import.meta.env.DEV && this.debug) {
+        this.notePokeRejected(hand, 'a NULL cell', verdict, this.nullPoke);
       }
     }
+  }
+
+  /**
+   * Contact pokes on the INNER | LEFT control's options, by the same rules
+   * as the NULL cells (`contact-poke.ts`); the UIKit click stays as a second
+   * path (`pressControl` counts a press once).
+   */
+  private updateControlPoke(): void {
+    const control = this.control;
+    if (this.state.phase !== 'joined' || !control.document.visible || control.fade.peek() < 0.5) {
+      this.controlPoke.reset('left');
+      this.controlPoke.reset('right');
+      return;
+    }
+    control.document.updateWorldMatrix(true, false);
+    for (const hand of HANDS) {
+      const source = this.input.xr.getPrimaryInputSource(hand);
+      if (!source?.hand || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
+        this.controlPoke.reset(hand);
+        continue;
+      }
+      this._pokeSource = source;
+      this._pokeLocal.copy(this._pokeTip);
+      control.document.worldToLocal(this._pokeLocal);
+      const verdict = this.controlPoke.update(hand, this._pokeLocal, this.pokeOnControl, this.pokeStraightness);
+      if (verdict === 'press') {
+        this.pressControl(this.pokedOption, 'poke');
+      } else if (verdict !== 'none' && import.meta.env.DEV && this.debug) {
+        this.notePokeRejected(hand, `the ${this.pokedOption.toUpperCase()} option`, verdict, this.controlPoke);
+      }
+    }
+  }
+
+  /** The option a control poke landed on (set by `pokeOnControl`). */
+  private pokedOption: JoinType = 'inner';
+
+  /**
+   * One press on the control from any path (UIKit click, pinch, contact
+   * poke): a poke and its UIKit click on the same touch count once.
+   */
+  private pressControl(joinType: JoinType, path: PressPath): void {
+    if (this.tweens.now - this.lastControlPress < CONTROL_PRESS_DEBOUNCE_SECONDS) {
+      return;
+    }
+    this.lastControlPress = this.tweens.now;
+    if (import.meta.env.DEV && this.debug) {
+      touchProbe.pressed(joinType.toUpperCase(), path);
+    }
+    this.requestJoinType(joinType);
+  }
+
+  /** Dev only: why a contact poke didn't count. */
+  private notePokeRejected(hand: string, target: string, verdict: PokeVerdict, poke: ContactPoke): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    const { toward, sideways, straightness } = poke.last;
+    this.debug.note(
+      verdict === 'rejected-direction'
+        ? `${hand} fingertip contact on ${target} rejected: it came in along the face (${cm(toward)} toward it, ` +
+            `${cm(sideways)} sideways; needs at least as much toward the face as sideways)`
+        : `${hand} fingertip contact on ${target} rejected: index finger not extended (straightness ` +
+            `${straightness === null ? 'n/a' : straightness.toFixed(2)}, needs ${MIN_INDEX_STRAIGHTNESS})`,
+    );
+  }
+
+  /**
+   * Dev only (`debug`): the control and the result slab's NULL cells, for
+   * the touch readout (touch-debug.ts), which logs every poke and pinch
+   * attempt on them and what it pressed.
+   */
+  private registerTouchSurfaces(): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    const control = this.control;
+    // The SDK's own poke pointer (a UIKit "touch" pointer): its down / up on each option.
+    const debug = this.debug;
+    for (const [name, option] of [
+      ['INNER', control.inner],
+      ['LEFT', control.left],
+    ] as const) {
+      for (const type of ['pointerdown', 'pointerup'] as const) {
+        const listener = (event: unknown) => {
+          const pointerType = (event as { pointerType?: string } | null)?.pointerType;
+          if (pointerType === 'touch') {
+            debug.note(`SDK poke pointer ${type === 'pointerdown' ? 'down' : 'up'} on ${name}`);
+          }
+        };
+        option.addEventListener(type, listener);
+        this.cleanupFuncs.push(() => option.removeEventListener(type, listener));
+      }
+    }
+    touchProbe.addSurface({
+      name: 'join-type control',
+      object: () => (control.document.visible && control.fade.peek() >= 0.5 ? control.document : null),
+      rects: (out) => {
+        setRect(out[0], 'INNER', control.innerCenterX, 0, control.optionWidthMeters, control.optionHeightMeters);
+        setRect(out[1], 'LEFT', control.leftCenterX, 0, control.optionWidthMeters, control.optionHeightMeters);
+        return 2;
+      },
+    });
+    touchProbe.addSurface({
+      name: 'result slab',
+      object: () => {
+        const view = this.active;
+        return view && this.state.phase === 'joined' && view.doc.fade.peek() >= 0.5 ? view.object : null;
+      },
+      rects: (out) => {
+        const view = this.active;
+        let count = 0;
+        if (!view) {
+          return 0;
+        }
+        for (let row = 0; row < view.nullColumns.length; row++) {
+          if (!view.rowShown[row]) {
+            continue;
+          }
+          for (const column of view.nullColumns[row]) {
+            if (count >= out.length) {
+              return count;
+            }
+            const span = view.doc.columnSpans[column];
+            setRect(
+              out[count++],
+              `NULL row ${row} ${view.result.columns[column].label}`,
+              (span.x0 + span.x1) / 2,
+              rowCenterLocalY(view.doc, view.rowSlot[row]),
+              span.x1 - span.x0,
+              view.doc.rowHeightMeters,
+            );
+          }
+        }
+        return count;
+      },
+    });
   }
 
   /** A pinch is a WebXR user gesture: try to start audio until it runs. */
@@ -945,6 +1142,8 @@ export class JoinSystem
             diffGutter: true,
             placeholderRows: RESULT_ROW_CAP,
             reserveRows: RESULT_ROW_CAP,
+            // The card's state, mirrored where the player looks (the card is beside it).
+            badge: true,
             accent: DATASETS[datasetOfTable(leftId) ?? 'shop'].theme.accent,
           }
         : {}),
@@ -1125,6 +1324,8 @@ export class JoinSystem
       glide.toPos.copy(home.pos);
       glide.toQuat.copy(home.quat);
       glide.elapsed = 0;
+      // (A join's fit glide may have shortened it.)
+      glide.duration = HOME_GLIDE_SECONDS;
     }
     this.layoutDirty = true;
   }
@@ -1132,6 +1333,13 @@ export class JoinSystem
   applyDiff(rowStatus: readonly RowStatus[] | null, missing: number): void {
     if (this.active && this.state.phase === 'joined') {
       this.setDiff(this.active, rowStatus, missing);
+    }
+  }
+
+  setResultBadge(text: string | null, look: SlabBadgeLook): void {
+    const view = this.active;
+    if (view && this.state.phase === 'joined') {
+      setSlabBadge(view.doc, text, look);
     }
   }
 
@@ -1193,7 +1401,7 @@ export class JoinSystem
     for (let row = 0; row < view.nullColumns.length; row++) {
       if (view.rowShown[row] && view.nullColumns[row].length > 0) {
         this.lastNullActivation = -Infinity;
-        this.activateNullCell(view.key, row, view.nullColumns[row][0]);
+        this.activateNullCell(view.key, row, view.nullColumns[row][0], 'debug-key');
         return true;
       }
     }
@@ -1310,6 +1518,7 @@ export class JoinSystem
     this.setDiff(view, null, 0);
     this.setWhereLine(view, null);
     this.setWinLook(false);
+    setSlabBadge(view.doc, null);
   }
 
   /**
@@ -1390,7 +1599,7 @@ export class JoinSystem
    * where its column IS NULL, or clear that filter if it's the one set.
    * A poke and a ray select on the same press count once.
    */
-  private activateNullCell(key: string, row: number, column: number): void {
+  private activateNullCell(key: string, row: number, column: number, path: PressPath): void {
     const view = this.results.get(key);
     const state = this.state;
     if (!view || this.active !== view || state.phase !== 'joined' || !view.rowShown[row] || view.doc.fade.peek() < 0.5) {
@@ -1400,6 +1609,9 @@ export class JoinSystem
       return;
     }
     this.lastNullActivation = this.tweens.now;
+    if (import.meta.env.DEV && this.debug) {
+      touchProbe.pressed(`NULL row ${row} ${view.result.columns[column].label}`, path);
+    }
     const filter = filterForColumn(view.leftTable, view.rightTable, view.result, column);
     const span = view.doc.columnSpans[column];
     this._a.set((span.x0 + span.x1) / 2, rowCenterLocalY(view.doc, view.rowSlot[row]), 0);
@@ -1453,6 +1665,10 @@ export class JoinSystem
    * world hit point): pokes the NULL cell under it, if there is one.
    */
   private onResultClick(key: string, event: unknown): void {
+    // A fingertip pokes through the contact poke (updateNullRayAndPoke), not the SDK's flickering touch pointer.
+    if (isTouchPointerClick(event)) {
+      return;
+    }
     const view = this.results.get(key);
     const point = (event as { point?: Vector3 } | null)?.point;
     if (import.meta.env.DEV && this.debug && !point) {
@@ -1472,7 +1688,7 @@ export class JoinSystem
       );
     }
     if (onCell) {
-      this.activateNullCell(key, this._nullHit.row, this._nullHit.column);
+      this.activateNullCell(key, this._nullHit.row, this._nullHit.column, 'uikit-click');
     }
   }
 
@@ -1736,11 +1952,29 @@ export class JoinSystem
     this.showResult(view);
     this.readHead();
     this.placeResult(view, left, right);
+    // A pair joined high (lifted toward the eyes) stacks the control, result
+    // and card above the view's top: the pair glides down, with the dock,
+    // until the group fits. Placement and the join sequence use the lowered
+    // pose; the LEFT slab then glides there from where it is.
+    const drop = this.fitDropForGroup(view, left, right);
+    if (drop > 0) {
+      left.object.position.y -= drop;
+      this.dock.toPos.y -= drop;
+      this.placeResult(view, left, right);
+    }
     const t1 = import.meta.env.DEV ? performance.now() : 0;
 
     this.playJoinSequence(view, left, right, joinType);
     const t2 = import.meta.env.DEV ? performance.now() : 0;
     this.warnIfOutOfView(view, left, right);
+    if (drop > 0) {
+      this.glideDown(left, drop);
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(
+          `join lowered the pair ${cm(drop)} so the group fits the view's top (+${VIEW_MAX_ABOVE_GAZE_DEG}°)`,
+        );
+      }
+    }
 
     if (import.meta.env.DEV && this.debug) {
       const t3 = performance.now();
@@ -1749,6 +1983,86 @@ export class JoinSystem
           `debug readout ${(t3 - t2).toFixed(1)} ms`,
       );
     }
+  }
+
+  /** Top edge (degrees from the natural gaze) of the joined group: the higher of the result slab (badge included) and the card beside it. */
+  private groupTopDeg(view: ResultView): number {
+    view.object.updateWorldMatrix(true, false);
+    this._groupTop.set(0, slabVisualTopLocalY(view.doc), 0);
+    view.object.localToWorld(this._groupTop);
+    let top = degreesFromForward(this._head, this.headPitchDown, this._groupTop);
+    const card = this.challengeLayout?.card;
+    if (card) {
+      card.object.updateWorldMatrix(true, false);
+      this._groupTop.set(0, card.heightMeters / 2, 0);
+      card.object.localToWorld(this._groupTop);
+      top = Math.max(top, degreesFromForward(this._head, this.headPitchDown, this._groupTop));
+    }
+    return top;
+  }
+
+  /**
+   * How far to lower the pair at a join so the group's top fits
+   * VIEW_MAX_ABOVE_GAZE_DEG: the smallest drop that fits, but never below
+   * where the LEFT slab rested before this puzzle moved it (its home), nor
+   * more than JOIN_MAX_FIT_DROP_METERS. 0 when it already fits. Leaves the
+   * pair and the dock target as they were (the caller applies the drop).
+   */
+  private fitDropForGroup(view: ResultView, left: SourceSlab, right: SourceSlab): number {
+    if (this.groupTopDeg(view) <= VIEW_MAX_ABOVE_GAZE_DEG + FIT_DROP_TOLERANCE_DEG) {
+      return 0;
+    }
+    const home = this.homes.get(left.id);
+    const maxDrop = home?.set
+      ? Math.min(JOIN_MAX_FIT_DROP_METERS, Math.max(0, left.object.position.y - home.pos.y))
+      : JOIN_MAX_FIT_DROP_METERS;
+    if (maxDrop <= 1e-3) {
+      return 0;
+    }
+    const startY = left.object.position.y;
+    const dockY = this.dock.toPos.y;
+    const topAt = (drop: number): number => {
+      left.object.position.y = startY - drop;
+      this.dock.toPos.y = dockY - drop;
+      this.placeResult(view, left, right);
+      return this.groupTopDeg(view);
+    };
+    let drop = maxDrop;
+    if (topAt(maxDrop) <= VIEW_MAX_ABOVE_GAZE_DEG) {
+      // The smallest drop that fits.
+      let lo = 0;
+      let hi = maxDrop;
+      for (let i = 0; i < FIT_DROP_SEARCH_STEPS; i++) {
+        const mid = (lo + hi) / 2;
+        if (topAt(mid) <= VIEW_MAX_ABOVE_GAZE_DEG) {
+          hi = mid;
+        } else {
+          lo = mid;
+        }
+      }
+      drop = hi;
+    }
+    left.object.position.y = startY;
+    this.dock.toPos.y = dockY;
+    this.placeResult(view, left, right);
+    return drop;
+  }
+
+  /** Glides the LEFT slab down by `drop` over the dock's duration (the RIGHT slab docks to it). */
+  private glideDown(slab: SourceSlab, drop: number): void {
+    const glide = this.glides.get(slab.id);
+    if (!glide) {
+      return;
+    }
+    glide.active = true;
+    glide.slab = slab;
+    glide.fromPos.copy(slab.object.position);
+    glide.fromQuat.copy(slab.object.quaternion);
+    glide.toPos.copy(slab.object.position);
+    glide.toPos.y -= drop;
+    glide.toQuat.copy(slab.object.quaternion);
+    glide.elapsed = 0;
+    glide.duration = DOCK_DURATION_SECONDS;
   }
 
   /**
@@ -2213,17 +2527,19 @@ export class JoinSystem
     if (this.challengeLayout) {
       this.placeBarBesideControl(this.challengeLayout.bar);
     }
-    // In challenge mode the card sits on the result slab: it must fit the view too.
+    // In challenge mode the card sits beside the result slab (not on top of
+    // it), so nothing stacks above the result.
     const card = this.challengeLayout?.card;
+    // Its status badge (challenge mode) rises above its top edge.
     this.placeAboveBand(
       view.object,
       view.doc.heightMeters,
       this.control.document,
       this.control.heightMeters,
-      card ? CARD_GAP_METERS + card.heightMeters : 0,
+      view.doc.tabHeightMeters,
     );
     if (card) {
-      this.placeCard(view.object, card);
+      this.placeCard(view.object, view.doc.widthMeters, card);
     }
   }
 
@@ -2407,13 +2723,37 @@ export class JoinSystem
     }
   }
 
-  /** Challenge mode: the puzzle card, just above a top-anchored slot (the result or the silhouette). */
-  private placeCard(slot: Object3D, card: PlacedElement): void {
+  /**
+   * Challenge mode: the puzzle card beside a top-anchored slot (the result
+   * slab, or the silhouette before the join), on the side away from the
+   * INNER | LEFT control (CARD_SIDE), tops aligned, then toed in to face the
+   * eyes. Beside rather than above keeps the stack short, so the whole
+   * group, and the slabs with it, sits nearer the gaze.
+   */
+  private placeCard(slot: Object3D, slotWidth: number, card: PlacedElement): void {
     slot.updateWorldMatrix(true, false);
-    slot.getWorldQuaternion(this._q2);
-    this._up.copy(UP).applyQuaternion(this._q2);
-    card.object.quaternion.copy(this._q2);
-    card.object.position.copy(slot.position).addScaledVector(this._up, CARD_GAP_METERS + card.heightMeters / 2);
+    // The slot's top-edge center (its origin: top-anchored) and how wide it
+    // looks from the eyes (half its width, as an angle).
+    this._d.copy(slot.position).sub(this._head);
+    const slotTopY = slot.position.y;
+    this._d.y = 0;
+    const slotHorizontal = Math.max(this._d.length(), 1e-3);
+    this._d.divideScalar(slotHorizontal);
+    const slotHalfAngle = Math.atan(slotWidth / 2 / slotHorizontal);
+    // On an arc at the card's planned distance (its fonts are sized for it),
+    // turned to the side by the slot's half-width, a gap, and its own half-width.
+    const cardHalfAngle = Math.atan(card.widthMeters / 2 / PLANNED_CARD_DISTANCE_METERS);
+    const turn = slotHalfAngle + MathUtils.degToRad(CARD_SIDE_GAP_DEG) + cardHalfAngle;
+    // +angle about +Y turns toward the viewer's left.
+    this._d.applyAxisAngle(UP, -CARD_SIDE * turn);
+    // Tops aligned: its center half its height below the slot's top edge.
+    const centerY = slotTopY - card.heightMeters / 2;
+    const rise = centerY - this._head.y;
+    const horizontal = Math.sqrt(Math.max(1e-4, PLANNED_CARD_DISTANCE_METERS ** 2 - rise * rise));
+    card.object.position.copy(this._head).addScaledVector(this._d, horizontal);
+    card.object.position.y = centerY;
+    // Toed in: its face (+Z) toward the eyes, no roll.
+    card.object.lookAt(this._head);
   }
 
   /**
@@ -2447,14 +2787,9 @@ export class JoinSystem
     a.object.getWorldQuaternion(this._q1);
     this._c.set(midX, topY, 0);
     a.object.localToWorld(this._c);
-    this.placeAboveBand(
-      slot.object,
-      slot.heightMeters,
-      layout.bar.object,
-      layout.bar.heightMeters,
-      CARD_GAP_METERS + layout.card.heightMeters,
-    );
-    this.placeCard(slot.object, layout.card);
+    this.placeAboveBand(slot.object, slot.heightMeters, layout.bar.object, layout.bar.heightMeters);
+    // Beside the silhouette, where it will be beside the result: no jump at the join.
+    this.placeCard(slot.object, slot.widthMeters, layout.card);
   }
 
   // --- Pinch near the control ---------------------------------------------------------
@@ -2489,7 +2824,7 @@ export class JoinSystem
         continue;
       }
       if (controlDistance < Infinity) {
-        this.requestJoinType(this.pinchNearest);
+        this.pressControl(this.pinchNearest, 'pinch');
         continue;
       }
       if (controlLive && this.challengeLayout) {
@@ -2512,7 +2847,9 @@ export class JoinSystem
     control.document.updateWorldMatrix(true, false);
     this._pinchB.copy(point);
     control.document.worldToLocal(this._pinchB);
-    const depth = Math.abs(this._pinchB.z);
+    // Signed: in front of the face (toward the eyes) is positive.
+    const front = this._pinchB.z;
+    const depth = Math.abs(front);
     const planar = (centerX: number) =>
       Math.hypot(
         Math.max(0, Math.abs(this._pinchB.x - centerX) - control.optionWidthMeters / 2),
@@ -2522,18 +2859,21 @@ export class JoinSystem
     const leftDistance = planar(control.leftCenterX);
     const nearest: JoinType = innerDistance <= leftDistance ? 'inner' : 'left';
     const distance = Math.min(innerDistance, leftDistance);
-    const selected = distance <= CONTROL_PINCH_MARGIN_METERS && depth <= CONTROL_PINCH_DEPTH_METERS;
+    const selected =
+      distance <= CONTROL_PINCH_MARGIN_METERS &&
+      front <= BUTTON_PINCH_FRONT_DEPTH_METERS &&
+      front >= -BUTTON_PINCH_BACK_DEPTH_METERS;
 
     if (import.meta.env.DEV && this.debug) {
       const name = nearest.toUpperCase();
       const already = this.state.phase === 'joined' && this.state.joinType === nearest;
       this.debug.note(
         `${hand} pinch evaluated against the control: pinch point ${cm(distance)} from ${name} in plane, ` +
-          `${cm(depth)} off its surface -> ` +
+          `${cm(depth)} ${front >= 0 ? 'in front of' : 'behind'} its surface -> ` +
           (selected
             ? `selected ${name}${already ? ' (already selected)' : ''}`
-            : `not selected (needs <= ${cm(CONTROL_PINCH_MARGIN_METERS)} in plane and ` +
-              `<= ${cm(CONTROL_PINCH_DEPTH_METERS)} off the surface)`),
+            : `not selected (needs <= ${cm(CONTROL_PINCH_MARGIN_METERS)} in plane, <= ` +
+              `${cm(BUTTON_PINCH_FRONT_DEPTH_METERS)} in front and <= ${cm(BUTTON_PINCH_BACK_DEPTH_METERS)} behind)`),
       );
     }
     this.pinchNearest = nearest;
@@ -2575,7 +2915,7 @@ export class JoinSystem
       }
     }
     if (selected) {
-      this.activateNullCell(view.key, bestRow, bestColumn);
+      this.activateNullCell(view.key, bestRow, bestColumn, 'pinch');
     }
   }
 
@@ -2837,7 +3177,7 @@ export class JoinSystem
       }
     }
 
-    // Challenge mode's puzzle card: viewed, above the result slab.
+    // Challenge mode's puzzle card: viewed, beside the result slab.
     const card = this.challengeLayout?.card;
     if (card) {
       card.object.updateWorldMatrix(true, false);
@@ -2852,10 +3192,31 @@ export class JoinSystem
         degreesFromForward(this._head, this.headPitchDown, this._d),
         degreesFromForward(this._head, this.headPitchDown, this._e),
       );
+      // Horizontally (degrees to the right of the result slab's center
+      // direction): the card's inner and outer edges, against the result's
+      // right edge -- the card must not cover the result in view.
+      const yawOf = (point: Vector3) =>
+        MathUtils.radToDeg(Math.atan2(point.x - this._head.x, -(point.z - this._head.z)));
+      this._d.set(0, -view.doc.heightMeters / 2, 0);
+      view.object.localToWorld(this._d);
+      const reference = yawOf(this._d);
+      this._d.set((CARD_SIDE * view.doc.widthMeters) / 2, -view.doc.heightMeters / 2, 0);
+      view.object.localToWorld(this._d);
+      const resultEdge = CARD_SIDE * (yawOf(this._d) - reference);
+      this._d.set(-CARD_SIDE * (card.widthMeters / 2), 0, 0);
+      card.object.localToWorld(this._d);
+      const cardInner = CARD_SIDE * (yawOf(this._d) - reference);
+      this._d.set(CARD_SIDE * (card.widthMeters / 2), 0, 0);
+      card.object.localToWorld(this._d);
+      const cardOuter = CARD_SIDE * (yawOf(this._d) - reference);
       debug.note(
-        `puzzle card (view only): center ${cardDistance.toFixed(2)} m from the eyes; ${cardEdges}; ` +
-          `${cm(card.widthMeters)} x ${cm(card.heightMeters)}`,
+        `puzzle card (view only, beside the result): center ${cardDistance.toFixed(2)} m from the eyes; ${cardEdges}; ` +
+          `${cm(card.widthMeters)} x ${cm(card.heightMeters)}; horizontally ${cardInner.toFixed(1)}° to ` +
+          `${cardOuter.toFixed(1)}° from the result's center (its edge at ${resultEdge.toFixed(1)}°)`,
       );
+      if (cardInner < resultEdge) {
+        debug.warn(`puzzle card overlaps the result slab in view (card inner edge ${cardInner.toFixed(1)}°, result edge ${resultEdge.toFixed(1)}°)`);
+      }
     }
     debug.note(
       `layout gaps in view: pair top -> control bottom ${(controlBottomDeg - pairTopDeg).toFixed(1)}°, ` +

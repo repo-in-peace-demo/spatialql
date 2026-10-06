@@ -29,6 +29,7 @@ import { challengeStart } from './challenge-start.js';
 import { DATASETS, type DatasetId } from './data/datasets.js';
 import { deskTransition, type DeskState } from './data/desk-session.js';
 import { tableLabel } from './data/join-result.js';
+import { DESK_EDGE_BEYOND_REACH_MAX_METERS, surfacePlacementCase, type SurfacePlacementCase } from './surface-placement.js';
 import type { Table } from './data/types.js';
 import { deskBridge, type DeskControls } from './desk-bridge.js';
 import { devFlag } from './dev-flags.js';
@@ -74,7 +75,9 @@ const SURFACE_HEIGHT_BELOW_HEAD = { min: 0.3, max: 0.95 };
 // Floating fallback: slab centers this far ahead of / below the head, which
 // keeps both centers within seated reach (TOUCH_REACH_MAX_METERS).
 const FLOATING_FORWARD_METERS = 0.42;
-const FLOATING_BELOW_HEAD_METERS = 0.3;
+// The group (slabs, control band, result with the card beside it) centered on the
+// natural gaze (8 deg down), every touchable center within reach.
+const FLOATING_BELOW_HEAD_METERS = 0.25;
 
 // On a surface: the slabs' bottom edges rest on it, this far ahead of the
 // head (horizontally), propped up to face the eyes.
@@ -127,6 +130,7 @@ type Slab = {
 const REJECT_NO_OBJECT = 'no object3D';
 const REJECT_NOT_BOUNDED = 'not a bounded 3D mesh';
 const REJECT_LABEL = 'label is not table/desk';
+// (Applies to planes as well as meshes: a headset session snapped to a "bed".)
 const REJECT_NOT_HORIZONTAL = 'plane is not horizontal';
 const REJECT_TOO_HIGH = `less than ${SURFACE_HEIGHT_BELOW_HEAD.min} m below head`;
 const REJECT_TOO_LOW = `more than ${SURFACE_HEIGHT_BELOW_HEAD.max} m below head`;
@@ -655,8 +659,9 @@ export class DeskPlacementSystem
     out.heightBelowHead = this._headPos.y - out.surfaceY;
 
     // Label is only checked after geometry so the debug readout still shows
-    // where a rejected mesh sits.
-    if (kind === 'mesh' && out.label !== 'table' && out.label !== 'desk') {
+    // where a rejected surface sits. Meshes and planes alike: only a table or
+    // desk is a desk (a bed, couch or shelf never is).
+    if (out.label !== 'table' && out.label !== 'desk') {
       out.reason = REJECT_LABEL;
       return false;
     }
@@ -692,8 +697,16 @@ export class DeskPlacementSystem
 
     this.lastSurfaceY = this._best.surfaceY;
     this.lastSurface = this._best;
-    this.placeOnSurface(this._best.surfaceY, this._best);
-    this.reportPlacement(`snapped to detected ${kind}`, 'surface', this._best);
+    const placement = this.placeOnSurface(this._best.surfaceY, this._best);
+    this.reportPlacement(
+      placement === 'floating'
+        ? `detected ${kind} beyond reach (floating kept)`
+        : placement === 'desk-edge'
+          ? `detected ${kind} just beyond reach (at reach, at its edge)`
+          : `snapped to detected ${kind}`,
+      placement === 'floating' ? 'floating' : 'surface',
+      this._best,
+    );
   }
 
   private commitForcedSurface(): void {
@@ -790,12 +803,11 @@ export class DeskPlacementSystem
     const ordersHalf = this.slabHeightMeters(rightSlab.doc) / 2;
     const leftOffset = SLAB_GAP_METERS / 2 + leftSlab.doc.widthMeters / 2;
     const rightOffset = SLAB_GAP_METERS / 2 + rightSlab.doc.widthMeters / 2;
-    const reachForward = Math.max(
-      FLOATING_FORWARD_METERS,
-      Math.min(
-        this.floatingReachForward(FLOATING_BELOW_HEAD_METERS, leftOffset),
-        this.floatingReachForward(FLOATING_BELOW_HEAD_METERS, rightOffset),
-      ),
+    // Reach wins: never farther than both centers' reach, even if that's
+    // nearer than FLOATING_FORWARD_METERS (a wide slab off to the side).
+    const reachForward = Math.min(
+      this.floatingReachForward(FLOATING_BELOW_HEAD_METERS, leftOffset),
+      this.floatingReachForward(FLOATING_BELOW_HEAD_METERS, rightOffset),
     );
     // Both centers sit at the same height and distance, so they share a lean.
     let forward = FLOATING_FORWARD_METERS;
@@ -846,9 +858,9 @@ export class DeskPlacementSystem
    * With a detected surface, that line's midpoint is clamped to the
    * surface's footprint.
    */
-  private placeOnSurface(surfaceY: number, surface: SurfaceAssessment | null): void {
+  private placeOnSurface(surfaceY: number, surface: SurfaceAssessment | null): SurfacePlacementCase | null {
     if (!this.canPlace()) {
-      return;
+      return null;
     }
     const [leftSlab, rightSlab] = this.slabs;
     this.setYawAxes(this._headYaw);
@@ -897,11 +909,46 @@ export class DeskPlacementSystem
       object.localToWorld(this._anchor);
     }
 
-    // Final leans from where the bottom edges actually ended up (the clamp
-    // to the surface footprint may have moved them).
+    // Reach wins over the surface: the clamp to the footprint may have pushed
+    // the bottom edges past reach (a desk edge half a metre away). A little
+    // past: sit at reach, at the desk's height, just in front of its edge.
+    // Farther: don't use the surface at all (floating).
     this._local.subVectors(this._anchor, this._headPos);
-    const anchorForward = Math.max(0.05, this._local.dot(this._forward));
+    let anchorForward = Math.max(0.05, this._local.dot(this._forward));
     const anchorEyeRise = this._headPos.y - (this._anchor.y + SURFACE_LIFT_METERS);
+    let reachForward = anchorForward;
+    for (let i = 0; i < FIT_ITERATIONS; i++) {
+      reachForward = Math.min(
+        this.surfaceReachForward(
+          anchorEyeRise,
+          customersHeight / 2,
+          eyeFacingLeanFromBottom(anchorEyeRise, reachForward, customersHeight),
+          leftOffset,
+        ),
+        this.surfaceReachForward(
+          anchorEyeRise,
+          ordersHeight / 2,
+          eyeFacingLeanFromBottom(anchorEyeRise, reachForward, ordersHeight),
+          rightOffset,
+        ),
+      );
+    }
+    const placement = surfacePlacementCase(anchorForward, reachForward);
+    if (import.meta.env.DEV && this.debug) {
+      console.log(
+        `[DeskPlacement debug] surface placement: ${placement} (the surface puts the slabs' bottom edges ` +
+          `${anchorForward.toFixed(2)} m ahead; reach allows ${reachForward.toFixed(2)} m; desk-edge up to ` +
+          `${DESK_EDGE_BEYOND_REACH_MAX_METERS} m beyond reach; surface ${(this._headPos.y - surfaceY).toFixed(2)} m below the eyes)`,
+      );
+    }
+    if (placement === 'floating') {
+      this.placeFloating();
+      return placement;
+    }
+    if (placement === 'desk-edge') {
+      this._anchor.addScaledVector(this._forward, reachForward - anchorForward);
+      anchorForward = reachForward;
+    }
     if (!this.isFrozen(leftSlab.entity, leftSlab.touched)) {
       const lean = eyeFacingLeanFromBottom(anchorEyeRise, anchorForward, customersHeight);
       this.proppedCenter(-leftOffset, customersHeight / 2, Math.sin(lean), Math.cos(lean));
@@ -913,6 +960,7 @@ export class DeskPlacementSystem
       this.applySlabTransform(rightSlab.entity, this._slabCenter, lean);
     }
     this.warnIfOutOfView();
+    return placement;
   }
 
   /** Bottom-edge distance keeping both edges of a propped slab in view. */
@@ -921,10 +969,11 @@ export class DeskPlacementSystem
     // The highest point is the name tab's top (the taller of the two).
     const tab = Math.max(0, ...this.slabs.map((slab) => slab.doc.tabHeightMeters));
     const topY = bottomY + (2 * half + tab) * cosLean;
-    return Math.max(
-      this.edgeFitDistance(this._headPos.y - bottomY, 0),
-      this.edgeFitDistance(this._headPos.y - topY, (2 * half + tab) * sinLean),
-    );
+    // Only the top edge is fitted: a slab resting on a desk keeps its bottom
+    // edge on the desk even when that's a few degrees under the view window
+    // (looking down at a desk is natural; approved 2026-10-07). The debug
+    // readout still warns when it is.
+    return this.edgeFitDistance(this._headPos.y - topY, (2 * half + tab) * sinLean);
   }
 
   private proppedCenter(lateral: number, half: number, sinLean: number, cosLean: number): void {

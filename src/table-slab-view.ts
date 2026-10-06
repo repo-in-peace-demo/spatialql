@@ -178,6 +178,8 @@ export type TableSlabDocument = {
    * placement add it (`slabVisualTopLocalY`).
    */
   tabHeightMeters: number;
+  /** Challenge mode's result slab: its status badge (null without one). */
+  badge: SlabBadgeView | null;
   /** Panel height (meters) with `visibleRows` data rows displayed. */
   heightForRowsMeters: (visibleRows: number) => number;
 };
@@ -227,7 +229,40 @@ export type SlabBuildOptions = {
    * part of the slab's own document, so grabbing it grabs the slab.
    */
   title?: { name: string; alias: string };
+  /**
+   * Challenge mode's result slab: a status badge on the top edge,
+   * right-aligned, mirroring the card ("Solved!", "Completed", "1 row
+   * missing"), hidden until set (`setSlabBadge`). Its height is always
+   * reserved (`tabHeightMeters`), so showing it never moves anything.
+   */
+  badge?: boolean;
 };
+
+/** The result slab's status badge (see `SlabBuildOptions.badge`). */
+export type SlabBadgeView = { container: Container; text: Text };
+export type SlabBadgeLook = 'won' | 'neutral';
+
+const COLOR_BADGE_WON = '#d08a1e';
+const COLOR_BADGE_WON_TEXT = '#1c1c1c';
+const COLOR_BADGE_NEUTRAL = '#4a4538';
+const COLOR_BADGE_NEUTRAL_TEXT = '#f7f4ee';
+
+/** Shows the badge with `text` in a look ("Solved!" gold; anything else neutral), or hides it (null). */
+export function setSlabBadge(doc: TableSlabDocument, text: string | null, look: SlabBadgeLook = 'neutral'): void {
+  const badge = doc.badge;
+  if (!badge) {
+    return;
+  }
+  if (text === null || text === '') {
+    badge.container.setProperties({ display: 'none' });
+    return;
+  }
+  badge.text.setProperties({ text, color: look === 'won' ? COLOR_BADGE_WON_TEXT : COLOR_BADGE_NEUTRAL_TEXT });
+  badge.container.setProperties({
+    display: 'flex',
+    backgroundColor: look === 'won' ? COLOR_BADGE_WON : COLOR_BADGE_NEUTRAL,
+  });
+}
 
 /** Rows shown for `table` under `maxRows`, and whether a "+N more" row follows. */
 function visibleRowLayout(table: Table, maxRows: number): { visibleRowCount: number; overflow: boolean } {
@@ -477,6 +512,41 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     );
     root.add(tab);
   }
+  // The status badge: the same kind of tab, right-aligned, hidden until set.
+  let badge: SlabBadgeView | null = null;
+  if (options.badge) {
+    const font = m.rowFont;
+    const badgeCm = tabHeightCm(font);
+    tabCm = Math.max(tabCm, badgeCm);
+    const container = new UIKit.Container({
+      positionType: 'absolute',
+      positionTop: -badgeCm,
+      positionRight: m.borderRadius,
+      height: badgeCm,
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingLeft: TAB_PADDING_X_EM * font,
+      paddingRight: TAB_PADDING_X_EM * font,
+      backgroundColor: COLOR_BADGE_NEUTRAL,
+      borderTopLeftRadius: m.borderRadius,
+      borderTopRightRadius: m.borderRadius,
+      opacity: fade,
+      pointerEvents: 'none',
+      display: 'none',
+    });
+    const text = new UIKit.Text({
+      text: '',
+      fontSize: font,
+      fontWeight: 'bold',
+      color: COLOR_BADGE_NEUTRAL_TEXT,
+      wordBreak: 'keep-all',
+      flexShrink: 0,
+      opacity: fade,
+    });
+    container.add(text);
+    root.add(container);
+    badge = { container, text };
+  }
 
   const captionHeightCm = captionHeightCmFor(options, m);
   const captionLines: Text[] = [];
@@ -725,6 +795,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     panelHeightCm: panelHeight,
     heightForRowsMeters,
     tabHeightMeters: tabCm / 100,
+    badge,
   };
 }
 

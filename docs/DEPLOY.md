@@ -22,6 +22,8 @@ production.
 | Challenge `?resetProgress`, `?puzzle=` and `?day=`, and the start-choice readout | Read or logged only inside `import.meta.env.DEV` checks |
 | The `[Slab]` truncation warning | Inside an `import.meta.env.DEV` check |
 | The in-headset debug panel (`src/debug-hud.ts`): console tap, frame-time line, swap button, `debugSide` | Dynamically imported only inside an `import.meta.env.DEV` check, with the `debug` flag on |
+| Debug log files: the page side (`src/debug-log-sink.ts`) and the touch readout (`src/touch-debug.ts`; `src/touch-probe.ts` is only called inside `import.meta.env.DEV` checks) | Loaded with the debug panel / behind `import.meta.env.DEV` |
+| The log endpoint `/__spatialql/log` (`vite.config.ts`) | A dev-server plugin (`apply: 'serve'`): not part of a build at all |
 
 Challenge mode itself ships, and is the default: the puzzles, the daily
 puzzle and its streak. The welcome screen's **Free play** button reloads the
@@ -76,7 +78,7 @@ Then check that no dev-only code made it into `dist/`. This should print
 nothing:
 
 ```
-grep -rlE "\[Grab debug\]|\[Join debug\]|\[DeskPlacement|\[seated\]|\[dev flags\]|spatialql\.debug|Option\+Shift|join: bring orders|@iwer|slab \(touch\)|pinch evaluated|group: top|\[Challenge debug\]|applying the solution|applying the wrong state|apply the puzzle|resetProgress|\[Slab\]|cut off with an ellipsis|switched to|\[HUD\]|frame p50|debugSide|start: daily|start: practice|from \?puzzle=" dist/
+grep -rlE "\[Grab debug\]|\[Join debug\]|\[DeskPlacement|\[seated\]|\[dev flags\]|spatialql\.debug|Option\+Shift|join: bring orders|@iwer|slab \(touch\)|pinch evaluated|group: top|\[Challenge debug\]|applying the solution|applying the wrong state|apply the puzzle|resetProgress|\[Slab\]|cut off with an ellipsis|switched to|\[HUD\]|frame p50|debugSide|start: daily|start: practice|from \?puzzle=|__spatialql/log|\[Touch debug\]|lines dropped|debugPanel|SDK poke pointer|join lowered the pair" dist/
 ```
 
 If it lists a file, some dev code survived the build (it can't run, because
@@ -214,7 +216,8 @@ headset as you save, with no deploy.
    `https://192.168.29.98:8081/?debug=1`. Also available: `mute=1`,
    `puzzle=<id>`, `day=YYYY-MM-DD` (pretend it's that day, for the daily and
    the streak), `resetProgress`, `mode=free` (the sandbox), and
-   `debugSide=left|right` for the debug panel.
+   `debugSide=left|right` for the debug panel, and `debugPanel=0` to hide the
+   panel while keeping the log file (for comparing frame times without it).
    - **Keep `seated` and `forceSurface` off on the Quest.** `seated` is an
      emulator aid that fights the real head pose; `forceSurface` replaces the
      real desk with a synthetic one.
@@ -246,3 +249,27 @@ its clearance from the nearest slab.
 
 For the full console, connect the Quest over USB and open `chrome://inspect`
 in Chrome on the Mac.
+
+### Headset logs
+
+With `?debug=1` on the dev server, everything the debug panel receives is
+also saved on the Mac, complete (not cut to fit the panel), under `logs/` in
+the project:
+
+- `logs/headset-YYYYMMDD-HHMMSS.log` from the Quest Browser,
+  `logs/desktop-YYYYMMDD-HHMMSS.log` from anything else (the emulator); one
+  file per page load.
+- A header (device, user agent, URL, stored flags, git commit), then one
+  timestamped line per entry: the tagged debug lines, every warning and
+  error (uncaught ones too), the full placement reports (head height and
+  pitch, reference space, surface candidates and the chosen one, each slab's
+  position, distance and edge angles), every poke and pinch attempt on the
+  control, bar and NULL cells with its outcome and input path
+  (`[Touch debug]`), head-height changes over 25 cm after placement, and the
+  frame-time line every 5 s.
+- Lines are sent in batches about once a second; if the dev server can't be
+  reached they're dropped, and the game is unaffected.
+- `logs/` is git-ignored; delete files whenever you like.
+
+After a headset session, ask Claude Code to read the newest file in `logs/`
+to diagnose it.

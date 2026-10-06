@@ -51,3 +51,43 @@ export function readPinchPoint(world: World, player: Object3D, source: XRInputSo
 export function readWristPoint(world: World, player: Object3D, source: XRInputSource, out: Vector3): boolean {
   return readJointsPoint(world, player, source, WRIST_JOINT, out);
 }
+
+/** The index finger's joints, knuckle to tip, one per lookup (no allocation per call). */
+const INDEX_CHAIN: readonly (readonly XRHandJoint[])[] = [
+  ['index-finger-metacarpal'],
+  ['index-finger-phalanx-proximal'],
+  ['index-finger-phalanx-intermediate'],
+  ['index-finger-phalanx-distal'],
+  ['index-finger-tip'],
+];
+
+/**
+ * How straight the index finger is: the knuckle-to-tip distance over the
+ * length along its joints (1 = fully straight; a curled finger is well
+ * under 0.8). Null if the hand or a joint isn't tracked (e.g. controllers).
+ * Uses `a` and `b` as scratch.
+ */
+export function indexStraightness(
+  world: World,
+  player: Object3D,
+  source: XRInputSource,
+  a: Vector3,
+  b: Vector3,
+): number | null {
+  if (!readJointsPoint(world, player, source, INDEX_CHAIN[0], a)) {
+    return null;
+  }
+  const startX = a.x;
+  const startY = a.y;
+  const startZ = a.z;
+  let along = 0;
+  for (let i = 1; i < INDEX_CHAIN.length; i++) {
+    if (!readJointsPoint(world, player, source, INDEX_CHAIN[i], b)) {
+      return null;
+    }
+    along += a.distanceTo(b);
+    a.copy(b);
+  }
+  const straight = Math.hypot(a.x - startX, a.y - startY, a.z - startZ);
+  return along > 1e-4 ? straight / along : null;
+}

@@ -17,9 +17,17 @@ describe('puzzle bar labels', () => {
     }
   });
 
+  it('Next fits both its labels (Next, and Skip after "Show answer")', () => {
+    const width = barButtonWidthCm([BAR.next, BAR.skip], LABEL_FONT_CM);
+    for (const label of [BAR.next, BAR.skip]) {
+      const needed = measureTextCm(label, HEADER_METRICS, LABEL_FONT_CM) + 2 * BAR_BUTTON_PADDING_EM * LABEL_FONT_CM;
+      expect(needed, label).toBeLessThanOrEqual(width + 1e-9);
+    }
+  });
+
   it('says what it shows next, in order, in plain ASCII', () => {
     expect(BAR.hintLabels).toEqual(['Hint', 'Another hint', 'Show answer']);
-    for (const label of [...BAR.hintLabels, BAR.next, BAR.clearFilter]) {
+    for (const label of [...BAR.hintLabels, BAR.next, BAR.skip, BAR.clearFilter]) {
       expect(label, label).toMatch(/^[\x20-\x7e]+$/);
     }
   });

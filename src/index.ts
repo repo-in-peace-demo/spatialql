@@ -48,6 +48,8 @@ World.create(
   // Dev-only `debug`: per-hand grab readout. Dropped from production.
   if (import.meta.env.DEV && devFlag('debug')) {
     void import('./grab-debug.js').then(({ GrabDebugSystem }) => world.registerSystem(GrabDebugSystem));
+    // Every poke and pinch attempt on the control, bar and NULL cells, with its outcome.
+    void import('./touch-debug.js').then(({ TouchDebugSystem }) => world.registerSystem(TouchDebugSystem));
   }
   if (import.meta.env.DEV && debugHud) {
     void debugHud.then(({ DebugHudSystem }) => world.registerSystem(DebugHudSystem));

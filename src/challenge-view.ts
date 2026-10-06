@@ -2,10 +2,11 @@
  * Challenge mode's UIKit pieces, built imperatively like the slabs and sized
  * by angle:
  *
- * - the **puzzle card**: view only, above the result slot. A title line
- *   (with a short diff summary on the right), the goal (2 lines), and a
- *   message (up to 3 lines: an intro, a hint, or the win line). Fixed size,
- *   so changing its text never changes its layout.
+ * - the **puzzle card**: view only, beside the result slot. A title line, a
+ *   status line (the diff summary, hints used, the streak), the goal (up to
+ *   3 lines) and a message (up to 5 lines: an intro, a hint, the answer, or
+ *   the win's takeaway and query line). Fixed size (card-metrics.ts), so
+ *   changing its text never changes its layout.
  * - the **puzzle bar**: Hint, Next and the filter chip (`WHERE ... IS NULL
  *   Clear`), in the control band next to INNER | LEFT. Touch targets at
  *   least the control's option size.
@@ -20,6 +21,7 @@ import { BookOpen } from '@pmndrs/uikit-lucide/dist/BookOpen.js';
 import { Coffee } from '@pmndrs/uikit-lucide/dist/Coffee.js';
 import { School } from '@pmndrs/uikit-lucide/dist/School.js';
 import { ShoppingBag } from '@pmndrs/uikit-lucide/dist/ShoppingBag.js';
+import { CARD_GOAL_LINES, CARD_MESSAGE_LINES, cardMetrics } from './card-metrics.js';
 import type { DatasetIcon } from './data/datasets.js';
 import { BAR_BUTTON_PADDING_EM, barButtonWidthCm } from './slab-metrics.js';
 import {
@@ -29,13 +31,6 @@ import {
   FONT_FAMILIES,
   measureHeaderTextCm,
 } from './table-slab-view.js';
-import {
-  fontCmForAngle,
-  HEADER_TEXT_TARGET_DEG,
-  MIN_ROW_FONT_CM,
-  PLANNED_CARD_DISTANCE_METERS,
-  ROW_TEXT_TARGET_DEG,
-} from './view-comfort.js';
 
 type Container = InstanceType<typeof UIKit.Container>;
 type Text = InstanceType<typeof UIKit.Text>;
@@ -54,27 +49,15 @@ const COLOR_HEADLINE = '#8a4b00';
 const HEADLINE_SCALE = 1.8;
 /** The dataset icon's size relative to the title text. */
 const ICON_SCALE = 1.25;
-/**
- * The card border's width: thicker than a slab's, so the dataset accent
- * reads. The padding gives up the same amount, so the card's height (and its
- * place in the view budget) doesn't change.
- */
-const CARD_BORDER_CM = 0.3;
-const PHASE2_CARD_BORDER_CM = 0.15;
-
 // --- Puzzle card ------------------------------------------------------------------
-
-/** Card width, in goal-font ems (~41 cm at the planned distance). */
-const CARD_WIDTH_EM = 30;
-const CARD_GOAL_LINES = 2;
-const CARD_MESSAGE_LINES = 3;
+// Narrow and tall: it sits beside the result slab (sizes in card-metrics.ts).
 
 export type PuzzleCardView = {
   document: UIKitDocument;
   fade: Signal<number>;
   root: Container;
   title: Text;
-  /** Short diff summary, right of the title. */
+  /** Short status (the diff summary, hints used, the streak), on its own line under the title. */
   status: Text;
   goal: Text;
   /** "Solved!", large, in the goal's slot while won. */
@@ -93,16 +76,13 @@ export type PuzzleCardView = {
 };
 
 export function buildPuzzleCard(): PuzzleCardView {
-  const goalFont = Math.max(MIN_ROW_FONT_CM, fontCmForAngle(HEADER_TEXT_TARGET_DEG, PLANNED_CARD_DISTANCE_METERS));
-  const smallFont = Math.max(MIN_ROW_FONT_CM, fontCmForAngle(ROW_TEXT_TARGET_DEG, PLANNED_CARD_DISTANCE_METERS));
-  const border = CARD_BORDER_CM;
-  const padding = smallFont * 0.8 - (CARD_BORDER_CM - PHASE2_CARD_BORDER_CM);
+  const { goalFont, smallFont, padding, border, widthCm } = cardMetrics();
   const gap = smallFont * 0.4;
-  const widthCm = CARD_WIDTH_EM * goalFont;
   const titleHeight = smallFont * LINE_HEIGHT_FACTOR;
   const goalHeight = CARD_GOAL_LINES * goalFont * LINE_HEIGHT_FACTOR;
   const messageHeight = CARD_MESSAGE_LINES * smallFont * LINE_HEIGHT_FACTOR;
-  const heightCm = 2 * (padding + border) + titleHeight + goalHeight + messageHeight + 2 * gap;
+  // Title, status, goal, message: the status has its own line at this width.
+  const heightCm = 2 * (padding + border) + 2 * titleHeight + goalHeight + messageHeight + 3 * gap;
 
   const fade = signal(1);
   const root = new UIKit.Container({
@@ -132,10 +112,10 @@ export function buildPuzzleCard(): PuzzleCardView {
 
   const titleRow = new UIKit.Container({
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
     height: titleHeight,
     flexShrink: 0,
+    overflow: 'hidden',
   });
   // The dataset's icon (one of four, shown by `setCardTheme`), then the title.
   const titleGroup = new UIKit.Container({ flexDirection: 'row', alignItems: 'center', gapColumn: smallFont * 0.4 });
@@ -163,10 +143,12 @@ export function buildPuzzleCard(): PuzzleCardView {
     color: COLOR_TEXT_SECONDARY,
     wordBreak: 'keep-all',
   });
-  titleRow.add(titleGroup, status);
+  titleRow.add(titleGroup);
 
   const block = (height: number) =>
     new UIKit.Container({ flexDirection: 'column', height, flexShrink: 0, overflow: 'hidden' });
+  const statusRow = block(titleHeight);
+  statusRow.add(status);
   const goalBlock = block(goalHeight);
   const goal = new UIKit.Text({ text: '', fontSize: goalFont, fontWeight: 'bold', color: COLOR_TEXT });
   // On a win, the headline takes the goal's two-line slot (the card can't grow).
@@ -181,12 +163,12 @@ export function buildPuzzleCard(): PuzzleCardView {
   goalBlock.add(goal, headline);
   const messageBlock = block(messageHeight);
   const message = new UIKit.Text({ text: '', fontSize: smallFont, color: COLOR_TEXT });
-  // On a win: the query line (pointing to the caption) and an optional note, each one line.
+  // On a win: the query line (pointing to the caption) and an optional note; they wrap if needed.
   const query = new UIKit.Text({ text: '', fontSize: smallFont, fontWeight: 'bold', color: COLOR_TEXT, display: 'none' });
   const note = new UIKit.Text({ text: '', fontSize: smallFont, color: COLOR_TEXT_SECONDARY, display: 'none' });
   messageBlock.add(message, query, note);
 
-  root.add(titleRow, goalBlock, messageBlock);
+  root.add(titleRow, statusRow, goalBlock, messageBlock);
   return {
     document: new UIKitDocument(root),
     fade,
@@ -218,24 +200,36 @@ export function setCardTheme(card: PuzzleCardView, theme: { accent: string; icon
   card.root.setProperties({ borderColor: theme.accent });
 }
 
-/** The win's three parts; `note` is an optional extra line (e.g. "More puzzles soon."). */
-export type CardWin = { headline: string; takeaway: string; query: string; note: string | null };
+/**
+ * The win's parts; `query` null hides the query line, `note` is an optional
+ * extra line (e.g. "More puzzles soon."). `completed`: finished after "Show
+ * answer" -- the neutral look, not the win's.
+ */
+export type CardWin = { headline: string; takeaway: string; query: string | null; note: string | null; completed?: boolean };
 
 /**
- * The card's won look: a warm fill and border (a coarse change, readable at
- * a glance), the headline in place of the goal, then the takeaway and the
- * query line. Null restores the playing look (the goal; the message empty).
+ * The card's finished look, the headline in place of the goal, then the
+ * takeaway and the query line. Solved: a warm fill, gold border and gold
+ * headline (a coarse change, readable at a glance). Completed after "Show
+ * answer": the normal card colors and a plain headline, so giving up never
+ * looks like winning. Null restores the playing look (the goal; the message
+ * empty).
  */
 export function setCardWin(card: PuzzleCardView, win: CardWin | null): void {
+  const won = !!win && !win.completed;
   card.root.setProperties({
-    backgroundColor: win ? COLOR_CARD_WON : COLOR_CARD,
-    borderColor: win ? COLOR_CARD_BORDER_WON : card.accent,
+    backgroundColor: won ? COLOR_CARD_WON : COLOR_CARD,
+    borderColor: won ? COLOR_CARD_BORDER_WON : card.accent,
   });
   card.goal.setProperties({ display: win ? 'none' : 'flex' });
-  card.headline.setProperties({ display: win ? 'flex' : 'none', text: win?.headline ?? '' });
+  card.headline.setProperties({
+    display: win ? 'flex' : 'none',
+    text: win?.headline ?? '',
+    color: won ? COLOR_HEADLINE : COLOR_TEXT,
+  });
   card.message.setProperties({ text: win?.takeaway ?? '' });
   card.query.setProperties({
-    display: win ? 'flex' : 'none',
+    display: win?.query ? 'flex' : 'none',
     text: win?.query ?? '',
     fontWeight: 'bold',
     color: COLOR_TEXT,
@@ -279,6 +273,8 @@ export type PuzzleBarView = {
   /** The hint button's label: what it shows next (see `setHintLabel`). */
   hintText: Text;
   next: Container;
+  /** Next's label: "Next", or "Skip" after "Show answer" (see `setNextLabel`). */
+  nextText: Text;
   /** The filter chip's label (the WHERE clause): not a target. */
   chip: Container;
   chipText: Text;
@@ -311,17 +307,17 @@ const CLEAR_BORDER_WIDTH = 0.15;
 
 /**
  * `labelFontCm`: the label size (the control's, sized by angle by the
- * caller). `labels.hint` lists every label the hint button shows; it starts
- * on the first and is sized for the widest.
+ * caller). `labels.hint` and `labels.next` list every label those buttons
+ * show; each starts on its first and is sized for the widest.
  */
 export function buildPuzzleBar(
   labelFontCm: number,
-  labels: { hint: readonly string[]; next: string; clear: string },
+  labels: { hint: readonly string[]; next: readonly string[]; clear: string },
 ): PuzzleBarView {
   const paddingX = labelFontCm * BAR_BUTTON_PADDING_EM;
   const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, labelFontCm * LINE_HEIGHT_FACTOR);
   const hintWidth = barButtonWidthCm(labels.hint, labelFontCm);
-  const nextWidth = barButtonWidthCm([labels.next], labelFontCm);
+  const nextWidth = barButtonWidthCm(labels.next, labelFontCm);
   const clearWidth = barButtonWidthCm([labels.clear], labelFontCm);
   const heightCm = buttonHeight + 2 * BAR_INSET;
 
@@ -374,7 +370,7 @@ export function buildPuzzleBar(
     return { container, text };
   };
   const hint = button(labels.hint[0] ?? '', hintWidth, false, null);
-  const next = button(labels.next, nextWidth, true, nextOpacity);
+  const next = button(labels.next[0] ?? '', nextWidth, true, nextOpacity);
   // The filter chip: the WHERE clause as a flat label on the track (no fill,
   // regular weight: it reads as the filter's text, not a button), then its
   // own Clear button, a bordered pill.
@@ -399,6 +395,7 @@ export function buildPuzzleBar(
     hint: hint.container,
     hintText: hint.text,
     next: next.container,
+    nextText: next.text,
     chip: chip.container,
     chipText: chip.text,
     clear: clear.container,
@@ -416,6 +413,11 @@ export function buildPuzzleBar(
 /** The hint button's label (its width already fits every label, so nothing resizes). */
 export function setHintLabel(bar: PuzzleBarView, label: string): void {
   bar.hintText.setProperties({ text: label });
+}
+
+/** Next's label, "Next" or "Skip" (sized for both, so nothing resizes). */
+export function setNextLabel(bar: PuzzleBarView, label: string): void {
+  bar.nextText.setProperties({ text: label });
 }
 
 /**

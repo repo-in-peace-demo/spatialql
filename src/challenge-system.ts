@@ -29,6 +29,7 @@ import {
   setCardTheme,
   setCardWin,
   setHintLabel,
+  setNextLabel,
   setNextAvailable,
   setNextWaiting,
   type BarButton,
@@ -45,17 +46,26 @@ import type { JoinState } from './data/join-state.js';
 import { buildWhereSql } from './data/join-sql.js';
 import {
   currentStreak,
+  dailyCompletedToday,
   dailySolvedToday,
   isSolved,
   markConceptSeen,
+  markDailyRevealed,
   markDailySolved,
   markSolved,
+  recordSkip,
   saveProgress,
   type KeyValueStorage,
   type Progress,
 } from './data/progress.js';
 import { PUZZLE_CHECKS } from './data/puzzle-checks.js';
-import { latestHintIndex, sessionTransition, startSession, type PuzzleSession } from './data/puzzle-session.js';
+import {
+  answerRevealed,
+  latestHintIndex,
+  sessionTransition,
+  startSession,
+  type PuzzleSession,
+} from './data/puzzle-session.js';
 import { puzzleText, type PuzzleText } from './data/puzzle-text.js';
 import {
   canActivatePuzzle,
@@ -75,14 +85,26 @@ import { devFlag } from './dev-flags.js';
 import { ChallengeDebug, type ChallengeDebugHost } from './challenge-debug.js';
 import { joinBridge, type ChallengeHooks, type ChallengeLayout, type JoinControls } from './join-bridge.js';
 import { sounds } from './sound.js';
+import { isTouchPointerClick, setRect, touchProbe, type PressPath } from './touch-probe.js';
+import {
+  BUTTON_PINCH_BACK_DEPTH_METERS,
+  BUTTON_PINCH_FRONT_DEPTH_METERS,
+  ContactPoke,
+  MIN_INDEX_STRAIGHTNESS,
+  POKE_TARGET_TOLERANCE_METERS,
+} from './contact-poke.js';
+import { indexStraightness, readJointsPoint } from './pinch.js';
 import { buildTableSlabDocument, MAX_RESULT_ROWS, type TableSlabDocument } from './table-slab-view.js';
 import { PLANNED_CONTROL_DISTANCE_METERS, PLANNED_RESULT_DISTANCE_METERS, slabTextSizeAt } from './view-comfort.js';
 
-/** A pinch presses a bar button within this of it in plane, and this far off its surface. */
+/** A pinch presses a bar button within this of it in plane (and BUTTON_PINCH_*_DEPTH_METERS off its face). */
 const BAR_PINCH_MARGIN_METERS = 0.015;
-const BAR_PINCH_DEPTH_METERS = 0.03;
+const HANDS = ['left', 'right'] as const;
+const INDEX_TIP: readonly XRHandJoint[] = ['index-finger-tip'];
 /** A ray select and a pinch on the same press count once. */
 const BAR_PRESS_DEBOUNCE_SECONDS = 0.3;
+/** How long "Solve it first, or use Hint." shows after pressing an inactive Next. */
+const STATUS_FLASH_SECONDS = 2.5;
 /** The card fades back in this fast when it changes puzzle (per second). */
 const CARD_FADE_IN_PER_SECOND = 3;
 /**
@@ -132,9 +154,34 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private cardPuzzleId: PuzzleId | null = null;
   /** Frames left before the card, bar and silhouette fade in after activation. */
   private revealFrames = 0;
+  /** When a brief status line ("Solve it first") gives way again (clock seconds; 0 = none). */
+  private statusFlashUntil = 0;
   private debug: ChallengeDebug | null = null;
   private readonly _point = new Vector3();
   private readonly _local = new Vector3();
+  /** Contact pokes on the bar's buttons. */
+  private readonly barPoke = new ContactPoke();
+  private _pokeSource: XRInputSource | null = null;
+  private pokedButton: BarButton | null = null;
+  private readonly _straightA = new Vector3();
+  private readonly _straightB = new Vector3();
+  /** Contact-poke hit test on the bar's shown buttons (the poke asks only at a contact). */
+  private readonly pokeOnBar = (): boolean => {
+    const bar = this.bar;
+    const dy = Math.max(0, Math.abs(this._local.y) - bar.buttonHeightMeters / 2);
+    let best = Infinity;
+    this.pokedButton = null;
+    for (const button of bar.buttons) {
+      const distance = Math.hypot(Math.max(0, Math.abs(this._local.x - button.centerX) - button.width / 2), dy);
+      if (distance < best) {
+        best = distance;
+        this.pokedButton = button.name;
+      }
+    }
+    return best <= POKE_TARGET_TOLERANCE_METERS;
+  };
+  private readonly pokeStraightness = (): number | null =>
+    this._pokeSource ? indexStraightness(this.world, this.player, this._pokeSource, this._straightA, this._straightB) : null;
 
   init(): void {
     if (!CHALLENGE_MODE) {
@@ -158,7 +205,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.cardEntity = this.world.createTransformEntity(this.card.document);
     this.bar = buildPuzzleBar(slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm, {
       hint: BAR.hintLabels,
-      next: BAR.next,
+      next: [BAR.next, BAR.skip],
       clear: BAR.clearFilter,
     });
     this.barEntity = this.world.createTransformEntity(this.bar.document);
@@ -166,9 +213,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     // system (barDistance / pressBarAt), which also weighs the control.
     this.barEntity.addComponent(PokeInteractable, {});
     this.barEntity.addComponent(RayInteractable, {});
-    const onHint = () => this.press('hint');
-    const onNext = () => this.press('next');
-    const onClear = () => this.press('clear');
+    // Rays (and controllers) only: a fingertip presses through the contact poke (updateBarPoke).
+    const onHint = (event: unknown) => !isTouchPointerClick(event) && this.press('hint', 'uikit-click');
+    const onNext = (event: unknown) => !isTouchPointerClick(event) && this.press('next', 'uikit-click');
+    const onClear = (event: unknown) => !isTouchPointerClick(event) && this.press('clear', 'uikit-click');
     this.bar.hint.addEventListener('click', onHint);
     this.bar.next.addEventListener('click', onNext);
     this.bar.clear.addEventListener('click', onClear);
@@ -188,6 +236,37 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
     this.debug = import.meta.env.DEV && devFlag('debug') ? new ChallengeDebug(this) : null;
     if (import.meta.env.DEV && this.debug) {
+      // The bar's buttons, for the touch readout (touch-debug.ts).
+      const bar = this.bar;
+      // The SDK's own poke pointer (a UIKit "touch" pointer): its down / up on each button.
+      const debug = this.debug;
+      for (const [name, button] of [
+        ['hint', bar.hint],
+        ['next', bar.next],
+        ['clear', bar.clear],
+      ] as const) {
+        for (const type of ['pointerdown', 'pointerup'] as const) {
+          const listener = (event: unknown) => {
+            if ((event as { pointerType?: string } | null)?.pointerType === 'touch') {
+              debug.note(`SDK poke pointer ${type === 'pointerdown' ? 'down' : 'up'} on ${name}`);
+            }
+          };
+          button.addEventListener(type, listener);
+          this.cleanupFuncs.push(() => button.removeEventListener(type, listener));
+        }
+      }
+      touchProbe.addSurface({
+        name: 'puzzle bar',
+        object: () => (bar.fade.peek() >= 0.5 ? bar.document : null),
+        rects: (out) => {
+          const count = Math.min(bar.buttons.length, out.length);
+          for (let i = 0; i < count; i++) {
+            const button = bar.buttons[i];
+            setRect(out[i], button.name, button.centerX, 0, button.width, bar.buttonHeightMeters);
+          }
+          return count;
+        },
+      });
       const solved = Object.keys(this.progress.solved).length;
       this.debug.note(
         `progress: ${solved} solved; starting at ${start.puzzleId} on ${start.datasetId}` +
@@ -199,7 +278,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
           ? `start: daily ${start.puzzleId} for ${isoFromDay(this.today)}, streak ${streak}`
           : start.reason === 'practice'
             ? `start: practice ${start.puzzleId} on ${isoFromDay(this.today)} (` +
-              (dailySolvedToday(this.progress.daily, this.today) ? 'daily already solved' : 'daily not offered yet') +
+              (dailySolvedToday(this.progress.daily, this.today)
+                ? 'daily already solved'
+                : dailyCompletedToday(this.progress.daily, this.today)
+                  ? 'daily already done with the answer'
+                  : 'daily not offered yet') +
               `), streak ${streak}`
             : `start: ${start.puzzleId} from ?puzzle= on ${isoFromDay(this.today)}, streak ${streak}`,
       );
@@ -243,6 +326,53 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     // Next pulses once the puzzle is won, until it's pressed.
     if (this.session.solved && this.nextAvailable()) {
       this.bar.nextOpacity.value = 0.75 + 0.25 * Math.sin(this.clock * 4);
+    }
+    // "Solve it first" (an inactive Next) gives way to the status it covered.
+    if (this.statusFlashUntil > 0 && this.clock >= this.statusFlashUntil) {
+      this.statusFlashUntil = 0;
+      this.card.status.setProperties({
+        text: this.session.solved ? this.solvedStatus() : this.lastComparison ? diffSummary(this.lastComparison.comparison) : '',
+      });
+    }
+    this.updateBarPoke();
+  }
+
+  /**
+   * Contact pokes on the bar's buttons (contact-poke.ts): on contact, from
+   * the viewer's side, index finger extended. The UIKit click stays as a
+   * second path; `press` counts a press once (its debounce).
+   */
+  private updateBarPoke(): void {
+    const bar = this.bar;
+    if (bar.fade.peek() < 0.5 || this.pending) {
+      this.barPoke.reset('left');
+      this.barPoke.reset('right');
+      return;
+    }
+    bar.document.updateWorldMatrix(true, false);
+    for (const hand of HANDS) {
+      const source = this.input.xr.getPrimaryInputSource(hand);
+      if (!source?.hand || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._point)) {
+        this.barPoke.reset(hand);
+        continue;
+      }
+      this._pokeSource = source;
+      this._local.copy(this._point);
+      bar.document.worldToLocal(this._local);
+      const verdict = this.barPoke.update(hand, this._local, this.pokeOnBar, this.pokeStraightness);
+      if (verdict === 'press' && this.pokedButton) {
+        this.press(this.pokedButton, 'poke');
+      } else if (verdict !== 'none' && verdict !== 'press' && import.meta.env.DEV && this.debug) {
+        const { toward, sideways, straightness } = this.barPoke.last;
+        const cm = (m: number) => `${(m * 100).toFixed(1)} cm`;
+        this.debug.note(
+          verdict === 'rejected-direction'
+            ? `${hand} fingertip contact on ${this.pokedButton} rejected: it came in along the face (${cm(toward)} ` +
+                `toward it, ${cm(sideways)} sideways; needs at least as much toward the face as sideways)`
+            : `${hand} fingertip contact on ${this.pokedButton} rejected: index finger not extended (straightness ` +
+                `${straightness === null ? 'n/a' : straightness.toFixed(2)}, needs ${MIN_INDEX_STRAIGHTNESS})`,
+        );
+      }
     }
   }
 
@@ -289,6 +419,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this.lastComparison = null;
       join.applyDiff(null, 0);
       join.setWinLook(false);
+      join.setResultBadge(null, 'neutral');
       this.card.status.setProperties({ text: '' });
       return;
     }
@@ -301,7 +432,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     const comparison = compareToTarget(output, this.target);
     this.lastComparison = { output, comparison };
     join.applyDiff(comparison.rowStatus, comparison.missing.length);
-    join.setWinLook(comparison.solved);
+    // The gold win look only for a real solve, never after "Show answer".
+    join.setWinLook(comparison.solved && !answerRevealed(this.session));
     this.card.status.setProperties({ text: this.session.solved ? this.solvedStatus() : diffSummary(comparison) });
 
     // The antijoin intro: the first time a LEFT result shows NULLs.
@@ -318,9 +450,28 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (comparison.solved && !this.session.solved) {
       this.win();
     }
+    this.updateBadge();
     if (import.meta.env.DEV && this.debug) {
       this.debug.logComparison(this.puzzle, output, comparison);
     }
+  }
+
+  /**
+   * The result slab's badge mirrors the card's state where the player is
+   * looking (the card is off to the side): "Solved!" in gold, "Completed",
+   * or the diff summary; hidden when there's nothing to say.
+   */
+  private updateBadge(): void {
+    const join = this.join;
+    if (!join) {
+      return;
+    }
+    if (this.session.solved) {
+      const revealed = answerRevealed(this.session);
+      join.setResultBadge(revealed ? CARD.completedHeadline : CARD.headline, revealed ? 'neutral' : 'won');
+      return;
+    }
+    join.setResultBadge(this.lastComparison ? diffSummary(this.lastComparison.comparison) || null : null, 'neutral');
   }
 
   onPhase(phase: JoinState['phase']): void {
@@ -340,7 +491,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this.debug.notePinch(hand, button, this.lastPinchDistance);
     }
     if (button) {
-      this.press(button);
+      this.press(button, 'pinch');
     }
   }
 
@@ -352,7 +503,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   debugNext(): void {
     this.lastPress = -Infinity;
-    this.press('next');
+    this.press('next', 'debug-key');
   }
 
   debugPrev(): void {
@@ -554,28 +705,52 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
   }
 
+  /**
+   * The puzzle matches its target. Solved (at most two hints): the win --
+   * "Solved!", gold, the win sound, streak credit for a daily. After "Show
+   * answer": completed, not solved -- "Completed" in the neutral look, a soft
+   * confirmation, recorded as revealed, and a daily only bridges the streak.
+   * The takeaway shows either way: the learning still matters.
+   */
   private win(): void {
     this.session = sessionTransition(this.session, { type: 'evaluate', solved: true });
-    // Recorded first, so Next and the streak below see this solve. Today's
-    // daily also extends the streak (once per day: a repeat changes nothing).
-    this.progress = markSolved(this.progress, this.puzzle.id, this.today, this.session.hintsShown);
+    const revealed = answerRevealed(this.session);
+    // Recorded first, so Next and the streak below see it.
+    this.progress = markSolved(this.progress, this.puzzle.id, this.today, this.session.hintsShown, revealed);
     if (this.isDaily) {
-      this.progress = markDailySolved(this.progress, this.today);
+      this.progress = revealed
+        ? markDailyRevealed(this.progress, this.today)
+        : markDailySolved(this.progress, this.today);
     }
     this.save();
     this.introShown = false;
-    // Solved! / why it worked / the query it wrote (honest after the full answer).
-    setCardWin(this.card, {
-      headline: CARD.headline,
-      takeaway: this.text.takeaway,
-      query: this.session.solvedWithAnswer ? CARD.winWithAnswer : CARD.win,
-      note: this.nextId() === null ? CARD.morePuzzlesSoon : null,
-    });
+    const lastNote = this.nextId() === null ? CARD.morePuzzlesSoon : null;
+    if (revealed) {
+      // A daily says why the streak didn't grow. A fan-out takeaway takes two
+      // lines, so there the note stands in for the query line (the caption
+      // on the result slab shows the query anyway).
+      const note = this.isDaily ? CARD.streakNeedsSolve : lastNote;
+      const twoLineTakeaway = !!this.puzzle.fanOutHighlight;
+      setCardWin(this.card, {
+        headline: CARD.completedHeadline,
+        takeaway: this.text.takeaway,
+        query: note && twoLineTakeaway ? null : CARD.winWithAnswer,
+        note,
+        completed: true,
+      });
+    } else {
+      // Solved! / why it worked / the query it wrote.
+      setCardWin(this.card, { headline: CARD.headline, takeaway: this.text.takeaway, query: CARD.win, note: lastNote });
+    }
     // The title row's right-hand slot (the diff summary while playing).
     this.card.status.setProperties({ text: this.solvedStatus() });
     this.card.document.updateWorldMatrix(true, false);
     this._point.setFromMatrixPosition(this.card.document.matrixWorld);
-    sounds.playWin(this._point);
+    if (revealed) {
+      sounds.playComplete(this._point);
+    } else {
+      sounds.playWin(this._point);
+    }
     // A fan-out win explains its surprise: the rows that repeat pulse while
     // the takeaway says why.
     const cause = this.puzzle.fanOutHighlight;
@@ -605,8 +780,17 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       return;
     }
     if (!this.session.solved) {
-      this.setMessage(this.text.hints[index]);
+      if (answerRevealed(this.session)) {
+        // The answer, then what to do with it: the moves still finish it, or
+        // Next (now Skip) moves on.
+        setCardIntro(this.card, this.text.hints[index], [CARD.answerNext]);
+        this.messageText = this.text.hints[index];
+        this.introShown = true;
+      } else {
+        this.setMessage(this.text.hints[index]);
+      }
     }
+    this.updateNextLook();
     this.bar.document.updateWorldMatrix(true, false);
     this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
     if (this.session !== before) {
@@ -625,8 +809,46 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   }
 
   private next(): void {
+    if (this.canSkip()) {
+      this.skip();
+      return;
+    }
     const nextId = this.nextAvailable() ? this.nextId() : null;
     if (!nextId) {
+      return;
+    }
+    this.join?.resetToHome();
+    this.loadPuzzle(nextId);
+  }
+
+  /**
+   * Skip is offered once the answer is showing and the puzzle isn't done:
+   * not solved now, and not completed before (a replay of a completed
+   * puzzle just has Next).
+   */
+  private canSkip(): boolean {
+    return (
+      !this.pending &&
+      !!this.puzzle &&
+      !this.session.solved &&
+      answerRevealed(this.session) &&
+      !isSolved(this.progress, this.puzzle.id)
+    );
+  }
+
+  /**
+   * Skip: records the puzzle as revealed (it unlocks the next one; a daily
+   * gets no streak credit, only the one-day bridge) and goes to the next.
+   */
+  private skip(): void {
+    this.progress = recordSkip(this.progress, this.puzzle.id, this.today, this.session.hintsShown, this.isDaily);
+    this.save();
+    const nextId = this.nextId();
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`skipped ${this.puzzle.id} after the answer (recorded as revealed); next: ${nextId ?? 'none'}`);
+    }
+    if (!nextId) {
+      this.updateNextLook();
       return;
     }
     this.join?.resetToHome();
@@ -638,8 +860,14 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     return nextPuzzle(this.progress, this.puzzle.id, this.today, PLAYABLE);
   }
 
-  /** The status line once solved: the streak for today's daily, else how many hints it took, if any. */
+  /**
+   * The status line once finished: after "Show answer", that all three hints
+   * were used; for a solved daily, the streak; else how many hints it took.
+   */
   private solvedStatus(): string {
+    if (answerRevealed(this.session)) {
+      return CARD.usedAllHints;
+    }
     if (this.isDaily && dailySolvedToday(this.progress.daily, this.today)) {
       return WELCOME.streak(currentStreak(this.progress.daily, this.today));
     }
@@ -647,13 +875,20 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   }
 
   private nextAvailable(): boolean {
+    if (this.canSkip()) {
+      // Where Skip would go, with the skip recorded.
+      const skipped = recordSkip(this.progress, this.puzzle.id, this.today, this.session.hintsShown, this.isDaily);
+      return nextPuzzle(skipped, this.puzzle.id, this.today, PLAYABLE) !== null;
+    }
     return (
       !this.pending && this.nextId() !== null && (this.session.solved || isSolved(this.progress, this.puzzle.id))
     );
   }
 
+  /** Next's look (active or not) and label ("Skip" while the answer is showing and the puzzle isn't done). */
   private updateNextLook(): void {
     setNextAvailable(this.bar, this.nextAvailable());
+    setNextLabel(this.bar, this.canSkip() ? BAR.skip : BAR.next);
   }
 
   private setMessage(text: string): void {
@@ -684,7 +919,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   // --- The bar's buttons -----------------------------------------------------------------
 
-  private press(button: BarButton): void {
+  private press(button: BarButton, path: PressPath): void {
     if (this.clock - this.lastPress < BAR_PRESS_DEBOUNCE_SECONDS) {
       return;
     }
@@ -694,6 +929,22 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       return;
     }
     this.lastPress = this.clock;
+    if (import.meta.env.DEV && this.debug) {
+      touchProbe.pressed(button, path);
+    }
+    // An inactive Next does nothing, so it makes no click either. Before the
+    // puzzle is done, the card says why, briefly.
+    if (button === 'next' && !this.nextAvailable()) {
+      const done = !!this.puzzle && (this.session.solved || isSolved(this.progress, this.puzzle.id));
+      if (!done && !this.pending) {
+        this.card.status.setProperties({ text: CARD.solveFirst });
+        this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
+      }
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(`Next pressed while inactive (${done ? 'no next puzzle' : 'not solved yet'}): no click`);
+      }
+      return;
+    }
     this.bar.document.updateWorldMatrix(true, false);
     this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
     sounds.playClick(this._point);
@@ -722,7 +973,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this._local.copy(point);
     bar.document.worldToLocal(this._local);
     this.lastPinchDistance = Infinity;
-    if (Math.abs(this._local.z) > BAR_PINCH_DEPTH_METERS) {
+    // Up to 6 cm in front of the face (players pinch in front of a button), 3 cm behind it.
+    if (this._local.z > BUTTON_PINCH_FRONT_DEPTH_METERS || this._local.z < -BUTTON_PINCH_BACK_DEPTH_METERS) {
       return null;
     }
     let best: BarButton | null = null;

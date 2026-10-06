@@ -24,7 +24,7 @@ events and logged state; nothing has been tested on a real Quest yet.
 | Area | What's built | Verified |
 | --- | --- | --- |
 | Placement | Slabs rest on a detected desk (or a synthetic one with `forceSurface`), or float at desk height; natural heights, bottom edges aligned. | Emulator: placement and reach logs, screenshots, nothing cut off |
-| Reach and view | Touchable elements within 0.60 m; whole group within an 80° window around the 18° natural gaze. | Emulator: slabs 0.55–0.60 m, control 0.45–0.47 m, group 56.5–59.2° of 80° |
+| Reach and view | Touchable elements within 0.60 m; whole group within an 80° window around the 8° natural gaze (was 18°; retuned from headset logs). On a desk, slab bottoms may sit a few degrees under the window (approved; the readout still warns). | Emulator: slabs 0.55–0.60 m, control 0.45–0.47 m; re-measure with the 8° gaze pending |
 | Text size | Sized by angle (rows 1.15°, headers 1.3°) from planned distances; ≥ 0.9 cm. | Emulator: source rows 1.10–1.12°, result 1.08–1.11° |
 | Grab | Hand pinch grabs a source slab when the palm is within 7 cm. | Emulator: grab and "no grab" reasons logged |
 | Join | Preview within 6 cm, commit on release, dock with bottoms aligned. | Emulator: grab-and-release joins, J / Shift+J |
@@ -46,14 +46,15 @@ events and logged state; nothing has been tested on a real Quest yet.
 | **Result slab is not grabbable.** | It's derived output; making it grabbable created a grab hazard next to the control. It follows the pair. |
 | **Pinch-to-grab on** (`useHandPinchForGrab`). | Hands have no grip button; pinch is the natural grab gesture on Quest. |
 | **Reach limit 0.60 m** (`TOUCH_REACH_MAX_METERS`) for everything you touch. | Seated use, within about 2 ft; reach wins over the view limits. |
-| **Natural gaze 18°** below horizontal (`NATURAL_GAZE_PITCH_DEG`), with an 80° group window. | Seated desk work looks slightly down; a fixed gaze keeps placement independent of where the user looked at session start. |
+| **Natural gaze 8°** below horizontal (`NATURAL_GAZE_PITCH_DEG`), with an 80° group window. | A fixed gaze keeps placement independent of where the user looked at session start. It was 18° (seated desk work); on the Quest 3S, seated users held their heads 2–6° down, so 8°. The debug log records head pitch every 10 s for further tuning. |
 | **Text sized by angle**, not centimeters. | Slabs at arm's length were physically oversized; angular sizing keeps text readable at any distance and the group in view. |
 | **Bottoms-aligned slabs** at their natural heights. | Both rest on a real desk (nothing hovers or sinks); rows don't need to line up, since matches are shown by color and lines. |
 
 ## Open items for headset testing
 
 - Hand-tracking feel of the grab, the preview "magnet", and release drift.
-- Reach and view constants (0.60 m, 18° gaze, 80° window) at a real desk.
+- Reach and view constants (0.60 m, 8° gaze, 80° window) at a real desk;
+  the head-pitch lines in the debug log show how people actually hold their heads.
 - Text size at the 1.15° / 1.3° targets.
 - Sound, by ear: overall level and balance (measured: snap -6.9 dBFS, ticks
   -18.3 to -21.4, resolve -16.1, drop tap -11.0).
@@ -62,6 +63,10 @@ events and logged state; nothing has been tested on a real Quest yet.
 - A hitch at join start: a 112 ms long task seen once on desktop (while the
   profiler ran) didn't reproduce; the dev long-task readout will show one on
   a Quest.
+- **Watch:** two long tasks (66 ms, 74 ms) at XR session start on the Quest
+  3S (headset log of 2026-10-06), none during play. Check whether they
+  recur and what runs then (session start: placement, reference space,
+  documents).
 - Poking the control (pinch and ray are verified; poke needs a real pointing
   hand).
 - The approach glow and hum, by moving a slab by hand.
@@ -116,7 +121,7 @@ Since phase 4:
   haven't been used. Try `npx @iwsdk/cli reference warmup`, then `/mcp`.
 - **The seated head must be set by hand** in the emulator: the `seated` flag
   can't move the emulated headset, and logs `the seated pose did NOT take`.
-  Set headset Pos Y = 1.2, Rot X = -18, then re-enter XR.
+  Set headset Pos Y = 1.2, Rot X = -8, then re-enter XR.
 - **The managed Chromium window has no audio:** it's launched by Playwright,
   which normally mutes Chromium's output. To hear the sounds, use a normal
   browser tab on the dev server, or the headset. The debug log still proves

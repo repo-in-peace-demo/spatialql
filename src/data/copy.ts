@@ -243,8 +243,18 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
 export const CARD = {
   practiceTitle: (number: number, dataset: DatasetId) => `Puzzle ${number}: ${DATASET_TITLES[dataset]}`,
   dailyTitle: (dataset: DatasetId) => `Today's puzzle: ${DATASET_TITLES[dataset]}`,
-  /** Win headline (large, gold), always: even after the full-answer hint, it was solved. */
+  /** Win headline (large, gold): solved with at most two hints. */
   headline: 'Solved!',
+  /** Headline after "Show answer" (large, neutral): completed, not solved. */
+  completedHeadline: 'Completed',
+  /** The title row's right-hand slot after "Show answer". */
+  usedAllHints: 'You used all 3 hints.',
+  /** A daily completed after "Show answer": why the streak didn't grow. */
+  streakNeedsSolve: 'Streak needs a solve without the answer.',
+  /** Next pressed before the puzzle is done (briefly, in the title row's right-hand slot). */
+  solveFirst: 'Solve it first, or use Hint.',
+  /** Under the answer (after "Show answer"): the moves still finish it, or Next (now Skip) moves on. */
+  answerNext: 'Make these moves to finish, or skip.',
   /** Win query line, pointing to the highlighted caption on the result slab below. */
   win: 'Your moves wrote this query:',
   /** The query line when the full-answer hint was shown (honest: the moves were given). */
@@ -274,6 +284,8 @@ export const BAR = {
    */
   hintLabels: ['Hint', 'Another hint', 'Show answer'] as const,
   next: 'Next',
+  /** Next after "Show answer", before the moves are made: moves on, recorded as revealed. */
+  skip: 'Skip',
   prev: 'Prev',
   daily: 'Today',
   /** The filter chip's own button, after its WHERE clause. */
@@ -310,6 +322,11 @@ export const WELCOME = {
   /** Before the daily is offered (practice 1-3 not all solved). */
   practiceFirst: 'Start with 3 short practice puzzles.',
   practiceProgress: (solved: number, total: number) => `Practice ${solved}/${total}`,
+  /** When some were completed after "Show answer": they count in the total, and are named. */
+  practiceProgressWithAnswers: (completed: number, total: number, revealed: number) =>
+    `Practice ${completed}/${total} (${revealed} with answer)`,
+  /** Today's daily, completed after "Show answer". */
+  dailyRevealed: "Today's puzzle: done with the answer.",
   dailyOpen: (dataset: DatasetId) => `Today's puzzle: ${DATASET_TITLES[dataset]}`,
   dailyDone: "Today's puzzle: solved. New one tomorrow.",
   streak: (days: number) => (days === 1 ? 'Streak: 1 day' : `Streak: ${days} days`),

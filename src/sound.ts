@@ -32,6 +32,7 @@ export type SoundName =
   | 'slideOut'
   | 'release'
   | 'win'
+  | 'complete'
   | 'hint'
   | 'tablesOut'
   | 'tablesIn';
@@ -61,6 +62,8 @@ const RESOLVE_GAIN = 0.42;
 const WIN_GAIN = 0.4;
 /** Hint: a soft chime, quieter than the win. */
 const HINT_GAIN = 0.22;
+/** Completed after "Show answer": a soft, neutral confirmation at about the hint's level (no win). */
+const COMPLETE_GAIN = 0.22;
 /** Dataset switch: soft, below the snap (it accompanies a 0.35 s animation, not an event). */
 const TABLES_SWEEP_GAIN = 0.16;
 const TABLES_TONE_GAIN = 0.28;
@@ -277,6 +280,23 @@ class JoinSounds {
         osc.frequency.value = freq;
         envelope(ctx, osc, filter, t + offset, WIN_GAIN, 0.006, 0.35);
       }
+    });
+  }
+
+  /**
+   * Completed after "Show answer": a soft, neutral confirmation -- one low,
+   * mellow note (no rising triad, so it never sounds like a win).
+   */
+  playComplete(at: Position, delay = 0): void {
+    this.oneShot('complete', at, delay, (ctx, out, t) => {
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 1800;
+      filter.connect(out);
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = 392;
+      envelope(ctx, osc, filter, t, COMPLETE_GAIN, 0.01, 0.3);
     });
   }
 

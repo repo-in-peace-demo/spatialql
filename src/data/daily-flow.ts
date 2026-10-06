@@ -19,10 +19,13 @@ import { dailyPuzzleId } from './daily.js';
 import { resumePuzzle } from './desk-session.js';
 import {
   currentStreak,
+  dailyCompletedToday,
+  dailyRevealedToday,
   dailySolvedToday,
   isSolved,
   isUnlocked,
   nextPracticePuzzle,
+  practiceRevealedCount,
   practiceSolvedCount,
   type Progress,
 } from './progress.js';
@@ -54,9 +57,12 @@ export function isTodaysDaily(progress: Progress, id: PuzzleId, today: number, o
 
 export type StartChoice = { puzzleId: PuzzleId; reason: 'daily' | 'practice' };
 
-/** The puzzle a session starts on: today's daily while it's offered and unsolved, else practice. */
+/**
+ * The puzzle a session starts on: today's daily while it's offered and not
+ * done (solved, or completed after "Show answer"), else practice.
+ */
 export function startPuzzle(progress: Progress, today: number, order: readonly PuzzleId[]): StartChoice {
-  if (dailyOffered(progress, order) && !dailySolvedToday(progress.daily, today)) {
+  if (dailyOffered(progress, order) && !dailyCompletedToday(progress.daily, today)) {
     return { puzzleId: dailyPuzzleId(today), reason: 'daily' };
   }
   return { puzzleId: resumePuzzle(progress, order), reason: 'practice' };
@@ -71,7 +77,7 @@ export function startPuzzle(progress: Progress, today: number, order: readonly P
 export function nextPuzzle(progress: Progress, current: PuzzleId, today: number, order: readonly PuzzleId[]): PuzzleId | null {
   const daily = dailyPuzzleId(today);
   const offered = dailyOffered(progress, order);
-  if (offered && !dailySolvedToday(progress.daily, today) && daily !== current) {
+  if (offered && !dailyCompletedToday(progress.daily, today) && daily !== current) {
     return daily;
   }
   if (offered && current === daily) {
@@ -118,16 +124,25 @@ export function welcomeLines(
   saveWorks: boolean,
 ): WelcomeLines {
   const solvedToday = dailySolvedToday(progress.daily, today);
+  const doneToday = dailyCompletedToday(progress.daily, today);
   const daily = !dailyOffered(progress, order)
     ? WELCOME.practiceFirst
     : solvedToday
       ? WELCOME.dailyDone
-      : WELCOME.dailyOpen(getPuzzle(dailyPuzzleId(today)).datasetId);
+      : dailyRevealedToday(progress.daily, today)
+        ? WELCOME.dailyRevealed
+        : WELCOME.dailyOpen(getPuzzle(dailyPuzzleId(today)).datasetId);
   const streak = currentStreak(progress.daily, today);
+  const completed = practiceSolvedCount(progress, order);
+  const revealed = practiceRevealedCount(progress, order);
   return {
     daily,
-    streak: streak === 0 ? null : solvedToday ? WELCOME.streak(streak) : `${WELCOME.streak(streak)}. ${WELCOME.streakAtRisk}`,
-    practice: WELCOME.practiceProgress(practiceSolvedCount(progress, order), order.length),
+    // Done today (solved, or revealed on a bridged day): nothing to nudge.
+    streak: streak === 0 ? null : doneToday ? WELCOME.streak(streak) : `${WELCOME.streak(streak)}. ${WELCOME.streakAtRisk}`,
+    practice:
+      revealed > 0
+        ? WELCOME.practiceProgressWithAnswers(completed, order.length, revealed)
+        : WELCOME.practiceProgress(completed, order.length),
     save: saveWorks ? null : WELCOME.saveUnavailable,
   };
 }
