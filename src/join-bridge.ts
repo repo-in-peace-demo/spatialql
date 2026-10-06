@@ -10,6 +10,7 @@ import type { Object3D, Vector3 } from '@iwsdk/core';
 import type { RowStatus } from './data/compare.js';
 import type { JoinState } from './data/join-state.js';
 import type { QuerySpec } from './data/query.js';
+import type { PressPath } from './touch-probe.js';
 
 /** A challenge element the join system places, with its size (meters). */
 export type PlacedElement = { object: Object3D; widthMeters: number; heightMeters: number };
@@ -39,9 +40,17 @@ export interface ChallengeHooks {
    * The join system compares it with the control's, so the nearest wins.
    */
   barDistance(point: Vector3): number;
-  /** Presses the bar button nearest a pinch at `point`. */
-  pressBarAt(point: Vector3, hand: string): void;
+  /** Presses the bar button nearest `point` (a pinch point, or where a hand's ray hit the bar). */
+  pressBarAt(point: Vector3, hand: string, path: PressPath): void;
+  /**
+   * A NULL in a source table was poked or pinched (only the result's NULLs
+   * filter): the card says where to poke instead.
+   */
+  onWrongNull(tableId: string, path: PressPath): void;
 }
+
+/** One Filter chip: a result column with a NULL the player sees, and its header. */
+export type NullFilterChoice = { column: number; header: string };
 
 /** What the join system offers challenge mode. */
 export interface JoinControls {
@@ -61,8 +70,12 @@ export interface JoinControls {
   setWinLook(won: boolean): void;
   /** The result slab's status badge, mirroring the card ("Solved!" in gold, "Completed", the diff summary); null hides it. */
   setResultBadge(text: string | null, look: 'won' | 'neutral'): void;
-  /** Briefly pulses the shown rows that hold a NULL (the coach for the NULL poke). */
-  pulseNullRows(): void;
+  /** Once, gently: the shown NULL cells' outlines brighten and settle (the first-time cue for the NULL poke). */
+  pulseNullCells(): void;
+  /** The Filter button's chips: result columns with a NULL in a shown row (empty unless joined). */
+  nullFilterChoices(): NullFilterChoice[];
+  /** A Filter chip: filters to rows where result `column` IS NULL, as a poke on one of its NULLs would. */
+  applyNullFilter(column: number, path: PressPath): void;
   /** Briefly pulses these result rows (e.g. the rows a fan-out repeats). */
   pulseRows(rows: readonly number[]): void;
   /** Whether any shown result row holds a NULL. */

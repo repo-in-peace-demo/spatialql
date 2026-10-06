@@ -18,6 +18,11 @@ export interface DeskControls {
   requestDataset(dataset: DatasetId): void;
   /** Whether any source slab is held right now. */
   anySlabHeld(): boolean;
+  /**
+   * This session's surface search found a table or desk, but too far away
+   * to use (the slabs float): the card suggests moving closer.
+   */
+  readonly surfaceTooFar: boolean;
 }
 
 export const deskBridge: { desk: DeskControls | null } = { desk: null };

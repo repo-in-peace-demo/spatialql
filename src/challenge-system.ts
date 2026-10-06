@@ -18,13 +18,22 @@
  * Inert in free play (`CHALLENGE_MODE` false): it builds nothing.
  */
 
-import { createSystem, PokeInteractable, RayInteractable, Vector3, type Entity, type Signal } from '@iwsdk/core';
+import {
+  createSystem,
+  PokeInteractable,
+  RayInteractable,
+  Vector3,
+  type Entity,
+  type Signal,
+  type UIKit,
+} from '@iwsdk/core';
 import { CHALLENGE_MODE } from './challenge-mode.js';
 import { challengeStart, PLAYABLE, publishProgress } from './challenge-start.js';
 import {
   buildPuzzleBar,
   buildPuzzleCard,
-  setBarChip,
+  MAX_FILTER_CHIPS,
+  setBarContents,
   setCardIntro,
   setCardTheme,
   setCardWin,
@@ -33,6 +42,7 @@ import {
   setNextAvailable,
   setNextWaiting,
   type BarButton,
+  type BarButtonTarget,
   type PuzzleBarView,
   type PuzzleCardView,
 } from './challenge-view.js';
@@ -83,7 +93,13 @@ import type { Table } from './data/types.js';
 import { deskBridge } from './desk-bridge.js';
 import { devFlag } from './dev-flags.js';
 import { ChallengeDebug, type ChallengeDebugHost } from './challenge-debug.js';
-import { joinBridge, type ChallengeHooks, type ChallengeLayout, type JoinControls } from './join-bridge.js';
+import {
+  joinBridge,
+  type ChallengeHooks,
+  type ChallengeLayout,
+  type JoinControls,
+  type NullFilterChoice,
+} from './join-bridge.js';
 import { sounds } from './sound.js';
 import { isTouchPointerClick, setRect, touchProbe, type PressPath } from './touch-probe.js';
 import {
@@ -105,6 +121,10 @@ const INDEX_TIP: readonly XRHandJoint[] = ['index-finger-tip'];
 const BAR_PRESS_DEBOUNCE_SECONDS = 0.3;
 /** How long "Solve it first, or use Hint." shows after pressing an inactive Next. */
 const STATUS_FLASH_SECONDS = 2.5;
+/** How long "Poke a NULL in the result above, or use Filter." shows in the message area. */
+const MESSAGE_FLASH_SECONDS = 3;
+/** The bar's touch-readout names for the filter chips (no per-frame strings). */
+const CHIP_NAMES = Array.from({ length: MAX_FILTER_CHIPS }, (_, i) => `chip ${i + 1}`);
 /** The card fades back in this fast when it changes puzzle (per second). */
 const CARD_FADE_IN_PER_SECOND = 3;
 /**
@@ -156,13 +176,29 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private revealFrames = 0;
   /** When a brief status line ("Solve it first") gives way again (clock seconds; 0 = none). */
   private statusFlashUntil = 0;
+  /** The card's intro lines under the message (the daily's intros, or "Make these moves..."), as last set. */
+  private introLines: readonly string[] = [];
+  /** A brief message ("Poke a NULL in the result above...") showing until then (clock seconds; 0 = none)... */
+  private messageFlashUntil = 0;
+  /** ...over this message and its intro lines, restored after it. */
+  private flashRestore: { text: string; lines: readonly string[] } = { text: '', lines: [] };
+  /** Whether the status line says "Move closer to your table" (a table was found out of reach). */
+  private moveCloserShown = false;
+  /** The NULL cells' first-time cue waits for the first result with a NULL. */
+  private nullCuePending = false;
+  /** The Filter chips are open (Back and one chip per choice). */
+  private filterOpen = false;
+  /** The chips' columns, in the order shown (from the join, at the last bar update). */
+  private filterChoices: NullFilterChoice[] = [];
+  /** The bar's contents as last set (only a change resizes and re-places it). */
+  private barKey = '';
   private debug: ChallengeDebug | null = null;
   private readonly _point = new Vector3();
   private readonly _local = new Vector3();
   /** Contact pokes on the bar's buttons. */
   private readonly barPoke = new ContactPoke();
   private _pokeSource: XRInputSource | null = null;
-  private pokedButton: BarButton | null = null;
+  private pokedTarget: BarButtonTarget | null = null;
   private readonly _straightA = new Vector3();
   private readonly _straightB = new Vector3();
   /** Contact-poke hit test on the bar's shown buttons (the poke asks only at a contact). */
@@ -170,12 +206,12 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     const bar = this.bar;
     const dy = Math.max(0, Math.abs(this._local.y) - bar.buttonHeightMeters / 2);
     let best = Infinity;
-    this.pokedButton = null;
+    this.pokedTarget = null;
     for (const button of bar.buttons) {
       const distance = Math.hypot(Math.max(0, Math.abs(this._local.x - button.centerX) - button.width / 2), dy);
       if (distance < best) {
         best = distance;
-        this.pokedButton = button.name;
+        this.pokedTarget = button;
       }
     }
     return best <= POKE_TARGET_TOLERANCE_METERS;
@@ -207,19 +243,36 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       hint: BAR.hintLabels,
       next: [BAR.next, BAR.skip],
       clear: BAR.clearFilter,
+      filter: BAR.filter,
+      filterBack: BAR.filterBack,
     });
     this.barEntity = this.world.createTransformEntity(this.bar.document);
-    // Poke and ray select arrive as UIKit clicks; pinches come from the join
-    // system (barDistance / pressBarAt), which also weighs the control.
+    // Poke and ray select arrive as UIKit clicks; pinches and hand rays come
+    // from the join system (barDistance / pressBarAt), which also weighs the control.
     this.barEntity.addComponent(PokeInteractable, {});
     this.barEntity.addComponent(RayInteractable, {});
     // Rays (and controllers) only: a fingertip presses through the contact poke (updateBarPoke).
-    const onHint = (event: unknown) => !isTouchPointerClick(event) && this.press('hint', 'uikit-click');
-    const onNext = (event: unknown) => !isTouchPointerClick(event) && this.press('next', 'uikit-click');
-    const onClear = (event: unknown) => !isTouchPointerClick(event) && this.press('clear', 'uikit-click');
-    this.bar.hint.addEventListener('click', onHint);
-    this.bar.next.addEventListener('click', onNext);
-    this.bar.clear.addEventListener('click', onClear);
+    const clickables: [InstanceType<typeof UIKit.Container>, BarButton, number][] = [
+      [this.bar.hint, 'hint', -1],
+      [this.bar.next, 'next', -1],
+      [this.bar.clear, 'clear', -1],
+      [this.bar.filter, 'filter', -1],
+      [this.bar.filterBack, 'filterBack', -1],
+      ...this.bar.filterChips.map((chip, i): [InstanceType<typeof UIKit.Container>, BarButton, number] => [
+        chip.container,
+        'chip',
+        i,
+      ]),
+    ];
+    for (const [container, name, chip] of clickables) {
+      const onClick = (event: unknown) => {
+        if (!isTouchPointerClick(event)) {
+          this.press(name, 'uikit-click', chip);
+        }
+      };
+      container.addEventListener('click', onClick);
+      this.cleanupFuncs.push(() => container.removeEventListener('click', onClick));
+    }
 
     joinBridge.challenge = this;
     this.layout = {
@@ -244,6 +297,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         ['hint', bar.hint],
         ['next', bar.next],
         ['clear', bar.clear],
+        ['filter', bar.filter],
+        ['filterBack', bar.filterBack],
+        ...bar.filterChips.map((chip, i) => [CHIP_NAMES[i], chip.container] as const),
       ] as const) {
         for (const type of ['pointerdown', 'pointerup'] as const) {
           const listener = (event: unknown) => {
@@ -262,7 +318,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
           const count = Math.min(bar.buttons.length, out.length);
           for (let i = 0; i < count; i++) {
             const button = bar.buttons[i];
-            setRect(out[i], button.name, button.centerX, 0, button.width, bar.buttonHeightMeters);
+            const name = button.name === 'chip' ? CHIP_NAMES[button.chip] : button.name;
+            setRect(out[i], name, button.centerX, 0, button.width, bar.buttonHeightMeters);
           }
           return count;
         },
@@ -289,9 +346,6 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
 
     this.cleanupFuncs.push(() => {
-      this.bar.hint.removeEventListener('click', onHint);
-      this.bar.next.removeEventListener('click', onNext);
-      this.bar.clear.removeEventListener('click', onClear);
       this.silhouette?.entity.dispose();
       this.cardEntity.dispose();
       this.barEntity.dispose();
@@ -321,7 +375,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     const state = join.joinState;
     if (state !== this.lastState) {
       this.lastState = state;
-      this.updateChip(state);
+      this.updateBar();
     }
     // Next pulses once the puzzle is won, until it's pressed.
     if (this.session.solved && this.nextAvailable()) {
@@ -330,11 +384,65 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     // "Solve it first" (an inactive Next) gives way to the status it covered.
     if (this.statusFlashUntil > 0 && this.clock >= this.statusFlashUntil) {
       this.statusFlashUntil = 0;
-      this.card.status.setProperties({
-        text: this.session.solved ? this.solvedStatus() : this.lastComparison ? diffSummary(this.lastComparison.comparison) : '',
-      });
+      this.card.status.setProperties({ text: this.restingStatus() });
     }
+    // "Poke a NULL in the result above" gives way to the message it covered.
+    if (this.messageFlashUntil > 0 && this.clock >= this.messageFlashUntil) {
+      this.messageFlashUntil = 0;
+      setCardIntro(this.card, this.flashRestore.text, this.flashRestore.lines);
+    }
+    this.updateMoveCloser(state);
     this.updateBarPoke();
+  }
+
+  /**
+   * The status line's "Move closer to your table to use it." while a table
+   * or desk was found out of reach (the slabs float) and nothing is joined.
+   * Writes only when it comes or goes.
+   */
+  private updateMoveCloser(state: JoinState): void {
+    const show =
+      !!deskBridge.desk?.surfaceTooFar &&
+      (state.phase === 'idle' || state.phase === 'previewing') &&
+      !this.session.solved &&
+      !this.pending;
+    if (show === this.moveCloserShown) {
+      return;
+    }
+    this.moveCloserShown = show;
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`status line: "${CARD.moveCloser}" ${show ? 'shown' : 'hidden'}`);
+    }
+    if (this.statusFlashUntil === 0) {
+      this.card.status.setProperties({ text: this.restingStatus() });
+    }
+  }
+
+  /** The status line when nothing brief covers it: finished, the diff, the move-closer hint, or nothing. */
+  private restingStatus(): string {
+    if (this.session.solved) {
+      return this.solvedStatus();
+    }
+    if (this.lastComparison) {
+      return diffSummary(this.lastComparison.comparison);
+    }
+    return this.moveCloserShown ? CARD.moveCloser : '';
+  }
+
+  /**
+   * Briefly shows `text` in the card's message area, then restores what it
+   * covered. Not over a win, nor mid-switch. A new message (a hint, the win)
+   * replaces it at once.
+   */
+  private flashMessage(text: string): void {
+    if (this.pending || this.session.solved) {
+      return;
+    }
+    if (this.messageFlashUntil === 0) {
+      this.flashRestore = { text: this.messageText, lines: this.introLines };
+    }
+    this.messageFlashUntil = this.clock + MESSAGE_FLASH_SECONDS;
+    setCardIntro(this.card, text, []);
   }
 
   /**
@@ -360,16 +468,18 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this._local.copy(this._point);
       bar.document.worldToLocal(this._local);
       const verdict = this.barPoke.update(hand, this._local, this.pokeOnBar, this.pokeStraightness);
-      if (verdict === 'press' && this.pokedButton) {
-        this.press(this.pokedButton, 'poke');
+      const target = this.pokedTarget;
+      if (verdict === 'press' && target) {
+        this.press(target.name, 'poke', target.chip);
       } else if (verdict !== 'none' && verdict !== 'press' && import.meta.env.DEV && this.debug) {
         const { toward, sideways, straightness } = this.barPoke.last;
         const cm = (m: number) => `${(m * 100).toFixed(1)} cm`;
+        const name = target ? (target.name === 'chip' ? CHIP_NAMES[target.chip] : target.name) : 'the bar';
         this.debug.note(
           verdict === 'rejected-direction'
-            ? `${hand} fingertip contact on ${this.pokedButton} rejected: it came in along the face (${cm(toward)} ` +
+            ? `${hand} fingertip contact on ${name} rejected: it came in along the face (${cm(toward)} ` +
                 `toward it, ${cm(sideways)} sideways; needs at least as much toward the face as sideways)`
-            : `${hand} fingertip contact on ${this.pokedButton} rejected: index finger not extended (straightness ` +
+            : `${hand} fingertip contact on ${name} rejected: index finger not extended (straightness ` +
                 `${straightness === null ? 'n/a' : straightness.toFixed(2)}, needs ${MIN_INDEX_STRAIGHTNESS})`,
         );
       }
@@ -444,13 +554,20 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       if (!this.session.solved && this.session.hintsShown === 0) {
         this.setMessage(`${CONCEPT_INTROS[this.puzzle.concept]} ${NULL_EXPLAINER}`);
       }
-      join.pulseNullRows();
+    }
+    // The first result with pokeable NULLs (practice puzzle 3, or a daily
+    // ahead of it): their outlines brighten once, gently.
+    if (this.nullCuePending && join.hasVisibleNull()) {
+      this.nullCuePending = false;
+      join.pulseNullCells();
     }
 
     if (comparison.solved && !this.session.solved) {
       this.win();
     }
     this.updateBadge();
+    // Filter (or its chips) follows the NULLs now shown.
+    this.updateBar();
     if (import.meta.env.DEV && this.debug) {
       this.debug.logComparison(this.puzzle, output, comparison);
     }
@@ -476,8 +593,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   onPhase(phase: JoinState['phase']): void {
     if ((phase === 'separating' || phase === 'idle') && this.session && !this.pending) {
-      this.card.status.setProperties({ text: this.session.solved ? this.solvedStatus() : '' });
       this.lastComparison = null;
+      this.filterOpen = false;
+      if (this.statusFlashUntil === 0) {
+        this.card.status.setProperties({ text: this.restingStatus() });
+      }
     }
   }
 
@@ -485,14 +605,22 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     return this.barButtonAt(point) ? this.lastPinchDistance : Infinity;
   }
 
-  pressBarAt(point: Vector3, hand: string): void {
-    const button = this.barButtonAt(point);
+  pressBarAt(point: Vector3, hand: string, path: PressPath): void {
+    const target = this.barButtonAt(point);
+    const name = target ? (target.name === 'chip' ? CHIP_NAMES[target.chip] : target.name) : null;
+    if (import.meta.env.DEV && this.debug && path === 'pinch') {
+      this.debug.notePinch(hand, name, this.lastPinchDistance);
+    }
+    if (target) {
+      this.press(target.name, path, target.chip);
+    }
+  }
+
+  onWrongNull(tableId: string, path: PressPath): void {
     if (import.meta.env.DEV && this.debug) {
-      this.debug.notePinch(hand, button, this.lastPinchDistance);
+      this.debug.note(`${path} on a NULL in the ${tableId} table (a source): "${CARD.wrongNull}" (no click)`);
     }
-    if (button) {
-      this.press(button, 'pinch');
-    }
+    this.flashMessage(CARD.wrongNull);
   }
 
   // --- ChallengeDebugHost --------------------------------------------------------------
@@ -658,8 +786,13 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     const freshConcept = introducesConcept(this.puzzle) && !this.progress.seenConcepts.includes(concept);
     // The antijoin intro waits until NULLs are on screen (see onSettled).
     this.nullCoachPending = ahead.length === 0 && freshConcept && concept === 'antijoin';
+    // So does the NULL cells' first-time cue (also for a daily that introduces it ahead of practice).
+    this.nullCuePending = (freshConcept && concept === 'antijoin') || ahead.includes('antijoin');
+    this.filterOpen = false;
+    this.messageFlashUntil = 0;
     if (ahead.length > 0) {
-      setCardIntro(this.card, CARD.dailyAhead, ahead.map((c) => CONCEPT_INTROS[c]));
+      this.introLines = ahead.map((c) => CONCEPT_INTROS[c]);
+      setCardIntro(this.card, CARD.dailyAhead, this.introLines);
       this.messageText = CARD.dailyAhead;
       this.introShown = true;
     } else if (freshConcept && concept !== 'antijoin') {
@@ -692,6 +825,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     setCardTheme(this.card, DATASETS[puzzle.datasetId].theme);
     setCardWin(this.card, null);
     this.introShown = false;
+    this.introLines = [];
+    this.messageFlashUntil = 0;
     const daily = isTodaysDaily(this.progress, puzzle.id, this.today, PRACTICE_ORDER);
     this.card.title.setProperties({
       text: daily
@@ -699,7 +834,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         : CARD.practiceTitle(PRACTICE_ORDER.indexOf(puzzle.id) + 1, puzzle.datasetId),
     });
     this.card.goal.setProperties({ text: puzzleText(puzzle).goal });
-    this.card.status.setProperties({ text: '' });
+    this.card.status.setProperties({ text: this.moveCloserShown ? CARD.moveCloser : '' });
     if (fresh) {
       this.card.fade.value = 0;
     }
@@ -724,6 +859,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     this.save();
     this.introShown = false;
+    this.introLines = [];
+    this.messageFlashUntil = 0;
+    this.filterOpen = false;
     const lastNote = this.nextId() === null ? CARD.morePuzzlesSoon : null;
     if (revealed) {
       // A daily says why the streak didn't grow. A fan-out takeaway takes two
@@ -783,7 +921,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       if (answerRevealed(this.session)) {
         // The answer, then what to do with it: the moves still finish it, or
         // Next (now Skip) moves on.
-        setCardIntro(this.card, this.text.hints[index], [CARD.answerNext]);
+        this.messageFlashUntil = 0;
+        this.introLines = [CARD.answerNext];
+        setCardIntro(this.card, this.text.hints[index], this.introLines);
         this.messageText = this.text.hints[index];
         this.introShown = true;
       } else {
@@ -893,6 +1033,14 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   private setMessage(text: string): void {
     this.messageText = text;
+    this.introLines = [];
+    if (this.messageFlashUntil > 0) {
+      // Replaces a brief message at once (and every line it covered).
+      this.messageFlashUntil = 0;
+      this.introShown = false;
+      setCardIntro(this.card, text, []);
+      return;
+    }
     if (this.introShown) {
       // A hint (or any other message) replaces the daily's intro lines.
       this.introShown = false;
@@ -902,35 +1050,61 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.card.message.setProperties({ text });
   }
 
-  /** The chip shows the current filter's WHERE clause and its Clear button, or nothing. */
-  private updateChip(state: JoinState): void {
-    const filter = state.phase === 'joined' ? (state.filter ?? null) : null;
-    const [a, b] = puzzleTables(this.puzzle);
-    const text = filter ? buildWhereSql(a, b, filter) : null;
-    const hadChip = this.bar.buttons.length > 2;
-    if (!text && !hadChip) {
+  /**
+   * The bar's filter part follows the join: with a filter set, its WHERE
+   * clause and Clear; joined with NULLs shown, Filter (or, once pressed,
+   * Back and one chip per column with a NULL, labeled as the result's
+   * header); otherwise nothing. Resizes and re-places the bar only when its
+   * contents change (state changes and settles, never per frame).
+   */
+  private updateBar(): void {
+    const join = this.join;
+    const state = join?.joinState;
+    if (!join || !state || !this.puzzle) {
       return;
     }
+    const joined = state.phase === 'joined' && !this.pending;
+    const filter = state.phase === 'joined' && !this.pending ? (state.filter ?? null) : null;
+    const [a, b] = puzzleTables(this.puzzle);
+    const where = filter ? buildWhereSql(a, b, filter) : null;
+    this.filterChoices = joined && !filter ? join.nullFilterChoices().slice(0, MAX_FILTER_CHIPS) : [];
+    if (this.filterChoices.length === 0) {
+      this.filterOpen = false;
+    }
+    const chips = this.filterOpen ? this.filterChoices.map((choice) => BAR.filterChip(choice.header)) : null;
+    const key = `${where ?? ''}|${this.filterChoices.length > 0}|${chips ? chips.join('|') : '-'}`;
+    if (key === this.barKey) {
+      return;
+    }
+    this.barKey = key;
     // The bar resizes to its buttons; re-place it so it stays clear of the control.
-    setBarChip(this.bar, text);
+    setBarContents(this.bar, { where, filter: this.filterChoices.length > 0, chips });
     this.layout.bar.widthMeters = this.bar.widthMeters;
-    this.join?.requestLayout();
+    join.requestLayout();
   }
 
   // --- The bar's buttons -----------------------------------------------------------------
 
-  private press(button: BarButton, path: PressPath): void {
+  /** One press on a bar button from any path; `chip` says which filter chip (else -1). */
+  private press(button: BarButton, path: PressPath, chip = -1): void {
     if (this.clock - this.lastPress < BAR_PRESS_DEBOUNCE_SECONDS) {
       return;
     }
     const state = this.join?.joinState;
-    const hasFilter = state?.phase === 'joined' && !!state.filter;
-    if (button === 'clear' && !hasFilter) {
+    const joined = state?.phase === 'joined' && !this.pending;
+    const hasFilter = state?.phase === 'joined' && !this.pending && !!state.filter;
+    // Only what's shown can be pressed (a ray click can come from a hidden button's last frame).
+    if (
+      (button === 'clear' && !hasFilter) ||
+      (button === 'filter' && (!joined || hasFilter || this.filterChoices.length === 0)) ||
+      (button === 'filterBack' && !this.filterOpen) ||
+      (button === 'chip' && (!this.filterOpen || !this.filterChoices[chip]))
+    ) {
       return;
     }
     this.lastPress = this.clock;
     if (import.meta.env.DEV && this.debug) {
-      touchProbe.pressed(button, path);
+      touchProbe.pressed(button === 'chip' ? CHIP_NAMES[chip] : button, path);
     }
     // An inactive Next does nothing, so it makes no click either. Before the
     // puzzle is done, the card says why, briefly.
@@ -952,6 +1126,22 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this.showHint();
     } else if (button === 'next') {
       this.next();
+    } else if (button === 'filter' || button === 'filterBack') {
+      this.filterOpen = button === 'filter';
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(
+          this.filterOpen
+            ? `Filter opened (${path}): ${this.filterChoices.map((choice) => BAR.filterChip(choice.header)).join(', ')}`
+            : `Filter closed (${path})`,
+        );
+      }
+      this.updateBar();
+    } else if (button === 'chip') {
+      // Exactly the filter a poke on one of that column's NULLs makes.
+      const column = this.filterChoices[chip].column;
+      this.filterOpen = false;
+      this.join?.applyNullFilter(column, path);
+      this.updateBar();
     } else {
       this.join?.requestClearFilter();
     }
@@ -960,13 +1150,13 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private lastPinchDistance = Infinity;
 
   /**
-   * The bar button a pinch at `point` lands on, if any. Only shown buttons
-   * are targets (Clear only while a filter is set; the chip's WHERE label
-   * never is).
+   * The bar button a pinch at `point` (or a hand's ray hit on the bar)
+   * lands on, if any. Only shown buttons are targets (Clear only while a
+   * filter is set; the WHERE label never is), and only while the bar is.
    */
-  private barButtonAt(point: Vector3): BarButton | null {
+  private barButtonAt(point: Vector3): BarButtonTarget | null {
     const bar = this.bar;
-    if (!bar) {
+    if (!bar || bar.fade.peek() < 0.5) {
       return null;
     }
     bar.document.updateWorldMatrix(true, false);
@@ -977,14 +1167,14 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (this._local.z > BUTTON_PINCH_FRONT_DEPTH_METERS || this._local.z < -BUTTON_PINCH_BACK_DEPTH_METERS) {
       return null;
     }
-    let best: BarButton | null = null;
+    let best: BarButtonTarget | null = null;
     const dy = Math.max(0, Math.abs(this._local.y) - bar.buttonHeightMeters / 2);
     for (const button of bar.buttons) {
       const dx = Math.max(0, Math.abs(this._local.x - button.centerX) - button.width / 2);
       const distance = Math.hypot(dx, dy);
       if (distance < this.lastPinchDistance) {
         this.lastPinchDistance = distance;
-        best = button.name;
+        best = button;
       }
     }
     return this.lastPinchDistance <= BAR_PINCH_MARGIN_METERS ? best : null;

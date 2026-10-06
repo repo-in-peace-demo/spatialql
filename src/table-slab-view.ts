@@ -124,6 +124,8 @@ export type RowView = {
   baseBackground: string;
   /** With `diffGutter`: opacity of the row's `+` ("not in the answer") marker. */
   marker: Signal<number> | null;
+  /** With `nullTargets`: per column holding a NULL, the outline layer that marks it pokeable. */
+  nullOutlines: Map<number, Container> | null;
 };
 
 /** A placeholder for a row the answer still needs (challenge mode); hidden until shown. */
@@ -180,6 +182,8 @@ export type TableSlabDocument = {
   tabHeightMeters: number;
   /** Challenge mode's result slab: its status badge (null without one). */
   badge: SlabBadgeView | null;
+  /** With `nullTargets`: the NULL outline's width at rest (cm); hover and the cue draw it wider. */
+  nullOutlineWidthCm: number;
   /** Panel height (meters) with `visibleRows` data rows displayed. */
   heightForRowsMeters: (visibleRows: number) => number;
 };
@@ -236,7 +240,38 @@ export type SlabBuildOptions = {
    * reserved (`tabHeightMeters`), so showing it never moves anything.
    */
   badge?: boolean;
+  /**
+   * Challenge mode's result slab: every NULL cell is a poke / ray target (it
+   * filters), so it gets a thin outline that reads as a button, drawn
+   * stronger on hover (`setNullCellHover`). Source slabs never get one.
+   */
+  nullTargets?: boolean;
 };
+
+const COLOR_NULL_TARGET = '#b3a58a';
+const COLOR_NULL_TARGET_HOVER = '#5b4a8a';
+/** The hovered (or cued) NULL outline's width, relative to its resting width. */
+const NULL_HOVER_WIDTH_FACTOR = 2.5;
+
+/**
+ * A pokeable NULL cell's look: hovered (a fingertip or a hand's ray over it,
+ * or the first-time cue) draws its outline wider and darker. Only on the
+ * outline layer, so layout never changes.
+ */
+export function setNullCellHover(doc: TableSlabDocument, row: number, column: number, hovered: boolean): void {
+  const outline = doc.rowViews.get(row)?.nullOutlines?.get(column);
+  if (!outline) {
+    return;
+  }
+  const width = doc.nullOutlineWidthCm * (hovered ? NULL_HOVER_WIDTH_FACTOR : 1);
+  outline.setProperties({
+    borderColor: hovered ? COLOR_NULL_TARGET_HOVER : COLOR_NULL_TARGET,
+    borderTopWidth: width,
+    borderLeftWidth: width,
+    borderRightWidth: width,
+    borderBottomWidth: width,
+  });
+}
 
 /** The result slab's status badge (see `SlabBuildOptions.badge`). */
 export type SlabBadgeView = { container: Container; text: Text };
@@ -587,6 +622,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     columnLeftCm += columnWidth + m.columnGap;
   }
   const outlineWidth = BASE_OUTLINE_WIDTH * (m.rowFont / BASE_ROW_FONT_CM);
+  const nullOutlineWidth = outlineWidth;
   // An absolutely positioned layer filling a row (so it never affects layout).
   // It ignores pointers, so a poke or ray reaches the cell above it (and its
   // click listener) instead of stopping at the layer.
@@ -697,6 +733,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     // Cells of an unmatched LEFT JOIN row hold `null` and render as `NULL`,
     // exactly as a database would show them. The data layer's lineage still
     // records that they came from an unmatched join rather than a stored NULL.
+    const nullOutlines = options.nullTargets ? new Map<number, Container>() : null;
     const cells = table.columns.map((column, columnIndex) => {
       const columnWidth = columnWidths[columnIndex];
       const raw = dataRow[column];
@@ -713,6 +750,29 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       const offset = flight && side ? flight[side] : null;
       const color = raw === null ? COLOR_TEXT_NULL : COLOR_TEXT;
       const cell = buildCell(truncated, m.rowFont, columnWidth, color, false, m, offset, revealed ? 1 : 0);
+      if (nullOutlines && raw === null) {
+        // A pokeable NULL: an outline on its own layer (no fill, so the text
+        // stays readable; ignores pointers, so a press reaches the slab).
+        const layer = new UIKit.Container({
+          pointerEvents: 'none',
+          positionType: 'absolute',
+          positionTop: 0,
+          positionLeft: 0,
+          positionRight: 0,
+          positionBottom: 0,
+          borderColor: COLOR_NULL_TARGET,
+          borderTopWidth: nullOutlineWidth,
+          borderLeftWidth: nullOutlineWidth,
+          borderRightWidth: nullOutlineWidth,
+          borderBottomWidth: nullOutlineWidth,
+          borderTopLeftRadius: m.borderRadius * 0.4,
+          borderTopRightRadius: m.borderRadius * 0.4,
+          borderBottomLeftRadius: m.borderRadius * 0.4,
+          borderBottomRightRadius: m.borderRadius * 0.4,
+        });
+        cell.add(layer);
+        nullOutlines.set(columnIndex, layer);
+      }
       rowContainer.add(cell);
       return cell;
     });
@@ -728,6 +788,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       backgroundFade,
       baseBackground: rowBackground,
       marker,
+      nullOutlines,
     });
   });
 
@@ -796,6 +857,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     heightForRowsMeters,
     tabHeightMeters: tabCm / 100,
     badge,
+    nullOutlineWidthCm: nullOutlineWidth,
   };
 }
 

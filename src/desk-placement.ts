@@ -205,6 +205,8 @@ export class DeskPlacementSystem
   /** The surface last snapped to (its top Y, and its assessment if detected), reused when tables switch. */
   private lastSurfaceY: number | null = null;
   private lastSurface: SurfaceAssessment | null = null;
+  /** The last search found a table or desk beyond reach (the slabs float); see DeskControls. */
+  surfaceTooFar = false;
 
   private sessionActive = false;
   private headPoseValid = false;
@@ -488,6 +490,7 @@ export class DeskPlacementSystem
     this.headPoseValid = false;
     this.headPoseWaitElapsed = 0;
     this.searching = false;
+    this.surfaceTooFar = false;
     this.bestCandidateEntity = null;
     this.bestCandidateStableSeconds = 0;
     if (import.meta.env.DEV && this.debug) {
@@ -698,6 +701,7 @@ export class DeskPlacementSystem
     this.lastSurfaceY = this._best.surfaceY;
     this.lastSurface = this._best;
     const placement = this.placeOnSurface(this._best.surfaceY, this._best);
+    this.surfaceTooFar = placement === 'floating';
     this.reportPlacement(
       placement === 'floating'
         ? `detected ${kind} beyond reach (floating kept)`

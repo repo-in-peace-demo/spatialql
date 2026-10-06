@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { cardMessageLines } from '../card-metrics.js';
 import { CARD, CONCEPT_INTROS, WELCOME } from './copy.js';
 import { DAILY_EPOCH_DAY, dailyPuzzleId } from './daily.js';
 import {
@@ -25,8 +26,6 @@ import {
 import { getPuzzle, isPuzzleId, PRACTICE_ORDER, type Concept, type PuzzleId } from './puzzles.js';
 
 const ORDER = PRACTICE_ORDER;
-/** The card's message and intro rows hold one line of this many characters (the takeaway limit). */
-const CARD_LINE_MAX_CHARS = 60;
 /** The welcome panel's text width holds about this many characters at its line size. */
 const WELCOME_LINE_MAX_CHARS = 44;
 
@@ -147,9 +146,10 @@ describe('a daily ahead of practice', () => {
     expect(aheadConcepts(progress, getPuzzle('school-no-club'))).toEqual([]);
   });
 
-  it('every intro and the lead-in fit one card line', () => {
-    for (const line of [CARD.dailyAhead, ...Object.values(CONCEPT_INTROS)]) {
-      expect(line.length, line).toBeLessThanOrEqual(CARD_LINE_MAX_CHARS);
+  it('the lead-in fits one card line, and every intro two (so the lead-in and two intros fit the message area)', () => {
+    expect(cardMessageLines(CARD.dailyAhead)).toBe(1);
+    for (const line of Object.values(CONCEPT_INTROS)) {
+      expect(cardMessageLines(line), line).toBeLessThanOrEqual(2);
     }
   });
 });

@@ -14,8 +14,8 @@
  * - Columns are never written by hand. Puzzle text names a column with a
  *   placeholder that `puzzle-text.ts` replaces with the header the player
  *   sees, from the same metadata the slabs use:
- *   - `{orders.id}`: the join result's header (`O.ID`), for "poke the NULL
- *     under ...";
+ *   - `{orders.id}`: the join result's header (`O.ID`), for "filter where
+ *     ... is NULL" (the Filter chip shows the same header);
  *   - `{source:students.clubId}`: a source slab's header (`CLUB ID`), e.g.
  *     for a foreign-key column, which the result doesn't show.
  */
@@ -44,7 +44,7 @@ export const DATASET_TITLES: Readonly<Record<DatasetId, string>> = {
 export const CONCEPT_INTROS: Readonly<Record<Concept, string>> = {
   inner: 'Pinch a table, bring it to the other one, and let go.',
   left: 'New: LEFT keeps every row of the table that stayed put.',
-  antijoin: "New: poke a NULL to keep only the rows where it's NULL.",
+  antijoin: "New: poke a NULL in the result to keep only the rows where it's NULL.",
   fanout: 'New: one row can match several rows.',
   direction: 'New: which table stays put decides what LEFT keeps.',
   nullfk: 'New: some rows point to nothing, or to a missing row.',
@@ -78,8 +78,8 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     takeaway: 'LEFT kept Odalys; her NULL showed she never ordered.',
     hints: [
       'A LEFT join fills in NULL where nothing matched.',
-      'Join with LEFT, then poke a NULL to keep only the rows with no match.',
-      'Leave the customers table where it is, bring the orders table over, choose LEFT, then poke the NULL under {orders.id}.',
+      'Join with LEFT, then keep only the rows with no match: press Filter, or poke a NULL in the result.',
+      'Keep the customers table still, bring the orders table over, choose LEFT, then filter where {orders.id} is NULL (press Filter, or poke that NULL in the result).',
     ],
   },
   'library-fanout': {
@@ -106,7 +106,7 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     hints: [
       'A book on the shelf has no borrower.',
       'Keep the books table still, bring the borrowers table over, choose LEFT, and look for NULL borrowers.',
-      'Leave the books table where it is, bring the borrowers table over, choose LEFT, then poke the NULL under {borrowers.id}.',
+      'Keep the books table still, bring the borrowers table over, choose LEFT, then filter where {borrowers.id} is NULL (press Filter, or poke that NULL in the result).',
     ],
   },
   'library-nothing-out': {
@@ -114,8 +114,8 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     takeaway: 'No book matched, so this borrower has nothing out.',
     hints: [
       'A LEFT join fills in NULL where nothing matched.',
-      'Keep the borrowers table still, choose LEFT, then poke a NULL in a book column.',
-      'Leave the borrowers table where it is, bring the books table over, choose LEFT, then poke the NULL under {books.id}.',
+      'Keep the borrowers table still, choose LEFT, then filter on a book column: press Filter, or poke a NULL in the result.',
+      'Keep the borrowers table still, bring the books table over, choose LEFT, then filter where {books.id} is NULL (press Filter, or poke that NULL in the result).',
     ],
   },
   'school-twice': {
@@ -142,8 +142,8 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     takeaway: 'This NULL was in the table, not made by the join.',
     hints: [
       'NULL can be stored in a table, too. Look at the {books.due} column.',
-      'INNER keeps only borrowed books. Then poke the NULL under {books.due}.',
-      'Bring either table to the other, keep INNER, then poke the NULL under {books.due}.',
+      'INNER keeps only borrowed books. Then filter where {books.due} is NULL: press Filter, or poke that NULL in the result.',
+      'Bring either table to the other, keep INNER, then filter where {books.due} is NULL (press Filter, or poke that NULL in the result).',
     ],
   },
   'shop-no-customer': {
@@ -151,8 +151,8 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     takeaway: 'Same trick, other side: order 108 has no customer.',
     hints: [
       'One order points to no customer.',
-      'Keep the orders table still, choose LEFT, then poke a NULL in a customer column.',
-      'Leave the orders table where it is, bring the customers table over, choose LEFT, then poke the NULL under {customers.id}.',
+      'Keep the orders table still, choose LEFT, then filter on a customer column: press Filter, or poke a NULL in the result.',
+      'Keep the orders table still, bring the customers table over, choose LEFT, then filter where {customers.id} is NULL (press Filter, or poke that NULL in the result).',
     ],
   },
   'school-every-club': {
@@ -169,8 +169,8 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     takeaway: 'No student matched, so this club has no members.',
     hints: [
       'A LEFT join fills in NULL where nothing matched.',
-      'Keep the clubs table still, choose LEFT, then poke a NULL in a student column.',
-      'Leave the clubs table where it is, bring the students table over, choose LEFT, then poke the NULL under {students.id}.',
+      'Keep the clubs table still, choose LEFT, then filter on a student column: press Filter, or poke a NULL in the result.',
+      'Keep the clubs table still, bring the students table over, choose LEFT, then filter where {students.id} is NULL (press Filter, or poke that NULL in the result).',
     ],
   },
   'school-every-student': {
@@ -187,8 +187,8 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     takeaway: 'A blank {source:students.clubId} and an unknown one both match nothing.',
     hints: [
       "Look at the {source:students.clubId} column: one is empty, and one points to a club that doesn't exist.",
-      'Keep the students table still, choose LEFT, then poke a NULL in a club column.',
-      'Leave the students table where it is, bring the clubs table over, choose LEFT, then poke the NULL under {clubs.id}.',
+      'Keep the students table still, choose LEFT, then filter on a club column: press Filter, or poke a NULL in the result.',
+      'Keep the students table still, bring the clubs table over, choose LEFT, then filter where {clubs.id} is NULL (press Filter, or poke that NULL in the result).',
     ],
   },
   'cafe-menu': {
@@ -205,8 +205,8 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     takeaway: 'This ticket points to no drink, so nothing matched.',
     hints: [
       'One ticket points to no drink.',
-      'Keep the tickets table still, choose LEFT, then poke a NULL in a drink column.',
-      'Leave the tickets table where it is, bring the drinks table over, choose LEFT, then poke the NULL under {drinks.id}.',
+      'Keep the tickets table still, choose LEFT, then filter on a drink column: press Filter, or poke a NULL in the result.',
+      'Keep the tickets table still, bring the drinks table over, choose LEFT, then filter where {drinks.id} is NULL (press Filter, or poke that NULL in the result).',
     ],
   },
   'cafe-no-milk': {
@@ -214,8 +214,8 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     takeaway: 'These NULLs were in the table, not made by the join.',
     hints: [
       'NULL can be stored in a table, too. Look at the {tickets.milk} column.',
-      'Join with INNER, then poke a NULL under {tickets.milk}.',
-      'Bring either table to the other, keep INNER, then poke a NULL under {tickets.milk}.',
+      'Join with INNER, then filter where {tickets.milk} is NULL: press Filter, or poke one of those NULLs in the result.',
+      'Bring either table to the other, keep INNER, then filter where {tickets.milk} is NULL (press Filter, or poke one of those NULLs in the result).',
     ],
   },
   'cafe-every-ticket': {
@@ -232,8 +232,8 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
     takeaway: "The NULL under {tickets.id} means no match; {tickets.milk}'s doesn't.",
     hints: [
       'A LEFT join fills in NULL where nothing matched. But {tickets.milk} can be NULL, too.',
-      'Keep the drinks table still, choose LEFT, then poke the NULL under {tickets.id}, not one under {tickets.milk}.',
-      'Leave the drinks table where it is, bring the tickets table over, choose LEFT, then poke the NULL under {tickets.id}.',
+      'Keep the drinks table still, choose LEFT, then filter where {tickets.id} is NULL, not {tickets.milk} (press Filter, or poke that NULL in the result).',
+      'Keep the drinks table still, bring the tickets table over, choose LEFT, then filter where {tickets.id} is NULL (press Filter, or poke that NULL in the result).',
     ],
   },
 };
@@ -272,6 +272,16 @@ export const CARD = {
    * per concept practice hasn't introduced yet (at most two).
    */
   dailyAhead: "Today's puzzle uses something new:",
+  /**
+   * A NULL in a source table was poked or pinched: only the result's NULLs
+   * filter. Briefly, in the message area (no click).
+   */
+  wrongNull: 'Poke a NULL in the result above, or use Filter.',
+  /**
+   * The status line, before a join, when a table or desk was found but too
+   * far away to use (the slabs float instead).
+   */
+  moveCloser: 'Move closer to your table to use it.',
 };
 
 // --- The puzzle bar (next to INNER | LEFT) --------------------------------------------
@@ -290,6 +300,12 @@ export const BAR = {
   daily: 'Today',
   /** The filter chip's own button, after its WHERE clause. */
   clearFilter: 'Clear',
+  /** Shown while the result has NULLs and no filter is set: opens one chip per column with a NULL. */
+  filter: 'Filter',
+  /** Closes the chips again, without filtering. */
+  filterBack: 'Back',
+  /** One chip: the column's header as the result slab shows it. */
+  filterChip: (header: string) => `${header} is NULL`,
 };
 
 // --- Diff markers on the result slab ---------------------------------------------------

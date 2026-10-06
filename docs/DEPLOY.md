@@ -78,7 +78,7 @@ Then check that no dev-only code made it into `dist/`. This should print
 nothing:
 
 ```
-grep -rlE "\[Grab debug\]|\[Join debug\]|\[DeskPlacement|\[seated\]|\[dev flags\]|spatialql\.debug|Option\+Shift|join: bring orders|@iwer|slab \(touch\)|pinch evaluated|group: top|\[Challenge debug\]|applying the solution|applying the wrong state|apply the puzzle|resetProgress|\[Slab\]|cut off with an ellipsis|switched to|\[HUD\]|frame p50|debugSide|start: daily|start: practice|from \?puzzle=|__spatialql/log|\[Touch debug\]|lines dropped|debugPanel|SDK poke pointer|join lowered the pair" dist/
+grep -rlE "\[Grab debug\]|\[Join debug\]|\[DeskPlacement|\[seated\]|\[dev flags\]|spatialql\.debug|Option\+Shift|join: bring orders|@iwer|slab \(touch\)|pinch evaluated|group: top|\[Challenge debug\]|applying the solution|applying the wrong state|apply the puzzle|resetProgress|\[Slab\]|cut off with an ellipsis|switched to|\[HUD\]|frame p50|debugSide|start: daily|start: practice|from \?puzzle=|__spatialql/log|\[Touch debug\]|lines dropped|debugPanel|SDK poke pointer|join lowered the pair|ray select|Filter opened|filter chip \(|not a filter|near grab|status line:" dist/
 ```
 
 If it lists a file, some dev code survived the build (it can't run, because

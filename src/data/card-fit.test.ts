@@ -46,6 +46,7 @@ describe('the puzzle card fits its text', () => {
       CARD.solvedWithHints(3),
       CARD.usedAllHints,
       CARD.solveFirst,
+      CARD.moveCloser,
       WELCOME.streak(365),
     ];
     for (const status of statuses) {
@@ -63,6 +64,11 @@ describe('the puzzle card fits its text', () => {
       expect(cardMessageLines(intro), intro).toBeLessThanOrEqual(CARD_MESSAGE_LINES);
     }
     expect(cardMessageLines(`${CONCEPT_INTROS.antijoin} ${NULL_EXPLAINER}`)).toBeLessThanOrEqual(CARD_MESSAGE_LINES);
+  });
+
+  it('"Poke a NULL in the result above, or use Filter." fits the message area on its own', () => {
+    expect(cardMessageLines(CARD.wrongNull)).toBeLessThanOrEqual(2);
+    expect(CARD.wrongNull).toMatch(/^[\x20-\x7e]+$/);
   });
 
   it('a daily ahead of practice: the lead-in and two intros fit together', () => {

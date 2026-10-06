@@ -7,9 +7,10 @@
  *   3 lines) and a message (up to 5 lines: an intro, a hint, the answer, or
  *   the win's takeaway and query line). Fixed size (card-metrics.ts), so
  *   changing its text never changes its layout.
- * - the **puzzle bar**: Hint, Next and the filter chip (`WHERE ... IS NULL
- *   Clear`), in the control band next to INNER | LEFT. Touch targets at
- *   least the control's option size.
+ * - the **puzzle bar**: Hint, Next and the filter (Filter while the result
+ *   has NULLs, which opens one chip per column with a NULL; then `WHERE ...
+ *   IS NULL Clear`), in the control band next to INNER | LEFT. Touch targets
+ *   at least the control's option size.
  *
  * Origins are at their centers.
  */
@@ -23,7 +24,14 @@ import { School } from '@pmndrs/uikit-lucide/dist/School.js';
 import { ShoppingBag } from '@pmndrs/uikit-lucide/dist/ShoppingBag.js';
 import { CARD_GOAL_LINES, CARD_MESSAGE_LINES, cardMetrics } from './card-metrics.js';
 import type { DatasetIcon } from './data/datasets.js';
-import { BAR_BUTTON_PADDING_EM, barButtonWidthCm } from './slab-metrics.js';
+import {
+  BAR_BORDER_CM,
+  BAR_BUTTON_PADDING_EM,
+  BAR_PADDING_CM,
+  barButtonWidthCm,
+  barRowWidthCm,
+  MAX_FILTER_CHIPS,
+} from './slab-metrics.js';
 import {
   CONTROL_OPTION_MIN_HEIGHT_CM,
   CONTROL_OPTION_MIN_WIDTH_CM,
@@ -259,11 +267,28 @@ export function setCardIntro(card: PuzzleCardView, lead: string, lines: readonly
 
 // --- Puzzle bar ---------------------------------------------------------------------
 
-/** The bar's touch targets. The filter chip's WHERE label isn't one; its Clear button is. */
-export type BarButton = 'hint' | 'next' | 'clear';
+/**
+ * The bar's touch targets. The filter's WHERE label isn't one; its Clear
+ * button is. `filter` opens the chips (one per result column with a NULL),
+ * `filterBack` closes them, `chip` is one of them (`BarButtonTarget.chip`).
+ */
+export type BarButton = 'hint' | 'next' | 'clear' | 'filter' | 'filterBack' | 'chip';
 
-/** One bar button's target in the bar's frame (meters); all share `buttonHeightMeters`. */
-export type BarButtonTarget = { name: BarButton; centerX: number; width: number };
+/**
+ * One bar button's target in the bar's frame (meters); all share
+ * `buttonHeightMeters`. `chip`: which chip (its index), or -1.
+ */
+export type BarButtonTarget = { name: BarButton; centerX: number; width: number; chip: number };
+
+export { MAX_FILTER_CHIPS };
+
+/**
+ * What the bar shows:
+ * - playing: Hint, Next, then either the filter's WHERE label and Clear
+ *   (`where` set), or Filter (`filter`: the result has NULLs), or nothing;
+ * - the chips open (`chips` not null): Back, then one chip per label.
+ */
+export type BarContents = { where: string | null; filter: boolean; chips: readonly string[] | null };
 
 export type PuzzleBarView = {
   document: UIKitDocument;
@@ -275,25 +300,31 @@ export type PuzzleBarView = {
   next: Container;
   /** Next's label: "Next", or "Skip" after "Show answer" (see `setNextLabel`). */
   nextText: Text;
-  /** The filter chip's label (the WHERE clause): not a target. */
+  /** The filter's label (the WHERE clause): not a target. */
   chip: Container;
   chipText: Text;
-  /** The chip's Clear button: its own pill and target. */
+  /** The filter's Clear button: its own pill and target. */
   clear: Container;
+  /** Filter: opens the chips. */
+  filter: Container;
+  /** Back: closes the chips. */
+  filterBack: Container;
+  /** The filter chips (MAX_FILTER_CHIPS, hidden until the chips open). */
+  filterChips: { container: Container; text: Text }[];
   /** Opacity of the Next button (pulses once the puzzle is won). */
   nextOpacity: Signal<number>;
-  /** Current size: the bar is only as wide as its buttons (see `setBarChip`). */
+  /** Current size: the bar is only as wide as its buttons (see `setBarContents`). */
   widthMeters: number;
   heightMeters: number;
-  /** The buttons shown, left to right (Clear only while a filter is set). Updated in place. */
+  /** The buttons shown, left to right. Updated in place. */
   buttons: BarButtonTarget[];
   buttonHeightMeters: number;
   /** Internal sizing (cm). */
-  sizes: { hint: number; next: number; clear: number; label: number; paddingX: number };
+  sizes: { hint: number; next: number; clear: number; filter: number; back: number; label: number; paddingX: number };
 };
 
-const BAR_PADDING = 0.3;
-const BAR_BORDER = 0.15;
+const BAR_PADDING = BAR_PADDING_CM;
+const BAR_BORDER = BAR_BORDER_CM;
 const BAR_RADIUS = 1.4;
 const BAR_INSET = BAR_PADDING + BAR_BORDER;
 // Next while unavailable: clearly off (light fill, no accent), but readable
@@ -312,13 +343,15 @@ const CLEAR_BORDER_WIDTH = 0.15;
  */
 export function buildPuzzleBar(
   labelFontCm: number,
-  labels: { hint: readonly string[]; next: readonly string[]; clear: string },
+  labels: { hint: readonly string[]; next: readonly string[]; clear: string; filter: string; filterBack: string },
 ): PuzzleBarView {
   const paddingX = labelFontCm * BAR_BUTTON_PADDING_EM;
   const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, labelFontCm * LINE_HEIGHT_FACTOR);
   const hintWidth = barButtonWidthCm(labels.hint, labelFontCm);
   const nextWidth = barButtonWidthCm(labels.next, labelFontCm);
   const clearWidth = barButtonWidthCm([labels.clear], labelFontCm);
+  const filterWidth = barButtonWidthCm([labels.filter], labelFontCm);
+  const backWidth = barButtonWidthCm([labels.filterBack], labelFontCm);
   const heightCm = buttonHeight + 2 * BAR_INSET;
 
   const fade = signal(1);
@@ -387,6 +420,17 @@ export function buildPuzzleBar(
     borderRightWidth: CLEAR_BORDER_WIDTH,
     borderBottomWidth: CLEAR_BORDER_WIDTH,
   });
+  // Filter, then (while open) Back and the chips: plain buttons like Hint.
+  const filter = button(labels.filter, filterWidth, false, null);
+  filter.container.setProperties({ display: 'none' });
+  const back = button(labels.filterBack, backWidth, false, null);
+  back.container.setProperties({ display: 'none' });
+  const filterChips: { container: Container; text: Text }[] = [];
+  for (let i = 0; i < MAX_FILTER_CHIPS; i++) {
+    const chipButton = button('', CONTROL_OPTION_MIN_WIDTH_CM, false, null);
+    chipButton.container.setProperties({ display: 'none' });
+    filterChips.push(chipButton);
+  }
 
   const bar: PuzzleBarView = {
     document: new UIKitDocument(root),
@@ -399,14 +443,25 @@ export function buildPuzzleBar(
     chip: chip.container,
     chipText: chip.text,
     clear: clear.container,
+    filter: filter.container,
+    filterBack: back.container,
+    filterChips,
     nextOpacity,
     widthMeters: 0,
     heightMeters: heightCm / 100,
     buttons: [],
     buttonHeightMeters: buttonHeight / 100,
-    sizes: { hint: hintWidth, next: nextWidth, clear: clearWidth, label: labelFontCm, paddingX },
+    sizes: {
+      hint: hintWidth,
+      next: nextWidth,
+      clear: clearWidth,
+      filter: filterWidth,
+      back: backWidth,
+      label: labelFontCm,
+      paddingX,
+    },
   };
-  setBarChip(bar, null);
+  setBarContents(bar, { where: null, filter: false, chips: null });
   return bar;
 }
 
@@ -421,14 +476,21 @@ export function setNextLabel(bar: PuzzleBarView, label: string): void {
 }
 
 /**
- * Shows the filter chip with the WHERE clause `where` and its Clear button
- * (or hides both with null) and resizes the bar to its contents; updates
- * `widthMeters` and `buttons` in place. The caller re-places the bar
- * afterwards (its center moves with its width).
+ * Shows `contents` (see `BarContents`) and resizes the bar to them; updates
+ * `widthMeters` and `buttons` in place. Runs only when the contents change,
+ * never per frame. The caller re-places the bar afterwards (its center moves
+ * with its width).
  */
-export function setBarChip(bar: PuzzleBarView, where: string | null): void {
-  const { hint, next, clear, label, paddingX } = bar.sizes;
-  // The label needs no minimum width (it isn't a target), only its padding.
+export function setBarContents(bar: PuzzleBarView, contents: BarContents): void {
+  const { hint, next, clear, filter, back, label, paddingX } = bar.sizes;
+  const open = contents.chips !== null;
+  const where = open ? null : contents.where;
+  const showFilter = !open && where === null && contents.filter;
+  const chips = contents.chips ?? [];
+
+  bar.hint.setProperties({ display: open ? 'none' : 'flex' });
+  bar.next.setProperties({ display: open ? 'none' : 'flex' });
+  // The WHERE label needs no minimum width (it isn't a target), only its padding.
   const labelWidth = where === null ? 0 : measureHeaderTextCm(where, label) + 2 * paddingX;
   if (where === null) {
     bar.chip.setProperties({ display: 'none' });
@@ -438,24 +500,45 @@ export function setBarChip(bar: PuzzleBarView, where: string | null): void {
     bar.chip.setProperties({ display: 'flex', width: labelWidth, minWidth: labelWidth });
     bar.clear.setProperties({ display: 'flex' });
   }
-  const chipSpan = where === null ? 0 : 2 * BAR_PADDING + labelWidth + clear;
-  const widthCm = hint + next + BAR_PADDING + chipSpan + 2 * BAR_INSET;
+  bar.filter.setProperties({ display: showFilter ? 'flex' : 'none' });
+  bar.filterBack.setProperties({ display: open ? 'flex' : 'none' });
+
+  // The items shown, left to right, in the children's order (hidden ones take no space or gap).
+  const items: { name: BarButton | null; width: number; chip: number }[] = [];
+  if (!open) {
+    items.push({ name: 'hint', width: hint, chip: -1 }, { name: 'next', width: next, chip: -1 });
+    if (where !== null) {
+      items.push({ name: null, width: labelWidth, chip: -1 }, { name: 'clear', width: clear, chip: -1 });
+    } else if (showFilter) {
+      items.push({ name: 'filter', width: filter, chip: -1 });
+    }
+  } else {
+    items.push({ name: 'filterBack', width: back, chip: -1 });
+  }
+  bar.filterChips.forEach((chipButton, i) => {
+    const text = i < chips.length ? chips[i] : null;
+    if (text === null) {
+      chipButton.container.setProperties({ display: 'none' });
+      return;
+    }
+    const width = barButtonWidthCm([text], label);
+    chipButton.text.setProperties({ text });
+    chipButton.container.setProperties({ display: 'flex', width, minWidth: width });
+    items.push({ name: 'chip', width, chip: i });
+  });
+
+  const widthCm = barRowWidthCm(items.map((item) => item.width));
   bar.root.setProperties({ width: widthCm });
   bar.widthMeters = widthCm / 100;
 
   // Target centers, left to right, in the bar's frame (origin at its center).
-  const left = -widthCm / 2 + BAR_INSET;
+  let cursor = -widthCm / 2 + BAR_INSET;
   bar.buttons.length = 0;
-  bar.buttons.push(
-    { name: 'hint', centerX: (left + hint / 2) / 100, width: hint / 100 },
-    { name: 'next', centerX: (left + hint + BAR_PADDING + next / 2) / 100, width: next / 100 },
-  );
-  if (where !== null) {
-    bar.buttons.push({
-      name: 'clear',
-      centerX: (left + hint + next + labelWidth + 3 * BAR_PADDING + clear / 2) / 100,
-      width: clear / 100,
-    });
+  for (const item of items) {
+    if (item.name !== null) {
+      bar.buttons.push({ name: item.name, centerX: (cursor + item.width / 2) / 100, width: item.width / 100, chip: item.chip });
+    }
+    cursor += item.width + BAR_PADDING;
   }
 }
 

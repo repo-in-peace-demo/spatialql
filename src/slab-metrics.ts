@@ -160,6 +160,26 @@ export function barButtonWidthCm(labels: readonly string[], labelFontCm: number)
   return Math.max(CONTROL_OPTION_MIN_WIDTH_CM, widest + 2 * BAR_BUTTON_PADDING_EM * labelFontCm);
 }
 
+/** The Filter button's chips: at most this many (one per result column with a NULL; tested). */
+export const MAX_FILTER_CHIPS = 6;
+
+/** The puzzle bar's padding (also the gap between its buttons) and border, cm. */
+export const BAR_PADDING_CM = 0.3;
+export const BAR_BORDER_CM = 0.15;
+
+/**
+ * The puzzle bar's width (cm) holding these items side by side (button
+ * widths, and the filter's WHERE label), with the gaps between them and the
+ * bar's padding and border.
+ */
+export function barRowWidthCm(itemWidthsCm: readonly number[]): number {
+  let width = 2 * (BAR_PADDING_CM + BAR_BORDER_CM) + BAR_PADDING_CM * Math.max(0, itemWidthsCm.length - 1);
+  for (const item of itemWidthsCm) {
+    width += item;
+  }
+  return width;
+}
+
 /** Whether `text` fits a column of at most `m.columnMaxWidth` (with cell padding) without an ellipsis. */
 export function fitsColumn(text: string, metrics: GlyphMetrics, fontSizeCm: number, m: SlabMetrics): boolean {
   return measureTextCm(text, metrics, fontSizeCm) <= m.columnMaxWidth - 2 * m.cellPaddingX + FIT_EPSILON_CM;

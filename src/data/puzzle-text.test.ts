@@ -26,12 +26,23 @@ describe('puzzle text', () => {
   );
 
   it.each(PUZZLES.map((puzzle): [string, Puzzle] => [puzzle.id, puzzle]))(
-    '%s: every column a hint says to poke "under" is a header the result shows',
+    '%s: every column a hint says to filter on ("where X is NULL", "under X") is a header the result shows',
     (_id, puzzle) => {
       const headers = new Set(resultHeaders(puzzle));
       for (const hint of puzzleText(puzzle).hints) {
-        for (const match of hint.matchAll(/under ([A-Z][A-Z0-9_. ]*[A-Z0-9])/g)) {
+        for (const match of hint.matchAll(/(?:under|where) ([A-Z][A-Z0-9_.]*(?: [A-Z][A-Z0-9_.]*)*?)(?= is NULL|[,.)]| not)/g)) {
           expect(headers.has(match[1]), `"${match[1]}" in: ${hint}`).toBe(true);
+        }
+      }
+    },
+  );
+
+  it.each(PUZZLES.map((puzzle): [string, Puzzle] => [puzzle.id, puzzle]))(
+    '%s: a hint that says to poke a NULL says it is the one in the result',
+    (_id, puzzle) => {
+      for (const hint of puzzleText(puzzle).hints) {
+        if (/\bpoke\b/.test(hint)) {
+          expect(hint, hint).toContain('in the result');
         }
       }
     },
@@ -63,9 +74,11 @@ describe('puzzle text', () => {
   });
 
   it('names columns as the slabs show them', () => {
-    expect(puzzleText(getPuzzle('shop-never-ordered')).hints[2]).toContain('poke the NULL under O.ID.');
-    expect(puzzleText(getPuzzle('library-no-due')).hints[1]).toContain('under DUE.');
-    expect(puzzleText(getPuzzle('cafe-never-ordered')).hints[1]).toContain('under T.ID, not one under MILK');
+    expect(puzzleText(getPuzzle('shop-never-ordered')).hints[2]).toContain(
+      'filter where O.ID is NULL (press Filter, or poke that NULL in the result).',
+    );
+    expect(puzzleText(getPuzzle('library-no-due')).hints[1]).toContain('where DUE is NULL');
+    expect(puzzleText(getPuzzle('cafe-never-ordered')).hints[1]).toContain('where T.ID is NULL, not MILK');
     // A foreign-key column only appears on its source slab.
     expect(puzzleText(getPuzzle('school-no-club')).hints[0]).toContain('the CLUB ID column');
     expect(puzzleText(getPuzzle('school-twice')).hints[1]).toContain('the ID column of the clubs table');

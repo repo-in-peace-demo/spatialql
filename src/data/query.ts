@@ -90,6 +90,33 @@ export function filterForColumn(left: Table, right: Table, result: JoinResultTab
   };
 }
 
+/**
+ * The result columns the Filter button offers (one chip each), in column
+ * order: those with a NULL in a row the player sees now -- shown by the join
+ * type (INNER hides LEFT JOIN's ghost rows) and kept by `filter`. The same
+ * filters a poke on one of those NULL cells creates.
+ */
+export function nullFilterColumns(
+  left: Table,
+  right: Table,
+  result: JoinResultTable,
+  joinType: JoinType,
+  filter: NullFilter | null,
+): number[] {
+  const kept = nullFilterMask(left, right, result, filter);
+  const columns: number[] = [];
+  result.columns.forEach((column, index) => {
+    const hasNull = result.table.rows.some(
+      (row, rowIndex) =>
+        kept[rowIndex] && (joinType === 'left' || !result.lineage[rowIndex].ghost) && row[column.key] === null,
+    );
+    if (hasNull) {
+      columns.push(index);
+    }
+  });
+  return columns;
+}
+
 export function sameFilter(a: NullFilter | null, b: NullFilter | null): boolean {
   if (a === null || b === null) {
     return a === b;

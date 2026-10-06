@@ -51,6 +51,7 @@ import { CHALLENGE_MODE } from './challenge-mode.js';
 import type { RowStatus } from './data/compare.js';
 import {
   buildJoinResultTable,
+  columnHeaderText,
   fullJoinPairings,
   joinTables,
   requireJoinKeys,
@@ -60,13 +61,19 @@ import { buildJoinSql, buildWhereSql } from './data/join-sql.js';
 import { INITIAL_JOIN_STATE, transition, type JoinEvent, type JoinState } from './data/join-state.js';
 import { assignKeyTints } from './data/key-tints.js';
 import { RESULT_ROW_CAP } from './data/puzzles.js';
-import { filterForColumn, nullFilterMask, sameFilter } from './data/query.js';
+import { filterForColumn, nullFilterColumns, nullFilterMask, sameFilter } from './data/query.js';
 import { DATASETS, datasetOfTable, tableById } from './data/datasets.js';
 import type { QuerySpec } from './data/query.js';
 import type { CellValue, JoinType, NullFilter, Table } from './data/types.js';
 import { deskReady } from './desk-bridge.js';
 import { devFlag } from './dev-flags.js';
-import { joinBridge, type ChallengeLayout, type JoinControls, type PlacedElement } from './join-bridge.js';
+import {
+  joinBridge,
+  type ChallengeLayout,
+  type JoinControls,
+  type NullFilterChoice,
+  type PlacedElement,
+} from './join-bridge.js';
 import { JoinDebug, type JoinDebugHost, type JoinStats } from './join-debug.js';
 import { isTouchPointerClick, setRect, touchProbe, type PressPath } from './touch-probe.js';
 import { COLOR_MATCH_LINE, COLOR_PREVIEW, EdgeGlow, lineColorForTint, SegmentBatch } from './join-visuals.js';
@@ -92,6 +99,7 @@ import {
   slabBottomLocalY,
   slabTopLocalY,
   slabVisualTopLocalY,
+  setNullCellHover,
   setSlabBadge,
   type CellOffset,
   type SlabBadgeLook,
@@ -221,6 +229,12 @@ const RESULT_GAP_ABOVE_METERS = 0.08;
 const RESULT_BEHIND_METERS = 0.02;
 /** Legibility cap: the result slab's center is never farther than this from the eyes. */
 const RESULT_MAX_DISTANCE_METERS = 0.85;
+/**
+ * A result slab placed beyond RESULT_MAX_PUSHED_DISTANCE_METERS (a pair
+ * pushed far away) is pulled toward the viewer by at most this much, so its
+ * rows stay at least RESULT_MIN_PUSHED_ROW_TEXT_DEG tall.
+ */
+const RESULT_MAX_PULL_METERS = 0.15;
 /** Push-back steps that bring the result slab's top edge (and the card above it) inside the view. */
 const RESULT_FIT_ITERATIONS = 6;
 /**
@@ -281,6 +295,19 @@ const NULL_ACTIVATION_DEBOUNCE_SECONDS = 0.3;
 const NULL_PINCH_MARGIN_METERS = 0.01;
 /** A ray hit or fingertip counts as on a NULL cell within this of its rectangle. */
 const NULL_RAY_TOLERANCE_METERS = 0.003;
+/** A ray hit counts as on a control option within this of its rectangle (bar buttons: the bar's pinch margin). */
+const RAY_BUTTON_TOLERANCE_METERS = 0.005;
+/** A fingertip this close in front of a NULL cell hovers it (its outline strengthens)... */
+const NULL_HOVER_DEPTH_METERS = 0.04;
+/** ...or up to this far behind its face (pressing into it). */
+const CONTACT_HOVER_BEHIND_METERS = 0.01;
+/** The first-time cue: the NULL cells' outlines stay strong this long, then settle. */
+const NULL_CUE_SECONDS = 0.9;
+/**
+ * A select whose grip is this close to a source slab's grab surface (beyond
+ * the grab sphere) is a near grab, not a ray press.
+ */
+const NEAR_GRAB_MARGIN_METERS = 0.01;
 /** A poke and its UIKit click (or a pinch) on the control within this count once. */
 const CONTROL_PRESS_DEBOUNCE_SECONDS = 0.3;
 const INDEX_TIP: readonly XRHandJoint[] = ['index-finger-tip'];
@@ -296,7 +323,19 @@ const COLOR_WIN_GLOW = '#f0b43c';
 const UP = new Vector3(0, 1, 0);
 const HANDS = ['left', 'right'] as const;
 
-type SourceSlab = { id: string; entity: Entity; object: Object3D; doc: TableSlabDocument; table: Table };
+type SourceSlab = {
+  id: string;
+  entity: Entity;
+  object: Object3D;
+  doc: TableSlabDocument;
+  table: Table;
+  /** The NULL cells it shows (a poke or pinch there gets "use the result's"), and its contact poke. */
+  nullCells: { row: number; column: number }[];
+  nullPoke: ContactPoke;
+};
+
+/** What a hand's or controller's target ray hit first (see `castRay`). */
+type RayTarget = 'none' | 'control' | 'bar' | 'null' | 'result' | 'slab';
 
 type ResultView = {
   key: string;
@@ -436,9 +475,34 @@ export class JoinSystem
     this._pokeSource ? indexStraightness(this.world, this.player, this._pokeSource, this._straightA, this._straightB) : null;
   private readonly _rayOrigin = new Vector3();
   private readonly _rayDir = new Vector3();
+  private readonly _rayLocalO = new Vector3();
+  private readonly _rayLocalD = new Vector3();
+  private readonly _rayLocal = new Vector3();
+  private readonly _rayWorld = new Vector3();
+  /** `castRay`'s nearest hit: what, how far along the ray, and where (world). */
+  private readonly _rayHit = {
+    target: 'none' as RayTarget,
+    distance: Infinity,
+    option: 'inner' as JoinType,
+    row: -1,
+    column: -1,
+    name: '',
+    point: new Vector3(),
+  };
   private readonly _pokeTip = new Vector3();
   private readonly _layoutA = new Vector3();
   private readonly _layoutB = new Vector3();
+  /** The source slab whose NULL cells a contact poke is being tested against (`pokeOnSourceNull`). */
+  private _pokeSlab: SourceSlab | null = null;
+  private readonly pokeOnSourceNull = (): boolean =>
+    !!this._pokeSlab && nearestSourceNull(this._pokeSlab, this._a) <= POKE_TARGET_TOLERANCE_METERS;
+  /** The result NULL cell drawn hovered (a fingertip in front of it, or a ray on it), if any. */
+  private hoverView: ResultView | null = null;
+  private hoverRow = -1;
+  private hoverColumn = -1;
+  /** The first-time cue's end (tween clock seconds); 0 when none is showing. */
+  private nullCueUntil = 0;
+  private nullCueView: ResultView | null = null;
 
   private visualsRoot!: Group;
   private lines!: SegmentBatch;
@@ -631,74 +695,160 @@ export class JoinSystem
 
     this.updatePreviewVisuals();
     this.updateLines();
-    this.updatePinchSelect();
+    this.updateSelect();
     this.updateControlPoke();
     if (this.challengeLayout) {
-      this.updateNullRayAndPoke();
+      this.updateNullPokeAndHover();
+      this.updateSourceNullPoke();
     }
   }
 
   /**
-   * Challenge mode: ray selects and fingertip pokes on NULL cells, tested
-   * against the result slab's own geometry (UIKit clicks don't reach the
-   * result slab in the emulator, so this doesn't rely on them).
-   * - Ray: on select start, each input's target ray is intersected with the
-   *   slab's plane; a hit inside a NULL cell pokes it.
-   * - Poke: an index fingertip making contact with a NULL cell from the
-   *   viewer's side, by the same rules as the buttons (`contact-poke.ts`).
-   * A pinch on the same press may also land; the activation debounce makes it count once.
+   * Challenge mode: fingertip pokes on the result's NULL cells, tested
+   * against the slab's own geometry (by the same rules as the buttons,
+   * `contact-poke.ts`), and their hover look: a fingertip just in front of a
+   * NULL cell, or a hand's or controller's ray on it, draws its outline
+   * stronger. (Ray selects: `updateSelect`.) A pinch or ray on the same
+   * press may also land; the activation debounce makes it count once.
    */
-  private updateNullRayAndPoke(): void {
+  private updateNullPokeAndHover(): void {
     const view = this.active;
-    if (!view || this.state.phase !== 'joined' || view.doc.fade.peek() < 0.5) {
+    const live = !!view && this.state.phase === 'joined' && view.doc.fade.peek() >= 0.5;
+    this.updateNullCue();
+    if (!view || !live) {
       this.nullPoke.reset('left');
       this.nullPoke.reset('right');
+      this.setNullHover(null, -1, -1);
       return;
     }
     view.object.updateWorldMatrix(true, false);
+    let hoverRow = -1;
+    let hoverColumn = -1;
     for (const hand of HANDS) {
-      // Ray.
-      if (this.input.xr.gamepads[hand]?.getSelectStart()) {
-        const raySpace = this.player.raySpaces[hand];
-        raySpace.updateWorldMatrix(true, false);
-        this._rayOrigin.setFromMatrixPosition(raySpace.matrixWorld);
-        raySpace.getWorldQuaternion(this._q2);
-        this._rayDir.set(0, 0, -1).applyQuaternion(this._q2).add(this._rayOrigin);
-        // Into the slab's frame, where its surface is z = 0.
-        view.object.worldToLocal(this._rayOrigin);
-        view.object.worldToLocal(this._rayDir);
-        this._rayDir.sub(this._rayOrigin);
-        if (this._rayDir.z < -1e-4 && this._rayOrigin.z > 0) {
-          const t = -this._rayOrigin.z / this._rayDir.z;
-          this._a.copy(this._rayOrigin).addScaledVector(this._rayDir, t);
-          view.object.localToWorld(this._a);
-          if (this.nearestNullCell(view, this._a) && this._nullHit.distance <= NULL_RAY_TOLERANCE_METERS) {
-            if (import.meta.env.DEV && this.debug) {
-              this.debug.note(`${hand} ray select on the NULL cell at row ${this._nullHit.row}, column ${this._nullHit.column}`);
-            }
-            this.activateNullCell(view.key, this._nullHit.row, this._nullHit.column, 'ray');
-          }
-        }
-      }
       // Poke.
       const source = this.input.xr.getPrimaryInputSource(hand);
       if (!source?.hand || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
         this.nullPoke.reset(hand);
-        continue;
-      }
-      this._pokeSource = source;
-      this._a.copy(this._pokeTip);
-      view.object.worldToLocal(this._a);
-      const verdict = this.nullPoke.update(hand, this._a, this.pokeOnNullCell, this.pokeStraightness);
-      if (verdict === 'press') {
-        if (import.meta.env.DEV && this.debug) {
-          this.debug.note(`${hand} fingertip poke on the NULL cell at row ${this._nullHit.row}, column ${this._nullHit.column}`);
+      } else {
+        this._pokeSource = source;
+        this._a.copy(this._pokeTip);
+        view.object.worldToLocal(this._a);
+        const verdict = this.nullPoke.update(hand, this._a, this.pokeOnNullCell, this.pokeStraightness);
+        if (verdict === 'press') {
+          if (import.meta.env.DEV && this.debug) {
+            this.debug.note(`${hand} fingertip poke on the NULL cell at row ${this._nullHit.row}, column ${this._nullHit.column}`);
+          }
+          this.activateNullCell(view.key, this._nullHit.row, this._nullHit.column, 'poke');
+        } else if (verdict !== 'none' && import.meta.env.DEV && this.debug) {
+          this.notePokeRejected(hand, 'a NULL cell', verdict, this.nullPoke);
         }
-        this.activateNullCell(view.key, this._nullHit.row, this._nullHit.column, 'poke');
-      } else if (verdict !== 'none' && import.meta.env.DEV && this.debug) {
-        this.notePokeRejected(hand, 'a NULL cell', verdict, this.nullPoke);
+        // Hover: the fingertip just in front of a NULL cell.
+        if (
+          hoverRow < 0 &&
+          this._a.z >= -CONTACT_HOVER_BEHIND_METERS &&
+          this._a.z <= NULL_HOVER_DEPTH_METERS &&
+          this.nearestNullCell(view, this._pokeTip) &&
+          this._nullHit.distance <= POKE_TARGET_TOLERANCE_METERS
+        ) {
+          hoverRow = this._nullHit.row;
+          hoverColumn = this._nullHit.column;
+        }
+      }
+      // Hover: the hand's (or controller's) ray on a NULL cell.
+      if (hoverRow < 0 && this.readRay(hand)) {
+        const t = this.rayPlane(view.object, this._rayLocal);
+        if (Number.isFinite(t)) {
+          this._rayWorld.copy(this._rayLocal);
+          view.object.localToWorld(this._rayWorld);
+          if (this.nearestNullCell(view, this._rayWorld) && this._nullHit.distance <= NULL_RAY_TOLERANCE_METERS) {
+            hoverRow = this._nullHit.row;
+            hoverColumn = this._nullHit.column;
+          }
+        }
       }
     }
+    this.setNullHover(view, hoverRow, hoverColumn);
+  }
+
+  /** Draws one result NULL cell hovered (none: row -1), restoring the last one; only on a change. */
+  private setNullHover(view: ResultView | null, row: number, column: number): void {
+    if (view === this.hoverView && row === this.hoverRow && column === this.hoverColumn) {
+      return;
+    }
+    // The first-time cue owns every outline while it shows.
+    const cueing = this.nullCueUntil > 0;
+    if (this.hoverView && this.hoverRow >= 0 && !cueing) {
+      setNullCellHover(this.hoverView.doc, this.hoverRow, this.hoverColumn, false);
+    }
+    this.hoverView = row >= 0 ? view : null;
+    this.hoverRow = row;
+    this.hoverColumn = column;
+    if (view && row >= 0 && !cueing) {
+      setNullCellHover(view.doc, row, column, true);
+    }
+  }
+
+  /** Ends the first-time cue once its time is up: every outline back to rest (the hovered one stays). */
+  private updateNullCue(): void {
+    const view = this.nullCueView;
+    if (this.nullCueUntil === 0 || this.tweens.now < this.nullCueUntil) {
+      return;
+    }
+    this.nullCueUntil = 0;
+    this.nullCueView = null;
+    if (view) {
+      this.resetNullLooks(view);
+      if (this.hoverView === view && this.hoverRow >= 0) {
+        setNullCellHover(view.doc, this.hoverRow, this.hoverColumn, true);
+      }
+    }
+  }
+
+  /** Every NULL outline of `view` at rest. */
+  private resetNullLooks(view: ResultView): void {
+    view.nullColumns.forEach((columns, row) => {
+      for (const column of columns) {
+        setNullCellHover(view.doc, row, column, false);
+      }
+    });
+  }
+
+  /**
+   * Challenge mode, joined: a fingertip poke on a NULL in a source table
+   * (the NULL that's closest, and tempting, but doesn't filter): the card
+   * says to poke the result's instead. Not on a held slab. No click.
+   */
+  private updateSourceNullPoke(): void {
+    const joined = this.state.phase === 'joined';
+    for (const hand of HANDS) {
+      const source = joined ? this.input.xr.getPrimaryInputSource(hand) : undefined;
+      let tracked = false;
+      if (source?.hand) {
+        tracked = readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip);
+        this._pokeSource = source;
+      }
+      for (const slab of this.sources.values()) {
+        if (!tracked || slab.nullCells.length === 0 || slab.entity.hasComponent(Grabbed)) {
+          slab.nullPoke.reset(hand);
+          continue;
+        }
+        this._pokeSlab = slab;
+        slab.object.updateWorldMatrix(true, false);
+        this._a.copy(this._pokeTip);
+        slab.object.worldToLocal(this._a);
+        if (slab.nullPoke.update(hand, this._a, this.pokeOnSourceNull, this.pokeStraightness) === 'press') {
+          this.wrongNull(slab, hand, 'poke');
+        }
+      }
+    }
+  }
+
+  /** A NULL in a source table was poked or pinched: logged, and the card says where to poke. */
+  private wrongNull(slab: SourceSlab, hand: string, path: PressPath): void {
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`${hand} ${path} on a NULL in the ${slab.id} source table: not a filter (the card points to the result)`);
+    }
+    joinBridge.challenge?.onWrongNull(slab.id, path);
   }
 
   /**
@@ -1049,7 +1199,15 @@ export class JoinSystem
     if (!table || !doc || !object || this.sources.has(tableId)) {
       return;
     }
-    this.sources.set(tableId, { id: tableId, entity, object, doc, table });
+    const nullCells: { row: number; column: number }[] = [];
+    for (const row of doc.rowViews.keys()) {
+      table.columns.forEach((column, index) => {
+        if (table.rows[row]?.[column] === null) {
+          nullCells.push({ row, column: index });
+        }
+      });
+    }
+    this.sources.set(tableId, { id: tableId, entity, object, doc, table, nullCells, nullPoke: new ContactPoke() });
     this.homes.set(tableId, { pos: new Vector3(), quat: new Quaternion(), set: false });
     this.glides.set(tableId, dockAnimation(HOME_GLIDE_SECONDS));
     this.layoutDirty = true;
@@ -1144,6 +1302,8 @@ export class JoinSystem
             reserveRows: RESULT_ROW_CAP,
             // The card's state, mirrored where the player looks (the card is beside it).
             badge: true,
+            // Every NULL here filters: outlined, so it reads as a button.
+            nullTargets: true,
             accent: DATASETS[datasetOfTable(leftId) ?? 'shop'].theme.accent,
           }
         : {}),
@@ -1358,10 +1518,45 @@ export class JoinSystem
     }
   }
 
-  pulseNullRows(): void {
+  pulseNullCells(): void {
     const view = this.active;
-    if (view) {
-      this.pulseRows(view.nullColumns.flatMap((columns, row) => (columns.length > 0 ? [row] : [])));
+    if (!view || this.state.phase !== 'joined') {
+      return;
+    }
+    view.nullColumns.forEach((columns, row) => {
+      if (view.rowShown[row]) {
+        for (const column of columns) {
+          setNullCellHover(view.doc, row, column, true);
+        }
+      }
+    });
+    this.nullCueView = view;
+    this.nullCueUntil = this.tweens.now + NULL_CUE_SECONDS;
+  }
+
+  nullFilterChoices(): NullFilterChoice[] {
+    const view = this.active;
+    const state = this.state;
+    if (!view || state.phase !== 'joined') {
+      return [];
+    }
+    return nullFilterColumns(view.leftTable, view.rightTable, view.result, state.joinType, state.filter ?? null).map(
+      (column) => ({ column, header: columnHeaderText(view.result.table, view.result.columns[column].key) }),
+    );
+  }
+
+  applyNullFilter(column: number, path: PressPath): void {
+    const view = this.active;
+    const state = this.state;
+    if (!view || state.phase !== 'joined' || column < 0 || column >= view.result.columns.length) {
+      return;
+    }
+    const filter = filterForColumn(view.leftTable, view.rightTable, view.result, column);
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`filter chip (${path}): ${view.result.columns[column].label} is NULL (${filter.tableId}.${filter.column})`);
+    }
+    if (!sameFilter(state.filter ?? null, filter)) {
+      this.applyTransition({ type: 'setFilter', filter });
     }
   }
 
@@ -1519,6 +1714,11 @@ export class JoinSystem
     this.setWhereLine(view, null);
     this.setWinLook(false);
     setSlabBadge(view.doc, null);
+    // NULL outlines at rest (a cue or hover from the last join may have left one drawn).
+    this.nullCueUntil = 0;
+    this.nullCueView = null;
+    this.setNullHover(null, -1, -1);
+    this.resetNullLooks(view);
   }
 
   /**
@@ -2573,25 +2773,33 @@ export class JoinSystem
     this._b.set(0, 0, -1).applyAxisAngle(UP, yaw);
 
     // Lean to face the eyes from the slab's own center. If that center is
-    // beyond the legibility cap, pull the slab toward the viewer -- at most
-    // until its bottom edge is level with the pair's top edge, so it never
-    // hangs in front of the pair's rows. Never shrunk.
+    // farther than its rows stay legible at (RESULT_MAX_PUSHED_DISTANCE_METERS:
+    // row text at least RESULT_MIN_PUSHED_ROW_TEXT_DEG), pull the slab toward
+    // the viewer, by up to RESULT_MAX_PULL_METERS; nearer, the same height
+    // sits lower in view, so its bottom edge is raised again to stay above
+    // the band (it never hangs in front of the control or the pair's rows).
+    // Never shrunk.
     let lean = 0;
     let pulled = 0;
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < RESULT_FIT_ITERATIONS; i++) {
       this._a.subVectors(this._c, this._head);
       lean = eyeFacingLeanFromBottom(this._head.y - this._c.y, this._a.dot(this._b), height);
       this._a
         .copy(this._c)
         .addScaledVector(this._b, (height / 2) * Math.sin(lean))
         .addScaledVector(UP, (height / 2) * Math.cos(lean));
-      const excess = this._a.distanceTo(this._head) - RESULT_MAX_DISTANCE_METERS;
-      const pull = Math.min(Math.max(0, excess), RESULT_BEHIND_METERS - pulled);
+      const excess = this._a.distanceTo(this._head) - RESULT_MAX_PUSHED_DISTANCE_METERS;
+      const pull = Math.min(Math.max(0, excess), RESULT_MAX_PULL_METERS - pulled);
       if (pull <= 1e-4) {
         break;
       }
       this._c.addScaledVector(this._b, -pull);
       pulled += pull;
+      this._f.subVectors(this._c, this._head);
+      const raisedBottomY = this._head.y + Math.hypot(this._f.x, this._f.z) * Math.tan(minBottomRad);
+      if (this._c.y < raisedBottomY) {
+        this._c.y = raisedBottomY;
+      }
     }
 
     // With the pair close to the eyes, the slab's top edge -- or the top of
@@ -2795,40 +3003,231 @@ export class JoinSystem
   // --- Pinch near the control ---------------------------------------------------------
 
   /**
-   * A hand pinch whose pinch point lands on an option selects it. Poke and
-   * ray select arrive as UIKit clicks instead; if one of those also fires
-   * for the same press, `setJoinType` is idempotent.
+   * Every select start (a hand's pinch, a controller's trigger), in order:
+   * 1. A hand's pinch point on the control or the puzzle bar presses it; on
+   *    a NULL cell in the result, filters; on a NULL in a source table (while
+   *    joined), the card says to use the result's.
+   * 2. Otherwise, unless the hand is at a slab (a near grab), its target ray
+   *    -- point and pinch, the standard way to press far things -- presses
+   *    the first thing it hits: a control option, a bar button (Filter and
+   *    its chips included) or a result NULL cell. A slab in front blocks it.
+   * The UIKit click a ray may also send counts once (each target's debounce).
+   * Every ray select is logged with what it hit (`debug`).
    */
-  private updatePinchSelect(): void {
+  private updateSelect(): void {
     const controlLive =
       this.state.phase === 'joined' && this.control.document.visible && this.control.fade.peek() >= 0.5;
-    // Challenge mode's bar takes pinches before a join, too.
+    // Challenge mode's bar takes presses before a join, too.
     if (!controlLive && !this.challengeLayout) {
       return;
     }
     for (const hand of HANDS) {
+      if (!this.input.xr.gamepads[hand]?.getSelectStart()) {
+        continue;
+      }
       const source = this.input.xr.getPrimaryInputSource(hand);
-      if (!source?.hand || !this.input.xr.gamepads[hand]?.getSelectStart()) {
+      const isHand = !!source?.hand;
+      if (isHand && source && readPinchPoint(this.world, this.player, source, this._pinchA)) {
+        if (this.pinchSelect(hand, source, controlLive)) {
+          continue;
+        }
+        if (this.nearGrab(hand)) {
+          if (import.meta.env.DEV && this.debug) {
+            this.debug.note(`${hand} pinch at a slab (a near grab): no ray press`);
+          }
+          continue;
+        }
+      }
+      if (!this.readRay(hand)) {
         continue;
       }
-      if (!readPinchPoint(this.world, this.player, source, this._pinchA)) {
+      this.castRay(controlLive);
+      const hit = this._rayHit;
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(
+          `${hand} ray select (${isHand ? 'hand' : 'controller'}): ` +
+            (hit.target === 'none' ? 'hit nothing' : `${hit.name} at ${hit.distance.toFixed(2)} m`) +
+            (hit.target === 'slab' || hit.target === 'result' ? ' (not a button: no press)' : ''),
+        );
+      }
+      if (hit.target === 'control') {
+        this.pressControl(hit.option, 'ray');
+      } else if (hit.target === 'bar') {
+        joinBridge.challenge?.pressBarAt(hit.point, hand, 'ray');
+      } else if (hit.target === 'null' && this.active) {
+        this.activateNullCell(this.active.key, hit.row, hit.column, 'ray');
+      }
+    }
+  }
+
+  /**
+   * A hand's pinch at `_pinchA` on a near target: the control and the puzzle
+   * bar sit side by side, and the nearer one within its margin wins (a pinch
+   * in the gap goes to whichever is closer); then the result's NULL cells;
+   * then (only feedback) a source table's NULLs. True if it landed on one.
+   */
+  private pinchSelect(hand: (typeof HANDS)[number], source: XRInputSource, controlLive: boolean): boolean {
+    const controlDistance = controlLive ? this.evaluatePinch(hand, this._pinchA) : Infinity;
+    const barDistance = joinBridge.challenge?.barDistance(this._pinchA) ?? Infinity;
+    if (barDistance < Infinity && barDistance < controlDistance) {
+      joinBridge.challenge?.pressBarAt(this._pinchA, hand, 'pinch');
+      return true;
+    }
+    if (controlDistance < Infinity) {
+      this.pressControl(this.pinchNearest, 'pinch');
+      return true;
+    }
+    if (controlLive && this.challengeLayout && this.evaluateNullPinch(hand, source, this._pinchA)) {
+      return true;
+    }
+    return !!this.challengeLayout && this.sourceNullPinch(hand, this._pinchA);
+  }
+
+  /** Whether `hand`'s grip is at a source slab's grab surface (its pinch grabs; it presses nothing far away). */
+  private nearGrab(hand: (typeof HANDS)[number]): boolean {
+    const grip = this.player.gripSpaces[hand];
+    grip.updateWorldMatrix(true, false);
+    this._g.setFromMatrixPosition(grip.matrixWorld);
+    for (const slab of this.sources.values()) {
+      if (distanceToSlab(this._g, slab, this._e) <= GRAB_SPHERE_RADIUS_METERS + NEAR_GRAB_MARGIN_METERS) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** While joined, a pinch point on a NULL in a source table: feedback only (it may grab the slab, too). */
+  private sourceNullPinch(hand: (typeof HANDS)[number], point: Vector3): boolean {
+    if (this.state.phase !== 'joined') {
+      return false;
+    }
+    for (const slab of this.sources.values()) {
+      if (slab.nullCells.length === 0) {
         continue;
       }
-      // The control and the puzzle bar sit side by side: the nearer target
-      // within its margin wins (a pinch in the gap between them goes to
-      // whichever is closer). Otherwise, NULL cells on the result.
-      const controlDistance = controlLive ? this.evaluatePinch(hand, this._pinchA) : Infinity;
-      const barDistance = joinBridge.challenge?.barDistance(this._pinchA) ?? Infinity;
-      if (barDistance < Infinity && barDistance < controlDistance) {
-        joinBridge.challenge?.pressBarAt(this._pinchA, hand);
-        continue;
+      slab.object.updateWorldMatrix(true, false);
+      this._f.copy(point);
+      slab.object.worldToLocal(this._f);
+      if (Math.abs(this._f.z) <= CONTROL_PINCH_DEPTH_METERS && nearestSourceNull(slab, this._f) <= NULL_PINCH_MARGIN_METERS) {
+        this.wrongNull(slab, hand, 'pinch');
+        return true;
       }
-      if (controlDistance < Infinity) {
-        this.pressControl(this.pinchNearest, 'pinch');
-        continue;
+    }
+    return false;
+  }
+
+  /** `hand`'s target ray (world) into `_rayOrigin` / `_rayDir`; false without an input source. */
+  private readRay(hand: (typeof HANDS)[number]): boolean {
+    if (!this.input.xr.getPrimaryInputSource(hand)) {
+      return false;
+    }
+    const raySpace = this.player.raySpaces[hand];
+    raySpace.updateWorldMatrix(true, false);
+    this._rayOrigin.setFromMatrixPosition(raySpace.matrixWorld);
+    raySpace.getWorldQuaternion(this._q2);
+    this._rayDir.set(0, 0, -1).applyQuaternion(this._q2);
+    return true;
+  }
+
+  /**
+   * Intersects the ray in `_rayOrigin` / `_rayDir` with `object`'s face (its
+   * local z = 0, hit from the front) into `outLocal`; returns the distance
+   * along the ray (meters), or Infinity. Objects aren't scaled.
+   */
+  private rayPlane(object: Object3D, outLocal: Vector3): number {
+    object.updateWorldMatrix(true, false);
+    this._rayLocalO.copy(this._rayOrigin);
+    object.worldToLocal(this._rayLocalO);
+    this._rayLocalD.copy(this._rayOrigin).add(this._rayDir);
+    object.worldToLocal(this._rayLocalD);
+    this._rayLocalD.sub(this._rayLocalO);
+    if (this._rayLocalO.z <= 0 || this._rayLocalD.z >= -1e-6) {
+      return Infinity;
+    }
+    const distance = -this._rayLocalO.z / this._rayLocalD.z;
+    outLocal.copy(this._rayLocalO).addScaledVector(this._rayLocalD, distance);
+    return distance;
+  }
+
+  /**
+   * The first thing the ray in `_rayOrigin` / `_rayDir` hits, into
+   * `_rayHit`: a control option (while live), a puzzle bar button, a result
+   * NULL cell -- or, blocking what's behind, the result slab elsewhere or a
+   * source slab.
+   */
+  private castRay(controlLive: boolean): void {
+    const hit = this._rayHit;
+    hit.target = 'none';
+    hit.distance = Infinity;
+    hit.name = '';
+    const local = this._rayLocal;
+
+    if (controlLive) {
+      const control = this.control;
+      const t = this.rayPlane(control.document, local);
+      if (t < hit.distance) {
+        const dy = Math.max(0, Math.abs(local.y) - control.optionHeightMeters / 2);
+        const inner = Math.hypot(Math.max(0, Math.abs(local.x - control.innerCenterX) - control.optionWidthMeters / 2), dy);
+        const left = Math.hypot(Math.max(0, Math.abs(local.x - control.leftCenterX) - control.optionWidthMeters / 2), dy);
+        if (Math.min(inner, left) <= RAY_BUTTON_TOLERANCE_METERS) {
+          hit.target = 'control';
+          hit.distance = t;
+          hit.option = inner <= left ? 'inner' : 'left';
+          hit.name = `the ${hit.option.toUpperCase()} option`;
+        }
       }
-      if (controlLive && this.challengeLayout) {
-        this.evaluateNullPinch(hand, source, this._pinchA);
+    }
+
+    const bar = this.challengeLayout?.bar;
+    if (bar && bar.object.visible) {
+      const t = this.rayPlane(bar.object, local);
+      if (t < hit.distance) {
+        this._rayWorld.copy(local);
+        bar.object.localToWorld(this._rayWorld);
+        if ((joinBridge.challenge?.barDistance(this._rayWorld) ?? Infinity) < Infinity) {
+          hit.target = 'bar';
+          hit.distance = t;
+          hit.point.copy(this._rayWorld);
+          hit.name = 'a puzzle bar button';
+        }
+      }
+    }
+
+    const view = this.active;
+    if (view && this.state.phase === 'joined' && view.doc.fade.peek() >= 0.5) {
+      const t = this.rayPlane(view.object, local);
+      if (t < hit.distance) {
+        this._rayWorld.copy(local);
+        view.object.localToWorld(this._rayWorld);
+        if (this.nearestNullCell(view, this._rayWorld) && this._nullHit.distance <= NULL_RAY_TOLERANCE_METERS) {
+          hit.target = 'null';
+          hit.distance = t;
+          hit.row = this._nullHit.row;
+          hit.column = this._nullHit.column;
+          hit.name = `the NULL cell at row ${hit.row}, ${view.result.columns[hit.column].label}`;
+        } else if (
+          Math.abs(local.x) <= view.doc.widthMeters / 2 &&
+          local.y <= slabVisualTopLocalY(view.doc) &&
+          local.y >= slabBottomLocalY(view.doc)
+        ) {
+          hit.target = 'result';
+          hit.distance = t;
+          hit.name = 'the result slab (not on a NULL cell)';
+        }
+      }
+    }
+
+    for (const slab of this.sources.values()) {
+      const t = this.rayPlane(slab.object, local);
+      if (
+        t < hit.distance &&
+        Math.abs(local.x) <= slab.doc.widthMeters / 2 &&
+        local.y <= slabVisualTopLocalY(slab.doc) &&
+        local.y >= slabBottomLocalY(slab.doc)
+      ) {
+        hit.target = 'slab';
+        hit.distance = t;
+        hit.name = `the ${slab.id} slab`;
       }
     }
   }
@@ -2882,14 +3281,15 @@ export class JoinSystem
 
   /**
    * Challenge mode: a pinch whose pinch point lands on a shown NULL cell (in
-   * plane within NULL_PINCH_MARGIN_METERS, and near the surface) pokes it.
+   * plane within NULL_PINCH_MARGIN_METERS, and near the surface) pokes it
+   * (returns whether it did).
    * Dev readout: how far the pinch point and the wrist were from the nearest
    * source slab's grab surface, since a pinch that near a slab could grab it.
    */
-  private evaluateNullPinch(hand: (typeof HANDS)[number], source: XRInputSource, point: Vector3): void {
+  private evaluateNullPinch(hand: (typeof HANDS)[number], source: XRInputSource, point: Vector3): boolean {
     const view = this.active;
     if (!view || !this.nearestNullCell(view, point)) {
-      return;
+      return false;
     }
     const { row: bestRow, column: bestColumn, distance: best, depth } = this._nullHit;
     const selected = best <= NULL_PINCH_MARGIN_METERS && depth <= CONTROL_PINCH_DEPTH_METERS;
@@ -2917,6 +3317,7 @@ export class JoinSystem
     if (selected) {
       this.activateNullCell(view.key, bestRow, bestColumn, 'pinch');
     }
+    return selected;
   }
 
   /**
@@ -3152,7 +3553,8 @@ export class JoinSystem
     const resultDistance = this._a.distanceTo(this._head);
     const resultTextDeg = textAngleDeg(view.doc.rowFontMeters, resultDistance);
     debug.note(
-      `result slab (view only): ${resultDistance.toFixed(2)} m from the eyes (cap ${RESULT_MAX_DISTANCE_METERS} m); ` +
+      `result slab (view only): ${resultDistance.toFixed(2)} m from the eyes (cap ` +
+        `${RESULT_MAX_PUSHED_DISTANCE_METERS.toFixed(2)} m, where its rows are ${RESULT_MIN_PUSHED_ROW_TEXT_DEG}°); ` +
         `${textNote('result slab', view.doc.rowFontMeters, resultDistance)} (source slabs ` +
         `${textAngleDeg(left.doc.rowFontMeters, sourceDistance).toFixed(2)}° at ${sourceDistance.toFixed(2)} m; ` +
         `minimum ${MIN_ROW_TEXT_DEG.toFixed(2)}°); ${resultEdges}`,
@@ -3434,6 +3836,22 @@ function pairTopLocalY(left: SourceSlab, right: SourceSlab): number {
 
 function cm(meters: number): string {
   return `${(meters * 100).toFixed(1)} cm`;
+}
+
+/**
+ * In-plane distance from `local` (in a source slab's frame) to the nearest
+ * of its NULL cells' rectangles; Infinity if it shows none. Allocates nothing.
+ */
+function nearestSourceNull(slab: SourceSlab, local: Vector3): number {
+  const halfRow = slab.doc.rowHeightMeters / 2;
+  let best = Infinity;
+  for (const cell of slab.nullCells) {
+    const span = slab.doc.columnSpans[cell.column];
+    const dx = Math.max(0, span.x0 - local.x, local.x - span.x1);
+    const dy = Math.max(0, Math.abs(local.y - rowCenterLocalY(slab.doc, cell.row)) - halfRow);
+    best = Math.min(best, Math.hypot(dx, dy));
+  }
+  return best;
 }
 
 /**
