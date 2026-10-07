@@ -4,6 +4,7 @@
  * them import each other. Placement registers itself as `desk`.
  */
 
+import type { Quaternion, Vector3 } from '@iwsdk/core';
 import type { DatasetId } from './data/datasets.js';
 import type { DeskState } from './data/desk-session.js';
 
@@ -31,8 +32,14 @@ export interface DeskControls {
   requestRecenter(): void;
   /** Whether a recenter glide is moving the slabs (the join system re-places what follows them). */
   readonly recenterGliding: boolean;
-  /** Counts re-placements; the join system forgets the slabs' home poses when it changes. */
+  /** Counts re-placements; the join system takes the slabs' new home poses when it changes. */
   readonly placementEpoch: number;
+  /**
+   * The last recenter's normal side-by-side pose for `tableId` (where it
+   * would sit apart, even if the pair was joined and glided as one) into
+   * `outPos` / `outQuat`; false if no recenter placed it.
+   */
+  recenterHome(tableId: string, outPos: Vector3, outQuat: Quaternion): boolean;
 }
 
 /** Registered in free play too (Recenter works there); challenge mode's switch only runs in challenge mode. */

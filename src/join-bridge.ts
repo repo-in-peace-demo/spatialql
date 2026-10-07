@@ -33,6 +33,8 @@ export type PlacedBar = PlacedElement & {
   baseWidthMeters: number;
   /** Shows or hides its Recenter button's hover label (the join system tracks fingertips and rays over it). */
   onRecenterHover?: (hovered: boolean) => void;
+  /** Shows or hides its Exit button's "Hold to exit" label (hovered or held). */
+  onExitHover?: (hovered: boolean) => void;
   /** The hand pointer is on `buttons[index]` (-1: none); `previous` was hovered before. Outlines it. */
   onPointerHover?: (index: number, previous: number) => void;
 };

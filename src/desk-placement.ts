@@ -235,6 +235,8 @@ export class DeskPlacementSystem
   /** See DeskControls. */
   recenterGliding = false;
   placementEpoch = 0;
+  /** The last recenter's side-by-side pose per table (see DeskControls.recenterHome); allocated per recenter, not per frame. */
+  private readonly recenterHomes = new Map<string, { pos: Vector3; quat: Quaternion }>();
   /** Removes this session's visibility and reset listeners. */
   private sessionListenersCleanup: (() => void) | null = null;
   private sessionListenersAttached = false;
@@ -374,6 +376,16 @@ export class DeskPlacementSystem
   }
 
   // --- Recenter --------------------------------------------------------------------------
+
+  recenterHome(tableId: string, outPos: Vector3, outQuat: Quaternion): boolean {
+    const home = this.recenterHomes.get(tableId);
+    if (!home) {
+      return false;
+    }
+    outPos.copy(home.pos);
+    outQuat.copy(home.quat);
+    return true;
+  }
 
   requestRecenter(): void {
     if (this.recenter.request('button', performance.now()) && import.meta.env.DEV && this.debug) {
@@ -516,6 +528,13 @@ export class DeskPlacementSystem
       this.placeFloating();
     }
     this.collectingTargets = false;
+
+    // The normal side-by-side poses are the slabs' new homes (a later
+    // pull-apart glides there), even when the joined pair glides as one.
+    this.recenterHomes.clear();
+    for (const slab of this.slabs) {
+      this.recenterHomes.set(slab.table.id, { pos: slab.glide.toPos.clone(), quat: slab.glide.toQuat.clone() });
+    }
 
     // A joined pair moves as one piece: the RIGHT slab follows the LEFT one's move.
     const [first, second] = this.slabs;

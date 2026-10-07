@@ -21,6 +21,7 @@ import { computed, signal, UIKit, UIKitDocument, type Signal } from '@iwsdk/core
 import { BookOpen } from '@pmndrs/uikit-lucide/dist/BookOpen.js';
 import { Coffee } from '@pmndrs/uikit-lucide/dist/Coffee.js';
 import { LocateFixed } from '@pmndrs/uikit-lucide/dist/LocateFixed.js';
+import { LogOut } from '@pmndrs/uikit-lucide/dist/LogOut.js';
 import { School } from '@pmndrs/uikit-lucide/dist/School.js';
 import { ShoppingBag } from '@pmndrs/uikit-lucide/dist/ShoppingBag.js';
 import { CARD_GOAL_LINES, CARD_MESSAGE_LINES, cardHeadlineFontCm, cardMetrics } from './card-metrics.js';
@@ -274,7 +275,7 @@ export function setCardIntro(card: PuzzleCardView, lead: string, lines: readonly
  * button is. `filter` opens the chips (one per result column with a NULL),
  * `filterBack` closes them, `chip` is one of them (`BarButtonTarget.chip`).
  */
-export type BarButton = 'prev' | 'hint' | 'next' | 'recenter' | 'clear' | 'filter' | 'filterBack' | 'chip';
+export type BarButton = 'prev' | 'hint' | 'next' | 'recenter' | 'exit' | 'clear' | 'filter' | 'filterBack' | 'chip';
 
 /**
  * One bar button's target in the bar's frame (meters); all share
@@ -319,6 +320,8 @@ export type PuzzleBarView = {
   filterChips: { container: Container; text: Text }[];
   /** Recenter: an icon button (brings the tables back in front of you); its label shows on hover. */
   recenter: RecenterButtonView;
+  /** Exit: an icon button; held for a moment, it ends the session ("Hold to exit" on hover). */
+  exit: RecenterButtonView;
   /** Opacity of the Next button (pulses once the puzzle is won). */
   nextOpacity: Signal<number>;
   /** Current size: the bar is only as wide as its buttons (see `setBarContents`). */
@@ -333,6 +336,7 @@ export type PuzzleBarView = {
     hint: number;
     next: number;
     recenter: number;
+    exit: number;
     clear: number;
     filter: number;
     back: number;
@@ -366,6 +370,7 @@ export function buildPuzzleBar(
     hint: readonly string[];
     next: readonly string[];
     recenter: string;
+    exit: string;
     clear: string;
     filter: string;
     filterBack: string;
@@ -435,6 +440,8 @@ export function buildPuzzleBar(
   const next = button(labels.next[0] ?? '', nextWidth, true, nextOpacity);
   // Recenter: an icon at the minimum target size, its label above it on hover.
   const recenter = recenterButton(root, labelFontCm, buttonHeight, labels.recenter, fade);
+  // Exit: the same, at the end of the buttons; held for a moment, it ends the session.
+  const exit = recenterButton(root, labelFontCm, buttonHeight, labels.exit, fade, LogOut);
   // The filter chip: the WHERE clause as a flat label on the track (no fill,
   // regular weight: it reads as the filter's text, not a button), then its
   // own Clear button, a bordered pill.
@@ -481,6 +488,7 @@ export function buildPuzzleBar(
     filterBack: back.container,
     filterChips,
     recenter,
+    exit,
     nextOpacity,
     widthMeters: 0,
     heightMeters: heightCm / 100,
@@ -491,6 +499,7 @@ export function buildPuzzleBar(
       hint: hintWidth,
       next: nextWidth,
       recenter: CONTROL_OPTION_MIN_WIDTH_CM,
+      exit: CONTROL_OPTION_MIN_WIDTH_CM,
       clear: clearWidth,
       filter: filterWidth,
       back: backWidth,
@@ -519,10 +528,10 @@ export function setNextLabel(bar: PuzzleBarView, label: string): void {
  * with its width).
  */
 export function setBarContents(bar: PuzzleBarView, contents: BarContents): void {
-  const { prev, hint, next, recenter, clear, filter, back, label, paddingX } = bar.sizes;
+  const { prev, hint, next, recenter, exit, clear, filter, back, label, paddingX } = bar.sizes;
   const open = contents.chips !== null;
   // The targets change: no hover outline survives (the pointer re-hovers next frame).
-  for (const container of [bar.prev, bar.hint, bar.next, bar.recenter.container, bar.filter, bar.filterBack]) {
+  for (const container of [bar.prev, bar.hint, bar.next, bar.recenter.container, bar.exit.container, bar.filter, bar.filterBack]) {
     setTargetHover(container, false);
   }
   for (const chipButton of bar.filterChips) {
@@ -537,8 +546,10 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
   bar.hint.setProperties({ display: open ? 'none' : 'flex' });
   bar.next.setProperties({ display: open ? 'none' : 'flex' });
   bar.recenter.container.setProperties({ display: open ? 'none' : 'flex' });
+  bar.exit.container.setProperties({ display: open ? 'none' : 'flex' });
   if (open) {
     setRecenterHover(bar.recenter, false);
+    setRecenterHover(bar.exit, false);
   }
   // The WHERE label needs no minimum width (it isn't a target), only its padding.
   const labelWidth = where === null ? 0 : measureHeaderTextCm(where, label) + 2 * paddingX;
@@ -561,6 +572,7 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
       { name: 'hint', width: hint, chip: -1 },
       { name: 'next', width: next, chip: -1 },
       { name: 'recenter', width: recenter, chip: -1 },
+      { name: 'exit', width: exit, chip: -1 },
     );
     if (where !== null) {
       items.push({ name: null, width: labelWidth, chip: -1 }, { name: 'clear', width: clear, chip: -1 });
@@ -593,9 +605,9 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
     if (item.name !== null) {
       bar.buttons.push({ name: item.name, centerX: (cursor + item.width / 2) / 100, width: item.width / 100, chip: item.chip });
     }
-    if (item.name === 'recenter') {
+    if (item.name === 'recenter' || item.name === 'exit') {
       // Its hover label, centered above it (offsets from the bar's padding box).
-      placeRecenterLabel(bar.recenter, cursor + item.width / 2 + widthCm / 2 - BAR_BORDER);
+      placeRecenterLabel(item.name === 'exit' ? bar.exit : bar.recenter, cursor + item.width / 2 + widthCm / 2 - BAR_BORDER);
     }
     cursor += item.width + BAR_PADDING;
   }
@@ -614,13 +626,20 @@ export type RecenterButtonView = {
 const COLOR_RECENTER_LABEL = '#4a4538';
 const COLOR_RECENTER_LABEL_TEXT = '#f7f4ee';
 
-/** Builds the icon button into `root` (a row) and its label as an absolute layer of `root`. */
+/** An icon component class (Lucide), as the icon buttons take it. */
+type IconClass = typeof LocateFixed;
+
+/**
+ * Builds an icon button (Recenter, Exit) into `root` (a row) and its hover
+ * label as an absolute layer of `root`.
+ */
 function recenterButton(
   root: Container,
   labelFontCm: number,
   buttonHeight: number,
   label: string,
   fade: Signal<number>,
+  Icon: IconClass = LocateFixed,
 ): RecenterButtonView {
   const style = controlOptionStyle(false);
   const container = new UIKit.Container({
@@ -638,7 +657,7 @@ function recenterButton(
     color: style.color,
   });
   const iconSize = labelFontCm * 1.3;
-  container.add(new LocateFixed({ width: iconSize, height: iconSize, color: style.color }));
+  container.add(new Icon({ width: iconSize, height: iconSize, color: style.color }));
   root.add(container);
 
   const labelWidthCm = measureHeaderTextCm(label, labelFontCm) + 2 * labelFontCm * BAR_BUTTON_PADDING_EM;
@@ -684,20 +703,24 @@ export function setRecenterHover(view: RecenterButtonView, hovered: boolean): vo
   view.label.setProperties({ display: hovered ? 'flex' : 'none' });
 }
 
-/** Free play's one-button bar: only Recenter (there's no puzzle bar). Origin at its center. */
+/** Free play's bar: Recenter and Exit (there's no puzzle bar). Origin at its center. */
 export type RecenterBarView = {
   document: UIKitDocument;
   fade: Signal<number>;
   recenter: RecenterButtonView;
+  exit: RecenterButtonView;
   widthMeters: number;
   heightMeters: number;
   buttonWidthMeters: number;
   buttonHeightMeters: number;
+  /** Each button's center in the bar's frame (meters): Recenter, then Exit. */
+  recenterCenterX: number;
+  exitCenterX: number;
 };
 
-export function buildRecenterBar(labelFontCm: number, label: string): RecenterBarView {
+export function buildRecenterBar(labelFontCm: number, label: string, exitLabel: string): RecenterBarView {
   const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, labelFontCm * LINE_HEIGHT_FACTOR);
-  const widthCm = barRowWidthCm([CONTROL_OPTION_MIN_WIDTH_CM]);
+  const widthCm = barRowWidthCm([CONTROL_OPTION_MIN_WIDTH_CM, CONTROL_OPTION_MIN_WIDTH_CM]);
   const heightCm = buttonHeight + 2 * BAR_INSET;
   const fade = signal(1);
   const root = new UIKit.Container({
@@ -722,17 +745,27 @@ export function buildRecenterBar(labelFontCm: number, label: string): RecenterBa
     paddingBottom: BAR_PADDING,
     paddingLeft: BAR_PADDING,
     paddingRight: BAR_PADDING,
+    gapColumn: BAR_PADDING,
   });
   const recenter = recenterButton(root, labelFontCm, buttonHeight, label, fade);
-  placeRecenterLabel(recenter, widthCm / 2 - BAR_BORDER);
+  const exit = recenterButton(root, labelFontCm, buttonHeight, exitLabel, fade, LogOut);
+  // Centers from the padding box's left edge (labels) and from the bar's center (targets).
+  const recenterFromLeft = BAR_PADDING + CONTROL_OPTION_MIN_WIDTH_CM / 2;
+  const exitFromLeft = recenterFromLeft + CONTROL_OPTION_MIN_WIDTH_CM + BAR_PADDING;
+  placeRecenterLabel(recenter, recenterFromLeft);
+  placeRecenterLabel(exit, exitFromLeft);
+  const leftEdge = -widthCm / 2 + BAR_BORDER;
   return {
     document: new UIKitDocument(root),
     fade,
     recenter,
+    exit,
     widthMeters: widthCm / 100,
     heightMeters: heightCm / 100,
     buttonWidthMeters: CONTROL_OPTION_MIN_WIDTH_CM / 100,
     buttonHeightMeters: buttonHeight / 100,
+    recenterCenterX: (leftEdge + recenterFromLeft) / 100,
+    exitCenterX: (leftEdge + exitFromLeft) / 100,
   };
 }
 
@@ -761,6 +794,8 @@ function barTargetContainer(bar: PuzzleBarView, index: number): Container | null
       return bar.next;
     case 'recenter':
       return bar.recenter.container;
+    case 'exit':
+      return bar.exit.container;
     case 'clear':
       return bar.clear;
     case 'filter':

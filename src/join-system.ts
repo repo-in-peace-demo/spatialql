@@ -33,13 +33,17 @@
 import {
   Color,
   createSystem,
+  DoubleSide,
   Euler,
   Grabbed,
   Group,
   MathUtils,
+  Mesh,
+  MeshBasicMaterial,
   PokeInteractable,
   Quaternion,
   RayInteractable,
+  RingGeometry,
   signal,
   Vector3,
   VisibilityState,
@@ -335,6 +339,16 @@ const POINTER_STUB_METERS = 0.3;
 const POINTER_SLAB_GLOW = 0.3;
 /** Dev log: a hover change is logged at most this often per hand. */
 const POINTER_HOVER_LOG_SECONDS = 0.25;
+/** Exit: held this long, it ends the session (a ring fills meanwhile). */
+const EXIT_HOLD_SECONDS = 1.0;
+/** The ring around Exit's icon: its radii, smoothness, and lift off the bar's face (it fits the 2.5 cm button). */
+const EXIT_RING_INNER_METERS = 0.0095;
+const EXIT_RING_OUTER_METERS = 0.0115;
+const EXIT_RING_SEGMENTS = 48;
+const EXIT_RING_LIFT_METERS = 0.004;
+const COLOR_EXIT_RING = '#d08a1e';
+/** A fingertip holds Exit from this far in front of its face (pressed on it), to BUTTON_PINCH_BACK_DEPTH_METERS behind. */
+const EXIT_TOUCH_FRONT_METERS = 0.01;
 const THUMB_TIP: readonly XRHandJoint[] = ['thumb-tip'];
 /**
  * Dev on localhost runs the XR emulator (IWER), whose hands hold perfectly
@@ -380,7 +394,7 @@ type SourceSlab = {
 };
 
 /** What a hand's or controller's target ray hit first (see `castRay`). */
-type RayTarget = 'none' | 'control' | 'bar' | 'recenter' | 'null' | 'result' | 'slab';
+type RayTarget = 'none' | 'control' | 'bar' | 'recenter' | 'exit' | 'null' | 'result' | 'slab';
 
 /** A ray's nearest hit: what, how far along the ray, where (world), and which option, cell or slab. */
 type RayHit = {
@@ -597,6 +611,8 @@ export class JoinSystem
   private silhouette: PlacedElement | null = null;
   private layoutDirty = true;
   private readonly homes = new Map<string, HomePose>();
+  /** A pull-apart finished: glide both slabs home once none is held. */
+  private homeAfterSeparate = false;
   private readonly glides = new Map<string, DockAnimation>();
   private winLook = false;
   private winGlowLeft!: EdgeGlow;
@@ -653,7 +669,13 @@ export class JoinSystem
   };
   private pointerGlowA!: EdgeGlow;
   private pointerGlowB!: EdgeGlow;
-  private readonly pointerHover = { option: null as JoinType | null, barIndex: -1, recenter: false, slab: null as SourceSlab | null };
+  private readonly pointerHover = {
+    option: null as JoinType | null,
+    barIndex: -1,
+    recenter: false,
+    exit: false,
+    slab: null as SourceSlab | null,
+  };
   /** The control's two options as targets (centers and widths, in its frame). */
   private controlTargets: { centerX: number; width: number }[] = [];
   private readonly _pointerHead = new Vector3();
@@ -684,6 +706,17 @@ export class JoinSystem
   private recenterWasGliding = false;
   private lastRecenterPress = -Infinity;
   private recenterHovered = false;
+  // Exit (see updateExitHold).
+  private exitHovered = false;
+  /** How long Exit has been held (seconds; 0 when not). */
+  private exitHeld = 0;
+  /** The session is ending (Exit completed); nothing more until a new one. */
+  private exitEnded = false;
+  /** Dev log: how Exit is being held. */
+  private exitHoldPath = '';
+  /** Per hand: a pinch or trigger started in this session (see handHoldsExit). */
+  private readonly exitSelectStarted = { left: false, right: false };
+  private exitRing!: Mesh<RingGeometry, MeshBasicMaterial>;
   /** Free play's one-button bar (Recenter), and it as a placed bar; null in challenge mode (the puzzle bar has it). */
   private freeBar: RecenterBarView | null = null;
   private freeBarPlaced: PlacedBar | null = null;
@@ -746,6 +779,19 @@ export class JoinSystem
     this.pointerLines.setCount(HANDS.length);
     this.pointerGlowA = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_POINTER);
     this.pointerGlowB = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_POINTER);
+    // Exit's hold ring: built whole once; its draw range shows how far it has filled.
+    // Mirrored in x, so it fills clockwise from the top.
+    this.exitRing = new Mesh(
+      new RingGeometry(EXIT_RING_INNER_METERS, EXIT_RING_OUTER_METERS, EXIT_RING_SEGMENTS, 1, Math.PI / 2, Math.PI * 2),
+      // Double-sided: the mirroring turns its faces around.
+      new MeshBasicMaterial({ color: new Color(COLOR_EXIT_RING), transparent: true, depthWrite: false, side: DoubleSide }),
+    );
+    this.exitRing.scale.x = -1;
+    this.exitRing.raycast = () => {};
+    this.exitRing.frustumCulled = false;
+    this.exitRing.renderOrder = 4;
+    this.exitRing.visible = false;
+    this.visualsRoot.add(this.exitRing);
     this.visualsRoot.add(
       this.lines.mesh,
       this.pulses.mesh,
@@ -782,15 +828,18 @@ export class JoinSystem
     ];
     this.controlEntity = this.world.createTransformEntity(this.control.document);
 
-    // Free play: a one-button bar with Recenter (challenge mode's puzzle bar has its own).
+    // Free play: a bar with Recenter and Exit (challenge mode's puzzle bar has its own).
     if (!CHALLENGE_MODE) {
-      const freeBar = buildRecenterBar(slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm, BAR.recenter);
+      const freeBar = buildRecenterBar(slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm, BAR.recenter, BAR.exit);
       this.freeBar = freeBar;
       this.freeBarPlaced = {
         object: freeBar.document,
         widthMeters: freeBar.widthMeters,
         heightMeters: freeBar.heightMeters,
-        buttons: [{ name: 'recenter', centerX: 0, width: freeBar.buttonWidthMeters }],
+        buttons: [
+          { name: 'recenter', centerX: freeBar.recenterCenterX, width: freeBar.buttonWidthMeters },
+          { name: 'exit', centerX: freeBar.exitCenterX, width: freeBar.buttonWidthMeters },
+        ],
         buttonHeightMeters: freeBar.buttonHeightMeters,
         baseWidthMeters: freeBar.widthMeters,
       };
@@ -866,6 +915,8 @@ export class JoinSystem
         this.pointerDots.right.dispose();
         this.pointerGlowA.dispose();
         this.pointerGlowB.dispose();
+        this.exitRing.geometry.dispose();
+        this.exitRing.material.dispose();
         visualsEntity.dispose();
         this.debug?.dispose();
         for (const view of this.results.values()) {
@@ -882,27 +933,34 @@ export class JoinSystem
     this.queries.sources.subscribe('disqualify', (entity) => this.unregisterSource(entity));
     this.queries.held.subscribe('disqualify', (entity) => this.onRelease(entity));
 
+    // Home poses (both modes): where each slab was before this puzzle (or
+    // placement) first moved it. A pull-apart glides back there; so does Next.
+    this.queries.held.subscribe('qualify', (entity) => {
+      const source = this.sourceFor(entity);
+      if (source) {
+        this.captureHome(source);
+      }
+    });
+    // A new session re-places the slabs: forget the old homes, re-lay out.
+    this.cleanupFuncs.push(
+      this.world.visibilityState.subscribe(() => {
+        for (const home of this.homes.values()) {
+          home.set = false;
+        }
+        this.homeAfterSeparate = false;
+        // A new session: Exit can end it again.
+        this.exitEnded = false;
+        this.exitHeld = 0;
+        this.exitSelectStarted.left = false;
+        this.exitSelectStarted.right = false;
+        this.layoutDirty = true;
+      }),
+    );
     if (CHALLENGE_MODE) {
       joinBridge.join = this;
-      // Home poses: where each slab was before this puzzle first moved it.
-      this.queries.held.subscribe('qualify', (entity) => {
-        const source = this.sourceFor(entity);
-        if (source) {
-          this.captureHome(source);
-        }
+      this.cleanupFuncs.push(() => {
+        joinBridge.join = null;
       });
-      // A new session re-places the slabs: forget the old homes, re-lay out.
-      this.cleanupFuncs.push(
-        this.world.visibilityState.subscribe(() => {
-          for (const home of this.homes.values()) {
-            home.set = false;
-          }
-          this.layoutDirty = true;
-        }),
-        () => {
-          joinBridge.join = null;
-        },
-      );
     }
   }
 
@@ -919,6 +977,7 @@ export class JoinSystem
     }
     this.followRecenter();
     this.followResultHeight();
+    this.updateHomeAfterSeparate();
     if (this.challengeLayout) {
       this.updateChallengeLayout();
       this.updateWinGlow();
@@ -955,6 +1014,7 @@ export class JoinSystem
     } else {
       this.updateFreeBarPoke();
     }
+    this.updateExitHold(delta);
     this.updateRecenterHover();
   }
 
@@ -973,8 +1033,14 @@ export class JoinSystem
     }
     if (desk.placementEpoch !== this.placementEpoch) {
       this.placementEpoch = desk.placementEpoch;
-      for (const home of this.homes.values()) {
-        home.set = false;
+      // The recenter's side-by-side poses are the new homes -- also when the
+      // pair glided joined, so a later pull-apart glides there.
+      for (const [id, home] of this.homes) {
+        home.set = desk.recenterHome(id, home.pos, home.quat);
+      }
+      if (import.meta.env.DEV && this.debug) {
+        const ids = [...this.homes].map(([id, home]) => `${id} ${home.set ? 'set' : 'not placed'}`);
+        this.debug.note(`recenter: new home poses (${ids.join(', ')})`);
       }
       this.layoutDirty = true;
     }
@@ -1066,74 +1132,217 @@ export class JoinSystem
     }
   }
 
-  /** In-plane distance from `local` (the bar's frame) to the free bar's button. */
-  private freeBarDistance(local: Vector3): number {
+  /** In-plane distance from `local` (the bar's frame) to the free bar's Recenter button (`index` 1: its Exit button). */
+  private freeBarDistance(local: Vector3, index = 0): number {
     const bar = this.freeBarPlaced;
     if (!bar) {
       return Infinity;
     }
+    const button = bar.buttons[index];
     return Math.hypot(
-      Math.max(0, Math.abs(local.x) - bar.buttons[0].width / 2),
+      Math.max(0, Math.abs(local.x - button.centerX) - button.width / 2),
       Math.max(0, Math.abs(local.y) - bar.buttonHeightMeters / 2),
     );
   }
 
   /**
-   * The Recenter button's hover label: shown while a fingertip is just in
-   * front of it, or a hand's (or controller's) ray is on it; the puzzle bar's
-   * button in challenge mode, the one-button bar in free play. Writes only
-   * on a change.
+   * The Recenter and Exit buttons' hover labels: shown while a fingertip is
+   * just in front of the button, or a hand's pointer is on it (Exit's also
+   * while it's held); the puzzle bar's buttons in challenge mode, free
+   * play's bar otherwise. Writes only on a change.
    */
   private updateRecenterHover(): void {
+    const recenter = this.iconHovered('recenter');
+    if (recenter !== this.recenterHovered) {
+      this.recenterHovered = recenter;
+      if (this.freeBar) {
+        setRecenterHover(this.freeBar.recenter, recenter);
+      } else {
+        this.challengeLayout?.bar.onRecenterHover?.(recenter);
+      }
+    }
+    const exit = this.exitHeld > 0 || this.iconHovered('exit');
+    if (exit !== this.exitHovered) {
+      this.exitHovered = exit;
+      if (this.freeBar) {
+        setRecenterHover(this.freeBar.exit, exit);
+      } else {
+        this.challengeLayout?.bar.onExitHover?.(exit);
+      }
+    }
+  }
+
+  /** Whether a fingertip is just in front of the bar's `name` button, or a hand pointer is on it. */
+  private iconHovered(name: 'recenter' | 'exit'): boolean {
     const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
-    let hovered = false;
-    if (bar && bar.object.visible) {
-      let button: { centerX: number; width: number } | null = null;
+    if (!bar || !bar.object.visible) {
+      return false;
+    }
+    let button: { centerX: number; width: number } | null = null;
+    for (const candidate of bar.buttons) {
+      if (candidate.name === name) {
+        button = candidate;
+      }
+    }
+    if (!button) {
+      return false;
+    }
+    bar.object.updateWorldMatrix(true, false);
+    for (const hand of HANDS) {
+      const source = this.input.xr.getPrimaryInputSource(hand);
+      if (source?.hand && readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
+        this._rayLocal.copy(this._pokeTip);
+        bar.object.worldToLocal(this._rayLocal);
+        if (
+          this._rayLocal.z >= -CONTACT_HOVER_BEHIND_METERS &&
+          this._rayLocal.z <= NULL_HOVER_DEPTH_METERS &&
+          onButton(this._rayLocal, button, bar.buttonHeightMeters)
+        ) {
+          return true;
+        }
+      }
+      // Or the hand pointer on it.
+      const pointer = this.pointers[hand];
+      if (
+        pointer.active &&
+        (pointer.hit.target === name || (pointer.hit.target === 'bar' && bar.buttons[pointer.barIndex]?.name === name))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // --- Exit: hold to end the session --------------------------------------------------
+
+  /**
+   * Exit ends the XR session (back to the welcome screen) only when held for
+   * EXIT_HOLD_SECONDS, with a ring filling around its icon; letting go, or
+   * moving off it, cancels. Held means: a fingertip pressed onto it (in
+   * contact, from the front), or a pinch held on it (near, or through the
+   * hand pointer), or a controller's trigger held with its ray on it. A
+   * press alone does nothing.
+   */
+  private updateExitHold(delta: number): void {
+    const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
+    let button: { centerX: number; width: number } | null = null;
+    if (bar && bar.object.visible && !this.exitEnded) {
       for (const candidate of bar.buttons) {
-        if (candidate.name === 'recenter') {
+        if (candidate.name === 'exit') {
           button = candidate;
         }
       }
-      if (button) {
-        bar.object.updateWorldMatrix(true, false);
-        for (const hand of HANDS) {
-          const source = this.input.xr.getPrimaryInputSource(hand);
-          if (source?.hand && readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
-            this._rayLocal.copy(this._pokeTip);
-            bar.object.worldToLocal(this._rayLocal);
-            if (
-              this._rayLocal.z >= -CONTACT_HOVER_BEHIND_METERS &&
-              this._rayLocal.z <= NULL_HOVER_DEPTH_METERS &&
-              onButton(this._rayLocal, button, bar.buttonHeightMeters)
-            ) {
-              hovered = true;
-            }
-          }
-          // Or the hand pointer on it.
-          const pointer = this.pointers[hand];
-          if (
-            !hovered &&
-            pointer.active &&
-            (pointer.hit.target === 'recenter' ||
-              (pointer.hit.target === 'bar' && bar.buttons[pointer.barIndex]?.name === 'recenter'))
-          ) {
-            hovered = true;
-          }
-          if (hovered) {
-            break;
-          }
+    }
+    for (const hand of HANDS) {
+      if (this.input.xr.gamepads[hand]?.getSelectStart()) {
+        this.exitSelectStarted[hand] = true;
+      }
+    }
+    let holding = false;
+    if (bar && button) {
+      bar.object.updateWorldMatrix(true, false);
+      for (const hand of HANDS) {
+        if (this.handHoldsExit(hand, bar, button)) {
+          holding = true;
+          break;
         }
       }
     }
-    if (hovered === this.recenterHovered) {
+    if (!holding || !bar || !button) {
+      if (this.exitHeld > 0 && import.meta.env.DEV && this.debug) {
+        this.debug.note(`Exit hold cancelled after ${this.exitHeld.toFixed(2)} s (needs ${EXIT_HOLD_SECONDS} s)`);
+      }
+      this.exitHeld = 0;
+      this.exitRing.visible = false;
       return;
     }
-    this.recenterHovered = hovered;
-    if (this.freeBar) {
-      setRecenterHover(this.freeBar.recenter, hovered);
-    } else {
-      this.challengeLayout?.bar.onRecenterHover?.(hovered);
+    if (this.exitHeld === 0 && import.meta.env.DEV && this.debug) {
+      this.debug.note(`Exit hold started (${this.exitHoldPath})`);
     }
+    this.exitHeld += delta;
+    const progress = Math.min(1, this.exitHeld / EXIT_HOLD_SECONDS);
+    // The ring: on the button, just in front of the bar, filling clockwise from the top.
+    this._a.set(button.centerX, 0, EXIT_RING_LIFT_METERS);
+    bar.object.localToWorld(this._a);
+    this.exitRing.position.copy(this._a);
+    bar.object.getWorldQuaternion(this.exitRing.quaternion);
+    this.exitRing.geometry.setDrawRange(0, 6 * Math.max(1, Math.ceil(EXIT_RING_SEGMENTS * progress)));
+    this.exitRing.visible = true;
+    if (progress >= 1) {
+      this.exitEnded = true;
+      this.exitRing.visible = false;
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(`Exit held ${EXIT_HOLD_SECONDS} s (${this.exitHoldPath}): ending the XR session`);
+      }
+      sounds.playClick(this._a);
+      void this.xrManager.getSession()?.end();
+    }
+  }
+
+  /** Whether `hand` holds the Exit button now (see updateExitHold); sets `exitHoldPath`. */
+  private handHoldsExit(
+    hand: (typeof HANDS)[number],
+    bar: PlacedBar,
+    button: { centerX: number; width: number },
+  ): boolean {
+    const source = this.input.xr.getPrimaryInputSource(hand);
+    if (!source) {
+      return false;
+    }
+    // A pinch or trigger counts only if it started in this session (one held through the session start isn't a hold).
+    const selecting = this.exitSelectStarted[hand] && !!this.input.xr.gamepads[hand]?.getSelecting();
+    if (source.hand) {
+      // A fingertip pressed onto it: from just in front of its face to a little behind.
+      if (readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
+        this._pokeLocal.copy(this._pokeTip);
+        bar.object.worldToLocal(this._pokeLocal);
+        if (
+          this._pokeLocal.z <= EXIT_TOUCH_FRONT_METERS &&
+          this._pokeLocal.z >= -BUTTON_PINCH_BACK_DEPTH_METERS &&
+          onButton(this._pokeLocal, button, bar.buttonHeightMeters)
+        ) {
+          this.exitHoldPath = 'fingertip';
+          return true;
+        }
+      }
+      if (!selecting) {
+        return false;
+      }
+      // A pinch held on it.
+      if (readPinchPoint(this.world, this.player, source, this._pinchA)) {
+        this._pinchB.copy(this._pinchA);
+        bar.object.worldToLocal(this._pinchB);
+        if (
+          this._pinchB.z <= BUTTON_PINCH_FRONT_DEPTH_METERS &&
+          this._pinchB.z >= -BUTTON_PINCH_BACK_DEPTH_METERS &&
+          onButton(this._pinchB, button, bar.buttonHeightMeters)
+        ) {
+          this.exitHoldPath = 'pinch';
+          return true;
+        }
+      }
+      // A pinch held through the hand pointer.
+      const pointer = this.pointers[hand];
+      if (
+        pointer.active &&
+        (pointer.hit.target === 'exit' || (pointer.hit.target === 'bar' && bar.buttons[pointer.barIndex]?.name === 'exit'))
+      ) {
+        this.exitHoldPath = 'pointer pinch';
+        return true;
+      }
+      return false;
+    }
+    // A controller: the trigger held, its ray on it.
+    if (!selecting || !this.readRay(hand)) {
+      return false;
+    }
+    this.castRay(false, HAND_POINTER_MAX_METERS);
+    const hit = this._rayHit;
+    if (hit.target === 'exit' || (hit.target === 'bar' && bar.buttons[this.barButtonIndexAt(hit.point)]?.name === 'exit')) {
+      this.exitHoldPath = 'controller trigger';
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -1918,6 +2127,39 @@ export class JoinSystem
     if (this.state.phase === 'joined') {
       this.applyTransition({ type: 'pullApart' });
     }
+    this.glideHome();
+  }
+
+  /**
+   * After a pull-apart, both slabs glide home -- where placement (or the
+   * last recenter) put them -- once no slab is held (never-yank: a slab
+   * still in a hand waits for its release). A new grab toward a join first
+   * (a preview) cancels it.
+   */
+  private updateHomeAfterSeparate(): void {
+    if (!this.homeAfterSeparate) {
+      return;
+    }
+    if (this.state.phase !== 'idle') {
+      this.homeAfterSeparate = false;
+      return;
+    }
+    if (this.queries.held.entities.size > 0 || this.dock.active) {
+      return;
+    }
+    this.homeAfterSeparate = false;
+    if (import.meta.env.DEV && this.debug) {
+      const homes = [...this.sources.values()].map((source) => {
+        const home = this.homes.get(source.id);
+        return home?.set ? `${source.id} ${cm(source.object.position.distanceTo(home.pos))} away` : `${source.id} (no home: stays)`;
+      });
+      this.debug.note(`pull-apart: slabs released, gliding home (${homes.join('; ')})`);
+    }
+    this.glideHome();
+  }
+
+  /** Eases every slab not held back to its home pose (HOME_GLIDE_SECONDS). */
+  private glideHome(): void {
     for (const source of this.sources.values()) {
       const home = this.homes.get(source.id);
       const glide = this.glides.get(source.id);
@@ -2586,10 +2828,10 @@ export class JoinSystem
     this.tweens.finishAll();
     this.hidePreview();
     this.active = view;
+    // Before the dock moves anything (a debug join moves a slab without a grab).
+    this.captureHome(left);
+    this.captureHome(right);
     if (this.challengeLayout) {
-      // Before the dock moves anything (a debug join moves a slab without a grab).
-      this.captureHome(left);
-      this.captureHome(right);
       this.resetChallengeRows(view);
       if (this.silhouette) {
         // Hidden and parked: an invisible UIKit document can still catch a
@@ -2980,11 +3222,14 @@ export class JoinSystem
     }
     this.layoutDirty = true;
     this.applyTransition({ type: 'separated' });
-    // Dev: an apply waiting for the separation.
+    // Dev: an apply waiting for the separation (it joins again at once: no glide).
     const apply = this.pendingApply;
     if (apply) {
       this.pendingApply = null;
       this.debugApply(apply);
+    } else {
+      // Both slabs glide home once released (updateHomeAfterSeparate).
+      this.homeAfterSeparate = true;
     }
   }
 
@@ -3967,6 +4212,7 @@ export class JoinSystem
     let option: JoinType | null = null;
     let barIndex = -1;
     let recenter = false;
+    let exit = false;
     let slab: SourceSlab | null = null;
     for (const hand of HANDS) {
       const p = this.pointers[hand];
@@ -3979,6 +4225,8 @@ export class JoinSystem
         barIndex = p.barIndex;
       } else if (p.hit.target === 'recenter') {
         recenter = true;
+      } else if (p.hit.target === 'exit') {
+        exit = true;
       } else if (p.hit.target === 'slab' && !slab) {
         slab = p.hit.slab;
       }
@@ -3997,6 +4245,10 @@ export class JoinSystem
       setTargetHover(this.freeBar.recenter.container, recenter);
     }
     hover.recenter = recenter;
+    if (exit !== hover.exit && this.freeBar) {
+      setTargetHover(this.freeBar.exit.container, exit);
+    }
+    hover.exit = exit;
     hover.slab = slab;
     if (slab) {
       const height = slab.doc.heightMeters;
@@ -4267,7 +4519,11 @@ export class JoinSystem
       if (t < hit.distance && this.freeBarDistance(local) <= RAY_BUTTON_TOLERANCE_METERS) {
         hit.target = 'recenter';
         hit.distance = t;
-        hit.name = 'the Recenter button';
+        hit.name = naming ? 'the Recenter button' : '';
+      } else if (t < hit.distance && this.freeBarDistance(local, 1) <= RAY_BUTTON_TOLERANCE_METERS) {
+        hit.target = 'exit';
+        hit.distance = t;
+        hit.name = naming ? 'the Exit button' : '';
       }
     }
 

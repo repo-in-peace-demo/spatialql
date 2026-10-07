@@ -270,6 +270,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       // Every label Next shows (it's sized for the widest, so relabeling never resizes the bar).
       next: NEXT_LABELS,
       recenter: BAR.recenter,
+      exit: BAR.exit,
       clear: BAR.clearFilter,
       filter: BAR.filter,
       filterBack: BAR.filterBack,
@@ -321,6 +322,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         // Built with only Prev, Hint, Next and Recenter.
         baseWidthMeters: this.bar.widthMeters,
         onRecenterHover: (hovered) => setRecenterHover(this.bar.recenter, hovered),
+        onExitHover: (hovered) => setRecenterHover(this.bar.exit, hovered),
         onPointerHover: (index, previous) => setBarHover(this.bar, index, previous),
       },
     };
@@ -1298,6 +1300,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   /** One press on a bar button from any path; `chip` says which filter chip (else -1). */
   private press(button: BarButton, path: PressPath, chip = -1): void {
+    // Exit only ends the session when held (the join system times the hold); a press does nothing.
+    if (button === 'exit') {
+      return;
+    }
     if (this.clock - this.lastPress < BAR_PRESS_DEBOUNCE_SECONDS) {
       return;
     }

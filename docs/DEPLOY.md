@@ -78,7 +78,7 @@ Then check that no dev-only code made it into `dist/`. This should print
 nothing:
 
 ```
-grep -rlE "\[Grab debug\]|\[Join debug\]|\[DeskPlacement|\[seated\]|\[dev flags\]|spatialql\.debug|Option\+Shift|join: bring orders|@iwer|slab \(touch\)|pinch evaluated|group: top|\[Challenge debug\]|applying the solution|applying the wrong state|apply the puzzle|resetProgress|\[Slab\]|cut off with an ellipsis|switched to|\[HUD\]|frame p50|debugSide|start: daily|start: practice|from \?puzzle=|__spatialql/log|\[Touch debug\]|lines dropped|debugPanel|SDK poke pointer|join lowered the pair|ray select|Filter opened|filter chip \(|not a filter|near grab|status line:|clearance in view|bar re-placed|already filtered|recenter requested|session visibility:|reference space reset|Recenter pressed|Prev pressed|pointer pinch|pointer on |pointer off|frozen: pinch closing|pointer hidden|press blocked|pointer unfrozen|ray stale" dist/
+grep -rlE "\[Grab debug\]|\[Join debug\]|\[DeskPlacement|\[seated\]|\[dev flags\]|spatialql\.debug|Option\+Shift|join: bring orders|@iwer|slab \(touch\)|pinch evaluated|group: top|\[Challenge debug\]|applying the solution|applying the wrong state|apply the puzzle|resetProgress|\[Slab\]|cut off with an ellipsis|switched to|\[HUD\]|frame p50|debugSide|start: daily|start: practice|from \?puzzle=|__spatialql/log|\[Touch debug\]|lines dropped|debugPanel|SDK poke pointer|join lowered the pair|ray select|Filter opened|filter chip \(|not a filter|near grab|status line:|clearance in view|bar re-placed|already filtered|recenter requested|session visibility:|reference space reset|Recenter pressed|Prev pressed|pointer pinch|pointer on |pointer off|frozen: pinch closing|pointer hidden|press blocked|pointer unfrozen|ray stale|Exit hold|Exit held|gliding home|new home poses" dist/
 ```
 
 If it lists a file, some dev code survived the build (it can't run, because
@@ -175,7 +175,8 @@ Redeploy after any change by running `npx vercel deploy --prod` again.
    the other until the edges glow, and release to join. The INNER | LEFT
    control above the pair switches the join type; pull a slab away to undo.
    Hint and Next sit beside the control.
-7. To leave, use the Quest's system menu (or the browser's exit control). The
+7. To leave, press and hold the Exit button (the last icon on the bar) for
+   a second while its ring fills; the Quest's system menu works too. The
    welcome screen comes back, with the progress updated.
 
 A first-time user sees the same flow, starting with practice puzzle 1. The

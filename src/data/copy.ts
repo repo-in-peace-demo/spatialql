@@ -330,6 +330,11 @@ export const BAR = {
    * hand's ray hovers it (it brings the tables back in front of you).
    */
   recenter: 'Recenter',
+  /**
+   * The Exit icon button's label, shown above it on hover: a press does
+   * nothing; held for a moment (a ring fills), it ends the session.
+   */
+  exit: 'Hold to exit',
   daily: 'Today',
   /** The filter chip's own button, after its WHERE clause. */
   clearFilter: 'Clear',
