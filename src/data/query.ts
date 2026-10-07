@@ -117,6 +117,19 @@ export function nullFilterColumns(
   return columns;
 }
 
+/**
+ * What a press on a NULL cell does, given the filter set now and the one
+ * that cell's column makes: `set` with none set, `switch` to another
+ * column, `none` for the column already filtered. A press never clears the
+ * filter (only Clear does), so a poke can't undo itself.
+ */
+export function nullPokeEvent(current: NullFilter | null, poked: NullFilter): 'set' | 'switch' | 'none' {
+  if (current === null) {
+    return 'set';
+  }
+  return sameFilter(current, poked) ? 'none' : 'switch';
+}
+
 export function sameFilter(a: NullFilter | null, b: NullFilter | null): boolean {
   if (a === null || b === null) {
     return a === b;

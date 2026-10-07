@@ -18,10 +18,12 @@ import { MathUtils, type Object3D, type Vector3 } from '@iwsdk/core';
  * it: desk placement's view fits, the join's band / result / card placement
  * and its fit push-back, every readout, the debug panel and the dev
  * `seated` pose all read it. Was 18; on the Quest 3S, seated users held
- * their heads 2-6 deg down (headset logs of 2026-10-06), so 8. The debug
- * panel logs the head's pitch every 10 s to keep tuning from data.
+ * their heads 2-6 deg down (headset logs of 2026-10-06), so 8; then about
+ * level to a few degrees up at the start of a session (2026-10-07), with
+ * the group felt as too low, so 4. The debug panel logs the head's pitch
+ * every 10 s to keep tuning from data.
  */
-export const NATURAL_GAZE_PITCH_DEG = 8;
+export const NATURAL_GAZE_PITCH_DEG = 4;
 export const NATURAL_GAZE_PITCH_RAD = MathUtils.degToRad(NATURAL_GAZE_PITCH_DEG);
 
 /** The whole group's vertical extent, centered on the natural gaze. Tune on a headset. */
@@ -31,11 +33,20 @@ export const VIEW_MAX_BELOW_GAZE_DEG = GROUP_MAX_VERTICAL_FOV_DEG / 2;
 export const VIEW_MAX_ABOVE_GAZE_DEG = GROUP_MAX_VERTICAL_FOV_DEG / 2;
 
 /**
- * Seated reach: every element the user must touch (source slabs, the
- * join-type control) keeps its center at most this far from the eyes.
- * Reach wins over the view window.
+ * Seated reach: every element the user pokes or pinches (the join-type
+ * control, the puzzle bar, the result's NULL cells) keeps its center at
+ * most this far from the eyes. Source slabs sit farther (they're grabbed by
+ * ray as well as by hand): SLAB_VIEW_DISTANCE_METERS.
  */
 export const TOUCH_REACH_MAX_METERS = 0.6;
+/**
+ * Where the source slabs' centers sit from the eyes, floating or on a desk:
+ * out of the near field, so a seated player sees the whole group without
+ * leaning back. Text is sized by angle for it (PLANNED_SOURCE_DISTANCE_METERS).
+ */
+export const SLAB_VIEW_DISTANCE_METERS = 0.7;
+/** The band (control and bar) sits this far from the eyes, in view between the pair and the result. */
+export const BAND_DISTANCE_METERS = 0.5;
 /** Where touchable content should ideally sit (for the debug readout). */
 export const TOUCH_REACH_IDEAL_METERS = 0.5;
 

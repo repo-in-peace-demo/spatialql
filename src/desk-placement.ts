@@ -37,7 +37,13 @@ import { PlacementDebug, type PlacementKind, type SlabReport } from './placement
 import { sounds } from './sound.js';
 import { JoinDocked, TableSlab, TableSlabRuntime } from './table-slab-component.js';
 import { buildTableSlabDocument, type TableSlabDocument } from './table-slab-view.js';
-import { easeInCubic, easeOutCubic } from './tween.js';
+import { easeInCubic, easeInOutCubic, easeOutCubic } from './tween.js';
+import {
+  RECENTER_AFTER_HIDDEN_SECONDS,
+  RecenterTrigger,
+  type RecenterReason,
+  type SessionVisibility,
+} from './recenter-trigger.js';
 import {
   eyeFacingLean,
   eyeFacingLeanFromBottom,
@@ -47,7 +53,7 @@ import {
   PLANNED_SOURCE_DISTANCE_METERS,
   slabTextSizeAt,
   textAngleDeg,
-  TOUCH_REACH_MAX_METERS,
+  SLAB_VIEW_DISTANCE_METERS,
   VIEW_MAX_BELOW_GAZE_DEG,
   type SlabEdgeAngles,
 } from './view-comfort.js';
@@ -72,23 +78,24 @@ const SURFACE_HEIGHT_BELOW_HEAD = { min: 0.3, max: 0.95 };
 // A slab rotated by a negative angle around its local X axis ("leaning back
 // from vertical") has its +Z-facing normal raised toward eyes above it.
 
-// Floating fallback: slab centers this far ahead of / below the head, which
-// keeps both centers within seated reach (TOUCH_REACH_MAX_METERS).
-const FLOATING_FORWARD_METERS = 0.42;
-// The group (slabs, control band, result with the card beside it) centered on the
-// natural gaze (8 deg down), every touchable center within reach.
+// Floating fallback: slab centers at SLAB_VIEW_DISTANCE_METERS from the
+// eyes, this far below them (at least this far ahead), so the group (slabs,
+// control band, result with the card beside it) sits about centered on the
+// natural gaze (4 deg down) and out of the near field.
+const FLOATING_FORWARD_METERS = 0.65;
 const FLOATING_BELOW_HEAD_METERS = 0.25;
 
-// On a surface: the slabs' bottom edges rest on it, this far ahead of the
-// head (horizontally), propped up to face the eyes.
+// On a surface: the slabs' bottom edges rest on it, at least this far ahead
+// of the head (horizontally; in practice where their centers sit
+// SLAB_VIEW_DISTANCE_METERS from the eyes), propped up to face the eyes.
 const SURFACE_FORWARD_METERS = 0.32;
 // Keeps the bottom edge from z-fighting with the surface it rests on.
 const SURFACE_LIFT_METERS = 0.002;
 
 // Field-of-view guard (view-comfort.ts): every slab's top and bottom edges
 // should sit inside the group's view window around the natural seated gaze;
-// if one wouldn't, the slabs move farther forward, but reach wins: never so
-// far that a slab's center passes TOUCH_REACH_MAX_METERS from the eyes.
+// if one wouldn't, the slabs move farther forward (floating: never past
+// SLAB_VIEW_DISTANCE_METERS; on a surface, farther if the view needs it).
 // Distance and tilt depend on each other; this many alternations settle both.
 const FIT_ITERATIONS = 3;
 
@@ -114,6 +121,15 @@ const SWITCH_LEAVE_SECONDS = 0.35;
 const SWITCH_ARRIVE_SECONDS = 0.35;
 const SWITCH_ARRIVE_STAGGER_SECONDS = 0.08;
 
+/** Recenter: the group glides to its re-placed pose over this long. */
+const RECENTER_GLIDE_SECONDS = 0.4;
+/** The log's words for each recenter trigger. */
+const RECENTER_REASONS: Readonly<Record<RecenterReason, string>> = {
+  'headset-on': 'headset back on',
+  reset: 'recenter (reference space reset)',
+  button: 'Recenter button',
+};
+
 /** One source slab on the desk: the dataset's parent table is slabs[0] (left), the child slabs[1] (right). */
 type Slab = {
   table: Table;
@@ -125,6 +141,8 @@ type Slab = {
   from: Vector3;
   to: Vector3;
   landed: boolean;
+  /** Recenter glide: from its pose to its re-placed one (`recenterGliding` while any slab's is active). */
+  glide: { active: boolean; fromPos: Vector3; fromQuat: Quaternion; toPos: Vector3; toQuat: Quaternion };
 };
 
 const REJECT_NO_OBJECT = 'no object3D';
@@ -208,6 +226,21 @@ export class DeskPlacementSystem
   /** The last search found a table or desk beyond reach (the slabs float); see DeskControls. */
   surfaceTooFar = false;
 
+  // Recenter: the group back in front of the player (headset back on, a
+  // recenter, or the Recenter button; see recenter-trigger.ts).
+  private readonly recenter = new RecenterTrigger();
+  /** While true, placement records each slab's target (into its glide) instead of moving it, and overrides never-yank's "moved by hand". */
+  private collectingTargets = false;
+  private recenterClock = 0;
+  /** See DeskControls. */
+  recenterGliding = false;
+  placementEpoch = 0;
+  /** Removes this session's visibility and reset listeners. */
+  private sessionListenersCleanup: (() => void) | null = null;
+  private sessionListenersAttached = false;
+  private readonly _q = new Quaternion();
+  private readonly _p = new Vector3();
+
   private sessionActive = false;
   private headPoseValid = false;
   private headPoseWaitElapsed = 0;
@@ -250,14 +283,15 @@ export class DeskPlacementSystem
     for (const table of DATASETS[dataset].tables) {
       this.slabs.push(this.createSlab(table, true));
     }
-    if (CHALLENGE_MODE) {
-      deskBridge.desk = this;
-      this.cleanupFuncs.push(() => {
-        if (deskBridge.desk === this) {
-          deskBridge.desk = null;
-        }
-      });
-    }
+    // Both modes: the Recenter button reaches placement through the bridge
+    // (the dataset switch itself only runs in challenge mode).
+    deskBridge.desk = this;
+    this.cleanupFuncs.push(() => {
+      if (deskBridge.desk === this) {
+        deskBridge.desk = null;
+      }
+      this.sessionListenersCleanup?.();
+    });
 
     this.forceSurfaceRequested = import.meta.env.DEV && devFlag('forceSurface');
     this.debug = import.meta.env.DEV && devFlag('debug') ? new PlacementDebug(this.world) : null;
@@ -327,7 +361,193 @@ export class DeskPlacementSystem
     if (grabbable) {
       entity.addComponent(OneHandGrabbable, {});
     }
-    return { table, doc, entity, touched: false, from: new Vector3(), to: new Vector3(), landed: grabbable };
+    return {
+      table,
+      doc,
+      entity,
+      touched: false,
+      from: new Vector3(),
+      to: new Vector3(),
+      landed: grabbable,
+      glide: { active: false, fromPos: new Vector3(), fromQuat: new Quaternion(), toPos: new Vector3(), toQuat: new Quaternion() },
+    };
+  }
+
+  // --- Recenter --------------------------------------------------------------------------
+
+  requestRecenter(): void {
+    if (this.recenter.request('button', performance.now()) && import.meta.env.DEV && this.debug) {
+      console.log(`[DeskPlacement debug] recenter requested (Recenter button)${this.anySlabHeld() ? '; waiting for the held slab' : ''}`);
+    }
+  }
+
+  /**
+   * This session's XR visibility changes and reference-space resets feed the
+   * recenter trigger. The reference space may not exist yet at session
+   * start: retried from update() until attached.
+   */
+  private attachSessionListeners(): void {
+    if (this.sessionListenersAttached) {
+      return;
+    }
+    const session = this.xrManager.getSession();
+    const space = this.xrManager.getReferenceSpace();
+    if (!session || !space) {
+      return;
+    }
+    this.sessionListenersAttached = true;
+    const onVisibility = () => {
+      const state = session.visibilityState as SessionVisibility;
+      const queued = this.recenter.onVisibility(state, performance.now());
+      if (import.meta.env.DEV && this.debug) {
+        console.log(
+          `[DeskPlacement debug] session visibility: ${state}` +
+            (state === 'visible' ? ` (the last hidden spell lasted ${(this.recenter.lastHiddenMs / 1000).toFixed(1)} s)` : '') +
+            (queued ? `; recenter queued (headset back on after ${RECENTER_AFTER_HIDDEN_SECONDS} s or more)` : ''),
+        );
+      }
+    };
+    const onReset = () => {
+      const queued = this.recenter.onReset(performance.now());
+      if (import.meta.env.DEV && this.debug) {
+        console.log(`[DeskPlacement debug] reference space reset (recenter)${queued ? '; recenter queued' : '; merged with the last trigger'}`);
+      }
+    };
+    session.addEventListener('visibilitychange', onVisibility);
+    space.addEventListener('reset', onReset);
+    this.sessionListenersCleanup = () => {
+      session.removeEventListener('visibilitychange', onVisibility);
+      space.removeEventListener('reset', onReset);
+    };
+  }
+
+  private detachSessionListeners(): void {
+    this.sessionListenersCleanup?.();
+    this.sessionListenersCleanup = null;
+    this.sessionListenersAttached = false;
+    this.recenter.reset();
+  }
+
+  /** Each frame: runs a waiting recenter once nothing blocks it, and advances the glide. */
+  private updateRecenter(delta: number): void {
+    if (this.sessionActive) {
+      this.attachSessionListeners();
+    }
+    const blocked =
+      !this.sessionActive ||
+      !this.headPoseValid ||
+      this.searching ||
+      this.recenterGliding ||
+      this.anySlabHeld() ||
+      this.deskStateValue.phase !== 'ready' ||
+      this.slabs.length !== 2;
+    const reason = this.recenter.poll(blocked);
+    if (reason) {
+      this.runRecenter(reason);
+    }
+    if (!this.recenterGliding) {
+      return;
+    }
+    this.recenterClock += delta;
+    const t = easeInOutCubic(Math.min(1, this.recenterClock / RECENTER_GLIDE_SECONDS));
+    let active = false;
+    for (const slab of this.slabs) {
+      const glide = slab.glide;
+      const object = slab.entity.object3D;
+      if (!glide.active || !object) {
+        continue;
+      }
+      // A grab wins over the glide (never-yank).
+      if (slab.entity.hasComponent(Grabbed)) {
+        glide.active = false;
+        continue;
+      }
+      object.position.lerpVectors(glide.fromPos, glide.toPos, t);
+      object.quaternion.slerpQuaternions(glide.fromQuat, glide.toQuat, t);
+      if (t >= 1) {
+        glide.active = false;
+      } else {
+        active = true;
+      }
+    }
+    this.recenterGliding = active;
+  }
+
+  /**
+   * Re-places the group in front of the player with the normal placement
+   * (the table found earlier if it's still usable, else floating), gliding
+   * there. It overrides slabs placed by hand (that's the point); held slabs
+   * were waited for. A joined pair moves as one piece (the RIGHT slab keeps
+   * its docked pose relative to the LEFT one), so the join stays as it is;
+   * the join system re-places the band, result and card as the pair glides.
+   */
+  private runRecenter(reason: RecenterReason): void {
+    this.readHeadPose();
+    for (const slab of this.slabs) {
+      const object = slab.entity.object3D;
+      slab.glide.fromPos.copy(object?.position ?? slab.glide.fromPos);
+      slab.glide.fromQuat.copy(object?.quaternion ?? slab.glide.fromQuat);
+      slab.glide.toPos.copy(slab.glide.fromPos);
+      slab.glide.toQuat.copy(slab.glide.fromQuat);
+    }
+
+    // The targets, from the normal placement rules (recorded, not applied).
+    this.collectingTargets = true;
+    let kind: PlacementKind = 'floating';
+    let placement: SurfacePlacementCase | null = 'floating';
+    const surfaceEntity = this.lastSurface?.entity ?? null;
+    if (surfaceEntity) {
+      const surfaceKind = surfaceEntity.hasComponent(XRMesh) ? 'mesh' : 'plane';
+      if (this.assessSurface(surfaceEntity, surfaceKind, this._best)) {
+        this.lastSurface = this._best;
+        this.lastSurfaceY = this._best.surfaceY;
+        placement = this.placeOnSurface(this._best.surfaceY, this._best);
+        kind = placement === 'floating' ? 'floating' : 'surface';
+      } else {
+        this.placeFloating();
+      }
+      this.surfaceTooFar = placement === 'floating';
+    } else if (this.lastSurfaceY !== null) {
+      // The dev-forced desk: at the same height below the eyes.
+      this.lastSurfaceY = this._headPos.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD;
+      placement = this.placeOnSurface(this.lastSurfaceY, null);
+      kind = 'synthetic';
+    } else {
+      this.placeFloating();
+    }
+    this.collectingTargets = false;
+
+    // A joined pair moves as one piece: the RIGHT slab follows the LEFT one's move.
+    const [first, second] = this.slabs;
+    if (first.entity.hasComponent(JoinDocked) && second.entity.hasComponent(JoinDocked)) {
+      // delta = to * inverse(from), applied to the second slab's pose.
+      this._q.copy(first.glide.fromQuat).invert().premultiply(first.glide.toQuat);
+      this._p.subVectors(second.glide.fromPos, first.glide.fromPos).applyQuaternion(this._q);
+      second.glide.toPos.copy(first.glide.toPos).add(this._p);
+      second.glide.toQuat.copy(second.glide.fromQuat).premultiply(this._q);
+    }
+
+    for (const slab of this.slabs) {
+      slab.glide.active = true;
+      // Placed by the system again: later placement may move them.
+      slab.touched = false;
+    }
+    this.recenterClock = 0;
+    this.recenterGliding = true;
+    this.placementEpoch++;
+    this._center.copy(first.glide.toPos).add(second.glide.toPos).multiplyScalar(0.5);
+    sounds.playTablesIn(this._center);
+    if (import.meta.env.DEV && this.debug) {
+      this._p.copy(first.glide.fromPos).add(second.glide.fromPos).multiplyScalar(0.5);
+      console.log(
+        `[DeskPlacement debug] recenter (${RECENTER_REASONS[reason]}): ${kind}` +
+          `${placement && placement !== 'floating' ? ` (${placement})` : ''}` +
+          `${first.entity.hasComponent(JoinDocked) ? ', joined pair moved as one' : ''}; the pair's middle from ` +
+          `(${this._p.x.toFixed(2)}, ${this._p.y.toFixed(2)}, ${this._p.z.toFixed(2)}) to ` +
+          `(${this._center.x.toFixed(2)}, ${this._center.y.toFixed(2)}, ${this._center.z.toFixed(2)}), ` +
+          `${this._p.distanceTo(this._center).toFixed(2)} m, over ${RECENTER_GLIDE_SECONDS} s`,
+      );
+    }
   }
 
   private deskDatasetFor(table: Table): DatasetId {
@@ -467,6 +687,7 @@ export class DeskPlacementSystem
     if (CHALLENGE_MODE) {
       this.updateSwitch(delta);
     }
+    this.updateRecenter(delta);
     if (this.sessionActive && !this.headPoseValid) {
       this.headPoseWaitElapsed += delta;
       this.player.head.updateWorldMatrix(true, false);
@@ -500,6 +721,11 @@ export class DeskPlacementSystem
 
   private onSessionEnd(): void {
     this.searching = false;
+    this.detachSessionListeners();
+    this.recenterGliding = false;
+    for (const slab of this.slabs) {
+      slab.glide.active = false;
+    }
     if (import.meta.env.DEV && this.debug) {
       this.debug.clearOutlines();
     }
@@ -704,9 +930,9 @@ export class DeskPlacementSystem
     this.surfaceTooFar = placement === 'floating';
     this.reportPlacement(
       placement === 'floating'
-        ? `detected ${kind} beyond reach (floating kept)`
+        ? `detected ${kind} too far away (floating kept)`
         : placement === 'desk-edge'
-          ? `detected ${kind} just beyond reach (at reach, at its edge)`
+          ? `detected ${kind} just beyond the slabs' line (at the line, at its edge)`
           : `snapped to detected ${kind}`,
       placement === 'floating' ? 'floating' : 'surface',
       this._best,
@@ -742,6 +968,10 @@ export class DeskPlacementSystem
    * session, nor one docked into a join (even one joined without a grab).
    */
   private isFrozen(entity: Entity, touched: boolean): boolean {
+    // A recenter moves them all (held slabs were waited for).
+    if (this.collectingTargets) {
+      return false;
+    }
     return touched || entity.hasComponent(JoinDocked);
   }
 
@@ -765,20 +995,20 @@ export class DeskPlacementSystem
     return minDistanceForDrop(drop, NATURAL_GAZE_PITCH_RAD) - edgeOffset;
   }
 
-  /** Largest horizontal center distance keeping a center `drop` below the eyes within reach. */
+  /** Horizontal center distance putting a center `drop` below the eyes (and `lateral` aside) at the slabs' view distance. */
   private floatingReachForward(drop: number, lateral: number): number {
-    const r2 = TOUCH_REACH_MAX_METERS * TOUCH_REACH_MAX_METERS - drop * drop - lateral * lateral;
+    const r2 = SLAB_VIEW_DISTANCE_METERS * SLAB_VIEW_DISTANCE_METERS - drop * drop - lateral * lateral;
     return r2 > 0 ? Math.sqrt(r2) : 0;
   }
 
   /**
-   * Largest bottom-edge distance keeping a propped slab's center within
-   * reach, for a given lean: its center sits `half` up the slab from the
-   * bottom edge, which rests `eyeRise` below the eyes.
+   * Bottom-edge distance putting a propped slab's center at the slabs'
+   * view distance, for a given lean: its center sits `half` up the slab
+   * from the bottom edge, which rests `eyeRise` below the eyes.
    */
   private surfaceReachForward(eyeRise: number, half: number, lean: number, lateral: number): number {
     const centerDrop = eyeRise - half * Math.cos(lean);
-    const r2 = TOUCH_REACH_MAX_METERS * TOUCH_REACH_MAX_METERS - centerDrop * centerDrop - lateral * lateral;
+    const r2 = SLAB_VIEW_DISTANCE_METERS * SLAB_VIEW_DISTANCE_METERS - centerDrop * centerDrop - lateral * lateral;
     return r2 > 0 ? Math.sqrt(r2) - half * Math.sin(lean) : 0;
   }
 
@@ -795,7 +1025,8 @@ export class DeskPlacementSystem
    * Floating fallback: ahead of and below the head, sharing the head's yaw
    * and lean, with both slabs' bottom edges on one line (the taller slab's
    * center at FLOATING_BELOW_HEAD_METERS), pushed forward if either edge of
-   * either slab would leave the comfortable view -- but never past reach.
+   * either slab would leave the comfortable view -- but never past the
+   * slabs' view distance (the farther slab's center sits at it).
    */
   private placeFloating(): void {
     if (!this.canPlace()) {
@@ -807,8 +1038,8 @@ export class DeskPlacementSystem
     const ordersHalf = this.slabHeightMeters(rightSlab.doc) / 2;
     const leftOffset = SLAB_GAP_METERS / 2 + leftSlab.doc.widthMeters / 2;
     const rightOffset = SLAB_GAP_METERS / 2 + rightSlab.doc.widthMeters / 2;
-    // Reach wins: never farther than both centers' reach, even if that's
-    // nearer than FLOATING_FORWARD_METERS (a wide slab off to the side).
+    // Both centers at most the view distance away, even if that's nearer
+    // than FLOATING_FORWARD_METERS (a wide slab off to the side).
     const reachForward = Math.min(
       this.floatingReachForward(FLOATING_BELOW_HEAD_METERS, leftOffset),
       this.floatingReachForward(FLOATING_BELOW_HEAD_METERS, rightOffset),
@@ -857,8 +1088,8 @@ export class DeskPlacementSystem
   /**
    * Surface placement: both slabs share the head's yaw and stand side by
    * side with their bottom edges on the surface along one line
-   * SURFACE_FORWARD_METERS ahead of the head (farther if needed to stay in
-   * view, up to reach), each propped up so its face points at the eyes.
+   * where their centers sit SLAB_VIEW_DISTANCE_METERS from the eyes (farther
+   * if needed to stay in view), each propped up so its face points at the eyes.
    * With a detected surface, that line's midpoint is clamped to the
    * surface's footprint.
    */
@@ -876,8 +1107,8 @@ export class DeskPlacementSystem
     const rightOffset = SLAB_GAP_METERS / 2 + rightSlab.doc.widthMeters / 2;
 
     // Each slab leans to face the eyes from its own center; the bottom-edge
-    // distance keeps both edges of both slabs in view, unless that would put
-    // a center out of reach (reach wins). They depend on each other, so
+    // line puts their centers at the view distance, farther if both edges of
+    // both slabs need it to stay in view. They depend on each other, so
     // alternate a few times.
     let forward = SURFACE_FORWARD_METERS;
     for (let i = 0; i < FIT_ITERATIONS; i++) {
@@ -890,13 +1121,10 @@ export class DeskPlacementSystem
           this.surfaceReachForward(eyeRise, ordersHeight / 2, ordersLean, rightOffset),
         ),
       );
-      forward = Math.min(
+      forward = Math.max(
         reachForward,
-        Math.max(
-          SURFACE_FORWARD_METERS,
-          this.surfaceForwardToFit(surfaceY, customersHeight / 2, Math.sin(customersLean), Math.cos(customersLean)),
-          this.surfaceForwardToFit(surfaceY, ordersHeight / 2, Math.sin(ordersLean), Math.cos(ordersLean)),
-        ),
+        this.surfaceForwardToFit(surfaceY, customersHeight / 2, Math.sin(customersLean), Math.cos(customersLean)),
+        this.surfaceForwardToFit(surfaceY, ordersHeight / 2, Math.sin(ordersLean), Math.cos(ordersLean)),
       );
     }
 
@@ -913,10 +1141,10 @@ export class DeskPlacementSystem
       object.localToWorld(this._anchor);
     }
 
-    // Reach wins over the surface: the clamp to the footprint may have pushed
-    // the bottom edges past reach (a desk edge half a metre away). A little
-    // past: sit at reach, at the desk's height, just in front of its edge.
-    // Farther: don't use the surface at all (floating).
+    // The view distance wins over the surface: the clamp to the footprint may
+    // have pushed the bottom edges past the line (a desk whose near edge is
+    // far away). A little past: sit at the line, at the desk's height, just
+    // in front of its edge. Farther: don't use the surface at all (floating).
     this._local.subVectors(this._anchor, this._headPos);
     let anchorForward = Math.max(0.05, this._local.dot(this._forward));
     const anchorEyeRise = this._headPos.y - (this._anchor.y + SURFACE_LIFT_METERS);
@@ -941,8 +1169,8 @@ export class DeskPlacementSystem
     if (import.meta.env.DEV && this.debug) {
       console.log(
         `[DeskPlacement debug] surface placement: ${placement} (the surface puts the slabs' bottom edges ` +
-          `${anchorForward.toFixed(2)} m ahead; reach allows ${reachForward.toFixed(2)} m; desk-edge up to ` +
-          `${DESK_EDGE_BEYOND_REACH_MAX_METERS} m beyond reach; surface ${(this._headPos.y - surfaceY).toFixed(2)} m below the eyes)`,
+          `${anchorForward.toFixed(2)} m ahead; the ${SLAB_VIEW_DISTANCE_METERS} m view distance puts them ` +
+          `${reachForward.toFixed(2)} m ahead; desk-edge up to ${DESK_EDGE_BEYOND_REACH_MAX_METERS} m beyond that; surface ${(this._headPos.y - surfaceY).toFixed(2)} m below the eyes)`,
       );
     }
     if (placement === 'floating') {
@@ -989,6 +1217,16 @@ export class DeskPlacementSystem
   }
 
   private applySlabTransform(entity: Entity, center: Vector3, leanFromVertical: number): void {
+    // A recenter records the target for its glide instead of moving the slab.
+    if (this.collectingTargets) {
+      const slab = this.slabs.find((s) => s.entity === entity);
+      if (slab) {
+        slab.glide.toPos.copy(center);
+        this._headEuler.set(-leanFromVertical, this._headYaw, 0, 'YXZ');
+        slab.glide.toQuat.setFromEuler(this._headEuler);
+      }
+      return;
+    }
     const object = entity.object3D;
     if (!object) {
       return;
@@ -1035,7 +1273,8 @@ export class DeskPlacementSystem
    * a dev-only module, so none of their text ships in production builds.
    */
   private warnIfOutOfView(): void {
-    if (!import.meta.env.DEV || !this.debug) {
+    // (A recenter only records targets; the slabs haven't moved yet.)
+    if (!import.meta.env.DEV || !this.debug || this.collectingTargets) {
       return;
     }
     this.debug.warnOutOfView(this.slabs.map((slab) => this.slabReport(slab.table.id, slab.entity, slab.doc, slab.touched)));

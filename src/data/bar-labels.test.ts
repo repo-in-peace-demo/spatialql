@@ -3,6 +3,7 @@ import {
   BAR_BUTTON_PADDING_EM,
   barButtonWidthCm,
   barRowWidthCm,
+  CONTROL_OPTION_MIN_WIDTH_CM,
   HEADER_METRICS,
   MAX_FILTER_CHIPS,
   measureTextCm,
@@ -26,6 +27,22 @@ describe('puzzle bar labels', () => {
     }
   });
 
+  it('Prev is a full touch target (at least the minimum, like every bar button)', () => {
+    expect(barButtonWidthCm([BAR.prev], LABEL_FONT_CM)).toBeGreaterThanOrEqual(CONTROL_OPTION_MIN_WIDTH_CM);
+  });
+
+  it('the Recenter hover label is one short line, no wider than the bar at rest', () => {
+    const label = measureTextCm(BAR.recenter, HEADER_METRICS, LABEL_FONT_CM) + 2 * BAR_BUTTON_PADDING_EM * LABEL_FONT_CM;
+    const rest = barRowWidthCm([
+      barButtonWidthCm([BAR.prev], LABEL_FONT_CM),
+      barButtonWidthCm(BAR.hintLabels, LABEL_FONT_CM),
+      barButtonWidthCm([BAR.next, BAR.skip], LABEL_FONT_CM),
+      CONTROL_OPTION_MIN_WIDTH_CM,
+    ]);
+    expect(label).toBeLessThanOrEqual(rest / 2);
+    expect(BAR.recenter).toMatch(/^[\x20-\x7e]+$/);
+  });
+
   it('Next fits both its labels (Next, and Skip after "Show answer")', () => {
     const width = barButtonWidthCm([BAR.next, BAR.skip], LABEL_FONT_CM);
     for (const label of [BAR.next, BAR.skip]) {
@@ -36,7 +53,7 @@ describe('puzzle bar labels', () => {
 
   it('says what it shows next, in order, in plain ASCII', () => {
     expect(BAR.hintLabels).toEqual(['Hint', 'Another hint', 'Show answer']);
-    for (const label of [...BAR.hintLabels, BAR.next, BAR.skip, BAR.clearFilter, BAR.filter, BAR.filterBack]) {
+    for (const label of [BAR.prev, ...BAR.hintLabels, BAR.next, BAR.skip, BAR.recenter, BAR.clearFilter, BAR.filter, BAR.filterBack]) {
       expect(label, label).toMatch(/^[\x20-\x7e]+$/);
     }
   });
@@ -80,6 +97,27 @@ describe('the Filter chips', () => {
     expect(noMilk.columns.map((column) => chipLabel(noMilk.output, column))).toEqual(['MILK is NULL']);
     const shop = results.find((r) => r.puzzle.id === 'shop-match' && r.joinType === 'inner')!;
     expect(shop.columns).toEqual([]);
+  });
+
+  it('the widest playing bar (Prev, Hint, Next, a filter label and Clear) stays within 40 cm', () => {
+    const labelWidth = (text: string) =>
+      measureTextCm(text, HEADER_METRICS, LABEL_FONT_CM) + 2 * BAR_BUTTON_PADDING_EM * LABEL_FONT_CM;
+    let widest = 0;
+    for (const { output, columns } of results) {
+      for (const column of columns) {
+        widest = Math.max(widest, labelWidth(chipLabel(output, column)));
+      }
+    }
+    const width = barRowWidthCm([
+      barButtonWidthCm([BAR.prev], LABEL_FONT_CM),
+      barButtonWidthCm(BAR.hintLabels, LABEL_FONT_CM),
+      barButtonWidthCm([BAR.next, BAR.skip], LABEL_FONT_CM),
+      // Recenter: an icon at the minimum target size.
+      CONTROL_OPTION_MIN_WIDTH_CM,
+      widest,
+      barButtonWidthCm([BAR.clearFilter], LABEL_FONT_CM),
+    ]);
+    expect(width).toBeLessThanOrEqual(40);
   });
 
   it('fit the bar: at most MAX_FILTER_CHIPS, and Back plus the chips within the band (50 cm)', () => {

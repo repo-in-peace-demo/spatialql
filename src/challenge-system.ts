@@ -28,7 +28,7 @@ import {
   type UIKit,
 } from '@iwsdk/core';
 import { CHALLENGE_MODE } from './challenge-mode.js';
-import { challengeStart, PLAYABLE, publishProgress } from './challenge-start.js';
+import { challengeStart, PLAYABLE, publishProgress, takePickedPuzzle } from './challenge-start.js';
 import {
   buildPuzzleBar,
   buildPuzzleCard,
@@ -41,6 +41,9 @@ import {
   setNextLabel,
   setNextAvailable,
   setNextWaiting,
+  setPrevAvailable,
+  setBarHover,
+  setRecenterHover,
   type BarButton,
   type BarButtonTarget,
   type PuzzleBarView,
@@ -49,7 +52,7 @@ import {
 import { compareToTarget, fanOutGroups, type Comparison } from './data/compare.js';
 import { BAR, CARD, CONCEPT_INTROS, NULL_EXPLAINER, WELCOME } from './data/copy.js';
 import { isoFromDay } from './data/daily.js';
-import { aheadConcepts, isTodaysDaily, nextPuzzle } from './data/daily-flow.js';
+import { advanceResume, aheadConcepts, isTodaysDaily, nextPuzzle, prevPuzzle } from './data/daily-flow.js';
 import { DATASETS } from './data/datasets.js';
 import { canEvaluate, canStartSwitch, deskTableIds, type DeskState } from './data/desk-session.js';
 import type { JoinState } from './data/join-state.js';
@@ -58,6 +61,7 @@ import {
   currentStreak,
   dailyCompletedToday,
   dailySolvedToday,
+  isRevealed,
   isSolved,
   markConceptSeen,
   markDailyRevealed,
@@ -76,7 +80,7 @@ import {
   startSession,
   type PuzzleSession,
 } from './data/puzzle-session.js';
-import { puzzleText, type PuzzleText } from './data/puzzle-text.js';
+import { puzzleText, resultHeader, type PuzzleText } from './data/puzzle-text.js';
 import {
   canActivatePuzzle,
   getPuzzle,
@@ -111,6 +115,7 @@ import {
 } from './contact-poke.js';
 import { indexStraightness, readJointsPoint } from './pinch.js';
 import { buildTableSlabDocument, MAX_RESULT_ROWS, type TableSlabDocument } from './table-slab-view.js';
+import { cardMetrics } from './card-metrics.js';
 import { PLANNED_CONTROL_DISTANCE_METERS, PLANNED_RESULT_DISTANCE_METERS, slabTextSizeAt } from './view-comfort.js';
 
 /** A pinch presses a bar button within this of it in plane (and BUTTON_PINCH_*_DEPTH_METERS off its face). */
@@ -121,6 +126,8 @@ const INDEX_TIP: readonly XRHandJoint[] = ['index-finger-tip'];
 const BAR_PRESS_DEBOUNCE_SECONDS = 0.3;
 /** How long "Solve it first, or use Hint." shows after pressing an inactive Next. */
 const STATUS_FLASH_SECONDS = 2.5;
+/** The bar's WHERE label pulse (a press on a NULL in the column already filtered). */
+const WHERE_PULSE_SECONDS = 0.45;
 /** How long "Poke a NULL in the result above, or use Filter." shows in the message area. */
 const MESSAGE_FLASH_SECONDS = 3;
 /** The bar's touch-readout names for the filter chips (no per-frame strings). */
@@ -192,6 +199,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private filterChoices: NullFilterChoice[] = [];
   /** The bar's contents as last set (only a change resizes and re-places it). */
   private barKey = '';
+  /** When the bar's WHERE label started its pulse (clock seconds; -1 = none). */
+  private wherePulseStart = -1;
   private debug: ChallengeDebug | null = null;
   private readonly _point = new Vector3();
   private readonly _local = new Vector3();
@@ -240,8 +249,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.card = buildPuzzleCard();
     this.cardEntity = this.world.createTransformEntity(this.card.document);
     this.bar = buildPuzzleBar(slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm, {
+      prev: BAR.prev,
       hint: BAR.hintLabels,
       next: [BAR.next, BAR.skip],
+      recenter: BAR.recenter,
       clear: BAR.clearFilter,
       filter: BAR.filter,
       filterBack: BAR.filterBack,
@@ -253,8 +264,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.barEntity.addComponent(RayInteractable, {});
     // Rays (and controllers) only: a fingertip presses through the contact poke (updateBarPoke).
     const clickables: [InstanceType<typeof UIKit.Container>, BarButton, number][] = [
+      [this.bar.prev, 'prev', -1],
       [this.bar.hint, 'hint', -1],
       [this.bar.next, 'next', -1],
+      [this.bar.recenter.container, 'recenter', -1],
       [this.bar.clear, 'clear', -1],
       [this.bar.filter, 'filter', -1],
       [this.bar.filterBack, 'filterBack', -1],
@@ -276,13 +289,22 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
     joinBridge.challenge = this;
     this.layout = {
-      card: { object: this.card.document, widthMeters: this.card.widthMeters, heightMeters: this.card.heightMeters },
+      card: {
+        object: this.card.document,
+        widthMeters: this.card.widthMeters,
+        heightMeters: this.card.heightMeters,
+        textFontMeters: cardMetrics().smallFont / 100,
+      },
       bar: {
         object: this.bar.document,
         widthMeters: this.bar.widthMeters,
         heightMeters: this.bar.heightMeters,
         buttons: this.bar.buttons,
         buttonHeightMeters: this.bar.buttonHeightMeters,
+        // Built with only Prev, Hint, Next and Recenter.
+        baseWidthMeters: this.bar.widthMeters,
+        onRecenterHover: (hovered) => setRecenterHover(this.bar.recenter, hovered),
+        onPointerHover: (index, previous) => setBarHover(this.bar, index, previous),
       },
     };
     this.join.setChallengeLayout(this.layout);
@@ -294,8 +316,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       // The SDK's own poke pointer (a UIKit "touch" pointer): its down / up on each button.
       const debug = this.debug;
       for (const [name, button] of [
+        ['prev', bar.prev],
         ['hint', bar.hint],
         ['next', bar.next],
+        ['recenter', bar.recenter.container],
         ['clear', bar.clear],
         ['filter', bar.filter],
         ['filterBack', bar.filterBack],
@@ -365,6 +389,17 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     this.clock += delta;
     this.updateFade(delta);
+    // A puzzle picked on the welcome screen (not mid-switch: it waits for that to finish).
+    if (!this.pending && this.puzzle) {
+      const picked = takePickedPuzzle();
+      if (picked && picked !== this.puzzle.id) {
+        if (import.meta.env.DEV && this.debug) {
+          this.debug.note(`picked on the welcome screen: puzzle ${PRACTICE_ORDER.indexOf(picked) + 1} (${picked})`);
+        }
+        join.resetToHome();
+        this.loadPuzzle(picked);
+      }
+    }
     if (this.pending) {
       this.updatePendingSwitch(join);
       return;
@@ -392,7 +427,22 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       setCardIntro(this.card, this.flashRestore.text, this.flashRestore.lines);
     }
     this.updateMoveCloser(state);
+    this.updateWherePulse();
     this.updateBarPoke();
+  }
+
+  /** The bar's WHERE label dips once and returns (a press on the column already filtered). */
+  private updateWherePulse(): void {
+    if (this.wherePulseStart < 0) {
+      return;
+    }
+    const t = (this.clock - this.wherePulseStart) / WHERE_PULSE_SECONDS;
+    if (t >= 1) {
+      this.wherePulseStart = -1;
+      this.bar.whereOpacity.value = 1;
+      return;
+    }
+    this.bar.whereOpacity.value = 1 - 0.7 * Math.sin(Math.PI * t);
   }
 
   /**
@@ -418,7 +468,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
   }
 
-  /** The status line when nothing brief covers it: finished, the diff, the move-closer hint, or nothing. */
+  /**
+   * The status line when nothing brief covers it: finished, the diff, the
+   * move-closer hint, a replay's "Solved before" / "Done with answer
+   * before", or nothing.
+   */
   private restingStatus(): string {
     if (this.session.solved) {
       return this.solvedStatus();
@@ -426,7 +480,18 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (this.lastComparison) {
       return diffSummary(this.lastComparison.comparison);
     }
-    return this.moveCloserShown ? CARD.moveCloser : '';
+    if (this.moveCloserShown) {
+      return CARD.moveCloser;
+    }
+    return this.puzzle ? this.beforeStatus(this.puzzle.id) : '';
+  }
+
+  /** A replay of a finished puzzle says so (the takeaway shows again once it's re-solved). */
+  private beforeStatus(id: PuzzleId): string {
+    if (isRevealed(this.progress, id)) {
+      return CARD.doneWithAnswerBefore;
+    }
+    return isSolved(this.progress, id) ? CARD.solvedBefore : '';
   }
 
   /**
@@ -616,6 +681,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
   }
 
+  onNullFilterRepeat(): void {
+    this.wherePulseStart = this.clock;
+  }
+
   onWrongNull(tableId: string, path: PressPath): void {
     if (import.meta.env.DEV && this.debug) {
       this.debug.note(`${path} on a NULL in the ${tableId} table (a source): "${CARD.wrongNull}" (no click)`);
@@ -640,6 +709,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this.join?.resetToHome();
       this.loadPuzzle(PLAYABLE[index - 1]);
     }
+  }
+
+  debugRecenter(): void {
+    this.lastPress = -Infinity;
+    this.press('recenter', 'debug-key');
   }
 
   debugPoke(): boolean {
@@ -704,6 +778,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.join?.setSilhouette(null);
     this.lastComparison = null;
     setNextAvailable(this.bar, false);
+    setPrevAvailable(this.bar, false);
     if (import.meta.env.DEV && this.debug) {
       this.debug.note(`switching to ${puzzle.datasetId} for ${id}`);
     }
@@ -802,9 +877,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this.setMessage('');
     }
 
-    // A daily (possibly locked) is never the resume point; practice is.
+    // A daily (possibly locked) is never the resume point; practice is, and
+    // it only moves forward (a replay via Prev never sends the next session back).
     if (!this.isDaily) {
-      this.progress = { ...this.progress, lastPuzzle: id };
+      this.progress = advanceResume(this.progress, id, PLAYABLE);
     }
     this.save();
     this.updateNextLook();
@@ -834,7 +910,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         : CARD.practiceTitle(PRACTICE_ORDER.indexOf(puzzle.id) + 1, puzzle.datasetId),
     });
     this.card.goal.setProperties({ text: puzzleText(puzzle).goal });
-    this.card.status.setProperties({ text: this.moveCloserShown ? CARD.moveCloser : '' });
+    this.card.status.setProperties({ text: this.moveCloserShown ? CARD.moveCloser : this.beforeStatus(puzzle.id) });
     if (fresh) {
       this.card.fade.value = 0;
     }
@@ -995,9 +1071,39 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.loadPuzzle(nextId);
   }
 
-  /** Where Next goes: today's daily if it's open, back to practice after it, else the next practice puzzle. */
+  /** Where Next goes: the next puzzle number, if it's unlocked. */
   private nextId(): PuzzleId | null {
-    return nextPuzzle(this.progress, this.puzzle.id, this.today, PLAYABLE);
+    return nextPuzzle(this.progress, this.puzzle.id, PLAYABLE);
+  }
+
+  /** Where Prev goes: the previous puzzle number (the highest unlocked one below); null on puzzle 1. */
+  private prevId(): PuzzleId | null {
+    return this.puzzle ? prevPuzzle(this.progress, this.puzzle.id, PLAYABLE) : null;
+  }
+
+  private prevAvailable(): boolean {
+    return !this.pending && this.prevId() !== null;
+  }
+
+  /**
+   * Prev: back to an earlier puzzle, through the same switch as Next
+   * (separate, glide home, wait for a held slab, or switch datasets).
+   * Progress doesn't change: a replay keeps a solve, and the resume point
+   * only moves forward (`advanceResume`).
+   */
+  private prev(): void {
+    const prevId = this.prevAvailable() ? this.prevId() : null;
+    if (!prevId) {
+      return;
+    }
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(
+        `Prev: puzzle ${PRACTICE_ORDER.indexOf(this.puzzle.id) + 1}${this.isDaily ? ' (the daily)' : ''} -> ` +
+          `puzzle ${PRACTICE_ORDER.indexOf(prevId) + 1}`,
+      );
+    }
+    this.join?.resetToHome();
+    this.loadPuzzle(prevId);
   }
 
   /**
@@ -1018,7 +1124,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (this.canSkip()) {
       // Where Skip would go, with the skip recorded.
       const skipped = recordSkip(this.progress, this.puzzle.id, this.today, this.session.hintsShown, this.isDaily);
-      return nextPuzzle(skipped, this.puzzle.id, this.today, PLAYABLE) !== null;
+      return nextPuzzle(skipped, this.puzzle.id, PLAYABLE) !== null;
     }
     return (
       !this.pending && this.nextId() !== null && (this.session.solved || isSolved(this.progress, this.puzzle.id))
@@ -1027,6 +1133,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   /** Next's look (active or not) and label ("Skip" while the answer is showing and the puzzle isn't done). */
   private updateNextLook(): void {
+    setPrevAvailable(this.bar, this.prevAvailable());
     setNextAvailable(this.bar, this.nextAvailable());
     setNextLabel(this.bar, this.canSkip() ? BAR.skip : BAR.next);
   }
@@ -1065,8 +1172,14 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     const joined = state.phase === 'joined' && !this.pending;
     const filter = state.phase === 'joined' && !this.pending ? (state.filter ?? null) : null;
-    const [a, b] = puzzleTables(this.puzzle);
-    const where = filter ? buildWhereSql(a, b, filter) : null;
+    // The filter as the bar shows it: short, like its chip ("BR.ID is NULL";
+    // the caption shows the SQL), so the widest bar stays within reach.
+    let where: string | null = null;
+    if (filter) {
+      const header = resultHeader(this.puzzle, filter.tableId, filter.column);
+      const [a, b] = puzzleTables(this.puzzle);
+      where = header ? BAR.filterChip(header) : buildWhereSql(a, b, filter);
+    }
     this.filterChoices = joined && !filter ? join.nullFilterChoices().slice(0, MAX_FILTER_CHIPS) : [];
     if (this.filterChoices.length === 0) {
       this.filterOpen = false;
@@ -1119,10 +1232,29 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       }
       return;
     }
+    // An inactive Prev (the first puzzle, or mid-switch) is silent too.
+    if (button === 'prev' && !this.prevAvailable()) {
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(`Prev pressed while inactive (${this.pending ? 'switching' : 'the first puzzle'}): no click`);
+      }
+      return;
+    }
     this.bar.document.updateWorldMatrix(true, false);
     this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
     sounds.playClick(this._point);
-    if (button === 'hint') {
+    if (button === 'prev') {
+      this.prev();
+    } else if (button === 'recenter') {
+      // The group glides back in front of the player (desk placement; it waits for a held slab).
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(`Recenter pressed (${path})`);
+      }
+      deskBridge.desk?.requestRecenter();
+      if (!this.pending) {
+        this.card.status.setProperties({ text: CARD.recentered });
+        this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
+      }
+    } else if (button === 'hint') {
       this.showHint();
     } else if (button === 'next') {
       this.next();

@@ -61,22 +61,38 @@ import { buildJoinSql, buildWhereSql } from './data/join-sql.js';
 import { INITIAL_JOIN_STATE, transition, type JoinEvent, type JoinState } from './data/join-state.js';
 import { assignKeyTints } from './data/key-tints.js';
 import { RESULT_ROW_CAP } from './data/puzzles.js';
-import { filterForColumn, nullFilterColumns, nullFilterMask, sameFilter } from './data/query.js';
+import { filterForColumn, nullFilterColumns, nullFilterMask, nullPokeEvent, sameFilter } from './data/query.js';
 import { DATASETS, datasetOfTable, tableById } from './data/datasets.js';
 import type { QuerySpec } from './data/query.js';
 import type { CellValue, JoinType, NullFilter, Table } from './data/types.js';
-import { deskReady } from './desk-bridge.js';
+import { buildRecenterBar, setRecenterHover, type RecenterBarView } from './challenge-view.js';
+import { BAR } from './data/copy.js';
+import { deskBridge, deskReady } from './desk-bridge.js';
 import { devFlag } from './dev-flags.js';
 import {
   joinBridge,
   type ChallengeLayout,
   type JoinControls,
   type NullFilterChoice,
+  type PlacedBar,
   type PlacedElement,
 } from './join-bridge.js';
 import { JoinDebug, type JoinDebugHost, type JoinStats } from './join-debug.js';
 import { isTouchPointerClick, setRect, touchProbe, type PressPath } from './touch-probe.js';
-import { COLOR_MATCH_LINE, COLOR_PREVIEW, EdgeGlow, lineColorForTint, SegmentBatch } from './join-visuals.js';
+import { COLOR_MATCH_LINE, COLOR_PREVIEW, CursorDot, EdgeGlow, lineColorForTint, SegmentBatch } from './join-visuals.js';
+import {
+  angleBetweenDeg,
+  HAND_POINTER_FREEZE_LOOKBACK_SECONDS,
+  HAND_POINTER_MAX_METERS,
+  HAND_POINTER_MIN_FORWARD_METERS,
+  HAND_POINTER_NEAR_BUTTON_METERS,
+  HAND_POINTER_PITCH_OFFSET_DEG,
+  pitchDeg,
+  pointerFrozen,
+  pointerRaised,
+  PoseHistory,
+  smoothingAlpha,
+} from './hand-pointer-math.js';
 import {
   BUTTON_PINCH_BACK_DEPTH_METERS,
   BUTTON_PINCH_FRONT_DEPTH_METERS,
@@ -100,6 +116,7 @@ import {
   slabTopLocalY,
   slabVisualTopLocalY,
   setNullCellHover,
+  setTargetHover,
   setSlabBadge,
   type CellOffset,
   type SlabBadgeLook,
@@ -132,6 +149,8 @@ import {
   TEXT_ANGLE_TOLERANCE,
   textAngleDeg,
   TOUCH_REACH_MAX_METERS,
+  BAND_DISTANCE_METERS,
+  SLAB_VIEW_DISTANCE_METERS,
   VIEW_MAX_ABOVE_GAZE_DEG,
   VIEW_MAX_BELOW_GAZE_DEG,
   type SlabEdgeAngles,
@@ -277,6 +296,10 @@ const GRAB_SPHERE_RADIUS_METERS = 0.07;
 const BAR_CONTROL_GAP_METERS = 0.015;
 /** Gap (in view) between the result slot's side edge and the puzzle card beside it. */
 const CARD_SIDE_GAP_DEG = 2;
+/** The card's bottom edge stays at least this far (in view) above the band and the slabs below it. */
+const CARD_CLEARANCE_DEG = 1.5;
+/** The card clearance readout warns below this. */
+const CARD_MIN_CLEARANCE_WARN_DEG = 1;
 /**
  * Which side of the result the card goes: +1 = the viewer's right. The
  * band's INNER | LEFT control sits left of center (the puzzle bar is on its
@@ -297,6 +320,17 @@ const NULL_PINCH_MARGIN_METERS = 0.01;
 const NULL_RAY_TOLERANCE_METERS = 0.003;
 /** A ray hit counts as on a control option within this of its rectangle (bar buttons: the bar's pinch margin). */
 const RAY_BUTTON_TOLERANCE_METERS = 0.005;
+// The hand pointer's look: a thin ray and a cursor dot, and when it hits nothing, a short stub.
+const COLOR_POINTER = '#f7f4ee';
+const POINTER_THICKNESS_METERS = 0.0015;
+const POINTER_OPACITY = 0.6;
+const POINTER_DOT_RADIUS_METERS = 0.005;
+const POINTER_STUB_METERS = 0.3;
+/** A slab under the pointer glows this much along its sides (a grab target, for the distance grab). */
+const POINTER_SLAB_GLOW = 0.3;
+/** Dev log: a hover change is logged at most this often per hand. */
+const POINTER_HOVER_LOG_SECONDS = 0.25;
+const THUMB_TIP: readonly XRHandJoint[] = ['thumb-tip'];
 /** A fingertip this close in front of a NULL cell hovers it (its outline strengthens)... */
 const NULL_HOVER_DEPTH_METERS = 0.04;
 /** ...or up to this far behind its face (pressing into it). */
@@ -335,7 +369,106 @@ type SourceSlab = {
 };
 
 /** What a hand's or controller's target ray hit first (see `castRay`). */
-type RayTarget = 'none' | 'control' | 'bar' | 'null' | 'result' | 'slab';
+type RayTarget = 'none' | 'control' | 'bar' | 'recenter' | 'null' | 'result' | 'slab';
+
+/** A ray's nearest hit: what, how far along the ray, where (world), and which option, cell or slab. */
+type RayHit = {
+  target: RayTarget;
+  distance: number;
+  option: JoinType;
+  row: number;
+  column: number;
+  name: string;
+  point: Vector3;
+  slab: SourceSlab | null;
+};
+
+function makeRayHit(): RayHit {
+  return { target: 'none', distance: Infinity, option: 'inner', row: -1, column: -1, name: '', point: new Vector3(), slab: null };
+}
+
+function copyRayHit(from: RayHit, to: RayHit): void {
+  to.target = from.target;
+  to.distance = from.distance;
+  to.option = from.option;
+  to.row = from.row;
+  to.column = from.column;
+  to.name = from.name;
+  to.point.copy(from.point);
+  to.slab = from.slab;
+}
+
+/**
+ * Why a hand's pointer is off, as a short code: no hand tracked, its wrist
+ * lost, the hand at the body or lowered, a fingertip at a button (poke
+ * applies), the palm at a slab (a grab applies), or no ray.
+ */
+type PointerOffReason = 'untracked' | 'lost' | 'body' | 'lowered' | 'poke' | 'grab' | 'noray';
+
+/**
+ * The dev log's words for a pointer-off code. Only called inside dev-only
+ * code, so with the DEV checks around its callers it's dropped (and its
+ * text with it) from production builds.
+ */
+function pointerOffText(reason: PointerOffReason | ''): string {
+  if (!import.meta.env.DEV) {
+    return reason;
+  }
+  switch (reason) {
+    case 'untracked':
+      return 'no tracked hand';
+    case 'lost':
+      return 'hand not tracked';
+    case 'body':
+      return 'hand at the body';
+    case 'lowered':
+      return 'hand lowered';
+    case 'poke':
+      return 'fingertip at a button (poke)';
+    case 'grab':
+      return 'palm at a slab (near grab)';
+    case 'noray':
+      return 'no ray';
+    default:
+      return '';
+  }
+}
+
+/** One hand's pointer: on or off (and why), its smoothed or frozen ray, and what it hits. */
+type HandPointer = {
+  active: boolean;
+  frozen: boolean;
+  origin: Vector3;
+  dir: Vector3;
+  history: PoseHistory;
+  hit: RayHit;
+  /** With a `bar` hit: which of the bar's buttons (-1 between them). */
+  barIndex: number;
+  /** The wrist's position relative to the head when last read (meters ahead, below the eyes). */
+  forward: number;
+  below: number;
+  offReason: PointerOffReason | '';
+  /** Dev log: the last hover logged, and when. */
+  hoverKey: string;
+  hoverLogAt: number;
+};
+
+function makeHandPointer(): HandPointer {
+  return {
+    active: false,
+    frozen: false,
+    origin: new Vector3(),
+    dir: new Vector3(0, 0, -1),
+    history: new PoseHistory(),
+    hit: makeRayHit(),
+    barIndex: -1,
+    forward: 0,
+    below: 0,
+    offReason: 'untracked',
+    hoverKey: '',
+    hoverLogAt: -Infinity,
+  };
+}
 
 type ResultView = {
   key: string;
@@ -480,15 +613,30 @@ export class JoinSystem
   private readonly _rayLocal = new Vector3();
   private readonly _rayWorld = new Vector3();
   /** `castRay`'s nearest hit: what, how far along the ray, and where (world). */
-  private readonly _rayHit = {
-    target: 'none' as RayTarget,
-    distance: Infinity,
-    option: 'inner' as JoinType,
-    row: -1,
-    column: -1,
-    name: '',
-    point: new Vector3(),
+  private readonly _rayHit: RayHit = makeRayHit();
+  // The hand pointer (see updateHandPointers): one per hand, its visuals, and what it hovers.
+  private readonly pointers: Record<(typeof HANDS)[number], HandPointer> = { left: makeHandPointer(), right: makeHandPointer() };
+  /** Whether the SDK's own ray is off for a hand (ours replaces it; controllers keep theirs). */
+  private readonly sdkRayOff = { left: false, right: false };
+  private pointerLines!: SegmentBatch;
+  private readonly pointerDots = {
+    left: new CursorDot(POINTER_DOT_RADIUS_METERS, COLOR_POINTER, 0.95),
+    right: new CursorDot(POINTER_DOT_RADIUS_METERS, COLOR_POINTER, 0.95),
   };
+  private pointerGlowA!: EdgeGlow;
+  private pointerGlowB!: EdgeGlow;
+  private readonly pointerHover = { option: null as JoinType | null, barIndex: -1, recenter: false, slab: null as SourceSlab | null };
+  /** The control's two options as targets (centers and widths, in its frame). */
+  private controlTargets: { centerX: number; width: number }[] = [];
+  private readonly _pointerHead = new Vector3();
+  private readonly _pointerFwd = new Vector3();
+  private readonly _pointerWrist = new Vector3();
+  private readonly _pointerThumb = new Vector3();
+  private readonly _pointerIndex = new Vector3();
+  private readonly _pointerLocal = new Vector3();
+  private readonly _pointerEnd = new Vector3();
+  private readonly _pointerAxis = new Vector3();
+  private readonly _poseBuffer = new Float64Array(6);
   private readonly _pokeTip = new Vector3();
   private readonly _layoutA = new Vector3();
   private readonly _layoutB = new Vector3();
@@ -503,6 +651,16 @@ export class JoinSystem
   /** The first-time cue's end (tween clock seconds); 0 when none is showing. */
   private nullCueUntil = 0;
   private nullCueView: ResultView | null = null;
+  // Recenter (see followRecenter / pressRecenter).
+  private placementEpoch = 0;
+  private recenterWasGliding = false;
+  private lastRecenterPress = -Infinity;
+  private recenterHovered = false;
+  /** Free play's one-button bar (Recenter), and it as a placed bar; null in challenge mode (the puzzle bar has it). */
+  private freeBar: RecenterBarView | null = null;
+  private freeBarPlaced: PlacedBar | null = null;
+  private readonly recenterPoke = new ContactPoke();
+  private readonly pokeOnFreeBar = (): boolean => this.freeBarDistance(this._pokeLocal) <= POKE_TARGET_TOLERANCE_METERS;
 
   private visualsRoot!: Group;
   private lines!: SegmentBatch;
@@ -511,6 +669,8 @@ export class JoinSystem
   private stationaryGlow!: EdgeGlow;
   private movingGlow!: EdgeGlow;
   private control!: JoinTypeControlView;
+  /** The control as a placed element (for the card's clearance from the band). */
+  private controlPlaced!: PlacedElement;
   private controlEntity!: Entity;
   private debug: JoinDebug | null = null;
 
@@ -546,6 +706,10 @@ export class JoinSystem
     this.movingGlow = new EdgeGlow(GLOW_WIDTH_METERS);
     this.winGlowLeft = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_WIN_GLOW);
     this.winGlowRight = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_WIN_GLOW);
+    this.pointerLines = new SegmentBatch(HANDS.length, COLOR_POINTER, POINTER_THICKNESS_METERS, POINTER_OPACITY);
+    this.pointerLines.setCount(HANDS.length);
+    this.pointerGlowA = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_POINTER);
+    this.pointerGlowB = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_POINTER);
     this.visualsRoot.add(
       this.lines.mesh,
       this.pulses.mesh,
@@ -554,6 +718,11 @@ export class JoinSystem
       this.movingGlow.mesh,
       this.winGlowLeft.mesh,
       this.winGlowRight.mesh,
+      this.pointerLines.mesh,
+      this.pointerDots.left.mesh,
+      this.pointerDots.right.mesh,
+      this.pointerGlowA.mesh,
+      this.pointerGlowB.mesh,
     );
     const visualsEntity = this.world.createTransformEntity(this.visualsRoot, {
       parent: this.world.sceneEntity,
@@ -566,7 +735,44 @@ export class JoinSystem
     this.control.fade.value = 0;
     this.control.document.visible = false;
     this.control.document.position.set(0, PARKED_Y, 0);
+    this.controlPlaced = {
+      object: this.control.document,
+      widthMeters: this.control.widthMeters,
+      heightMeters: this.control.heightMeters,
+    };
+    this.controlTargets = [
+      { centerX: this.control.innerCenterX, width: this.control.optionWidthMeters },
+      { centerX: this.control.leftCenterX, width: this.control.optionWidthMeters },
+    ];
     this.controlEntity = this.world.createTransformEntity(this.control.document);
+
+    // Free play: a one-button bar with Recenter (challenge mode's puzzle bar has its own).
+    if (!CHALLENGE_MODE) {
+      const freeBar = buildRecenterBar(slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm, BAR.recenter);
+      this.freeBar = freeBar;
+      this.freeBarPlaced = {
+        object: freeBar.document,
+        widthMeters: freeBar.widthMeters,
+        heightMeters: freeBar.heightMeters,
+        buttons: [{ name: 'recenter', centerX: 0, width: freeBar.buttonWidthMeters }],
+        buttonHeightMeters: freeBar.buttonHeightMeters,
+        baseWidthMeters: freeBar.widthMeters,
+      };
+      const freeBarEntity = this.world.createTransformEntity(freeBar.document);
+      freeBarEntity.addComponent(PokeInteractable, {});
+      freeBarEntity.addComponent(RayInteractable, {});
+      // Rays and controllers only: a fingertip presses through the contact poke.
+      const onRecenter = (event: unknown) => {
+        if (!isTouchPointerClick(event)) {
+          this.pressRecenter('uikit-click');
+        }
+      };
+      freeBar.recenter.container.addEventListener('click', onRecenter);
+      this.cleanupFuncs.push(
+        () => freeBar.recenter.container.removeEventListener('click', onRecenter),
+        () => freeBarEntity.dispose(),
+      );
+    }
     this.debug = import.meta.env.DEV && devFlag('debug') ? new JoinDebug(this) : null;
 
     // Poke and ray select both arrive as UIKit clicks.
@@ -619,6 +825,11 @@ export class JoinSystem
         this.movingGlow.dispose();
         this.winGlowLeft.dispose();
         this.winGlowRight.dispose();
+        this.pointerLines.dispose();
+        this.pointerDots.left.dispose();
+        this.pointerDots.right.dispose();
+        this.pointerGlowA.dispose();
+        this.pointerGlowB.dispose();
         visualsEntity.dispose();
         this.debug?.dispose();
         for (const view of this.results.values()) {
@@ -670,9 +881,12 @@ export class JoinSystem
     if (pending) {
       this.resultViewFor(pending[0], pending[1]);
     }
+    this.followRecenter();
     if (this.challengeLayout) {
       this.updateChallengeLayout();
       this.updateWinGlow();
+    } else if (this.freeBar) {
+      this.updateFreeBarLayout();
     }
 
     this.approach = 0;
@@ -695,11 +909,193 @@ export class JoinSystem
 
     this.updatePreviewVisuals();
     this.updateLines();
+    this.updateHandPointers(delta);
     this.updateSelect();
     this.updateControlPoke();
     if (this.challengeLayout) {
       this.updateNullPokeAndHover();
       this.updateSourceNullPoke();
+    } else {
+      this.updateFreeBarPoke();
+    }
+    this.updateRecenterHover();
+  }
+
+  // --- Recenter --------------------------------------------------------------------------
+
+  /**
+   * Follows a recenter (desk placement glides the slabs back in front of the
+   * player): forgets the slabs' home poses once per re-placement, and while
+   * joined re-places the band, result and card with the gliding pair,
+   * against the head pose read now. Once more when the glide ends.
+   */
+  private followRecenter(): void {
+    const desk = deskBridge.desk;
+    if (!desk) {
+      return;
+    }
+    if (desk.placementEpoch !== this.placementEpoch) {
+      this.placementEpoch = desk.placementEpoch;
+      for (const home of this.homes.values()) {
+        home.set = false;
+      }
+      this.layoutDirty = true;
+    }
+    const gliding = desk.recenterGliding;
+    const view = this.active;
+    if ((gliding || this.recenterWasGliding) && view && this.state.phase === 'joined') {
+      const left = this.sources.get(view.leftId);
+      const right = this.sources.get(view.rightId);
+      if (left && right) {
+        this.readHead();
+        this.placeResult(view, left, right);
+      }
+    }
+    this.recenterWasGliding = gliding;
+  }
+
+  /** The Recenter button, from any path (poke, pinch, ray, click); counts once per press. */
+  private pressRecenter(path: PressPath): void {
+    if (this.tweens.now - this.lastRecenterPress < CONTROL_PRESS_DEBOUNCE_SECONDS) {
+      return;
+    }
+    this.lastRecenterPress = this.tweens.now;
+    if (import.meta.env.DEV && this.debug) {
+      touchProbe.pressed('recenter', path);
+      this.debug.note(`Recenter pressed (${path})`);
+    }
+    const bar = this.freeBar;
+    if (bar) {
+      bar.document.updateWorldMatrix(true, false);
+      this._a.setFromMatrixPosition(bar.document.matrixWorld);
+      sounds.playClick(this._a);
+    }
+    deskBridge.desk?.requestRecenter();
+  }
+
+  /** Free play: the one-button bar above the pair before a join (beside the control once joined). */
+  private updateFreeBarLayout(): void {
+    const bar = this.freeBarPlaced;
+    if (!bar || !deskReady() || this.state.phase !== 'idle' || this.queries.held.entities.size > 0 || this.dock.active) {
+      return;
+    }
+    const a: SourceSlab | null = this.sources.values().next().value ?? null;
+    const b = a ? this.otherSource(a) : null;
+    if (!a || !b) {
+      return;
+    }
+    const moved =
+      a.object.position.distanceToSquared(this._layoutA) > 1e-6 ||
+      b.object.position.distanceToSquared(this._layoutB) > 1e-6;
+    if (!moved && !this.layoutDirty) {
+      return;
+    }
+    this._layoutA.copy(a.object.position);
+    this._layoutB.copy(b.object.position);
+    this.layoutDirty = false;
+    this.readHead();
+    a.object.updateWorldMatrix(true, false);
+    b.object.updateWorldMatrix(true, false);
+    this._a.setFromMatrixPosition(b.object.matrixWorld);
+    a.object.worldToLocal(this._a);
+    const topY = Math.max(
+      a.doc.heightMeters / 2 + a.doc.tabHeightMeters,
+      this._a.y + b.doc.heightMeters / 2 + b.doc.tabHeightMeters,
+    );
+    this._d.set(this._a.x / 2, topY, 0);
+    a.object.localToWorld(this._d);
+    this.placeInBand(bar.object, bar.widthMeters, bar.heightMeters, this._d, a.object);
+  }
+
+  /** Free play: contact pokes on the Recenter button (the bar's only target). */
+  private updateFreeBarPoke(): void {
+    const bar = this.freeBarPlaced;
+    if (!bar || !bar.object.visible) {
+      return;
+    }
+    bar.object.updateWorldMatrix(true, false);
+    for (const hand of HANDS) {
+      const source = this.input.xr.getPrimaryInputSource(hand);
+      if (!source?.hand || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
+        this.recenterPoke.reset(hand);
+        continue;
+      }
+      this._pokeSource = source;
+      this._pokeLocal.copy(this._pokeTip);
+      bar.object.worldToLocal(this._pokeLocal);
+      if (this.recenterPoke.update(hand, this._pokeLocal, this.pokeOnFreeBar, this.pokeStraightness) === 'press') {
+        this.pressRecenter('poke');
+      }
+    }
+  }
+
+  /** In-plane distance from `local` (the bar's frame) to the free bar's button. */
+  private freeBarDistance(local: Vector3): number {
+    const bar = this.freeBarPlaced;
+    if (!bar) {
+      return Infinity;
+    }
+    return Math.hypot(
+      Math.max(0, Math.abs(local.x) - bar.buttons[0].width / 2),
+      Math.max(0, Math.abs(local.y) - bar.buttonHeightMeters / 2),
+    );
+  }
+
+  /**
+   * The Recenter button's hover label: shown while a fingertip is just in
+   * front of it, or a hand's (or controller's) ray is on it; the puzzle bar's
+   * button in challenge mode, the one-button bar in free play. Writes only
+   * on a change.
+   */
+  private updateRecenterHover(): void {
+    const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
+    let hovered = false;
+    if (bar && bar.object.visible) {
+      let button: { centerX: number; width: number } | null = null;
+      for (const candidate of bar.buttons) {
+        if (candidate.name === 'recenter') {
+          button = candidate;
+        }
+      }
+      if (button) {
+        bar.object.updateWorldMatrix(true, false);
+        for (const hand of HANDS) {
+          const source = this.input.xr.getPrimaryInputSource(hand);
+          if (source?.hand && readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
+            this._rayLocal.copy(this._pokeTip);
+            bar.object.worldToLocal(this._rayLocal);
+            if (
+              this._rayLocal.z >= -CONTACT_HOVER_BEHIND_METERS &&
+              this._rayLocal.z <= NULL_HOVER_DEPTH_METERS &&
+              onButton(this._rayLocal, button, bar.buttonHeightMeters)
+            ) {
+              hovered = true;
+            }
+          }
+          // Or the hand pointer on it.
+          const pointer = this.pointers[hand];
+          if (
+            !hovered &&
+            pointer.active &&
+            (pointer.hit.target === 'recenter' ||
+              (pointer.hit.target === 'bar' && bar.buttons[pointer.barIndex]?.name === 'recenter'))
+          ) {
+            hovered = true;
+          }
+          if (hovered) {
+            break;
+          }
+        }
+      }
+    }
+    if (hovered === this.recenterHovered) {
+      return;
+    }
+    this.recenterHovered = hovered;
+    if (this.freeBar) {
+      setRecenterHover(this.freeBar.recenter, hovered);
+    } else {
+      this.challengeLayout?.bar.onRecenterHover?.(hovered);
     }
   }
 
@@ -754,17 +1150,11 @@ export class JoinSystem
           hoverColumn = this._nullHit.column;
         }
       }
-      // Hover: the hand's (or controller's) ray on a NULL cell.
-      if (hoverRow < 0 && this.readRay(hand)) {
-        const t = this.rayPlane(view.object, this._rayLocal);
-        if (Number.isFinite(t)) {
-          this._rayWorld.copy(this._rayLocal);
-          view.object.localToWorld(this._rayWorld);
-          if (this.nearestNullCell(view, this._rayWorld) && this._nullHit.distance <= NULL_RAY_TOLERANCE_METERS) {
-            hoverRow = this._nullHit.row;
-            hoverColumn = this._nullHit.column;
-          }
-        }
+      // Hover: the hand pointer on a NULL cell.
+      const pointer = this.pointers[hand];
+      if (hoverRow < 0 && pointer.active && pointer.hit.target === 'null') {
+        hoverRow = pointer.hit.row;
+        hoverColumn = pointer.hit.column;
       }
     }
     this.setNullHover(view, hoverRow, hoverColumn);
@@ -1459,8 +1849,28 @@ export class JoinSystem
       const right = this.sources.get(view.rightId);
       if (left && right) {
         this.placeResult(view, left, right);
+        this.noteBarButtons();
       }
     }
+  }
+
+  /** Dev: after the bar changes width, where its buttons and the control are (the control must not move). */
+  private noteBarButtons(): void {
+    const bar = this.challengeLayout?.bar;
+    if (!import.meta.env.DEV || !this.debug || !bar) {
+      return;
+    }
+    bar.object.updateWorldMatrix(true, false);
+    const buttons = bar.buttons.map((button) => {
+      this._d.set(button.centerX, 0, 0);
+      bar.object.localToWorld(this._d);
+      return `${button.name} ${cm(button.width)} wide, ${this._d.distanceTo(this._head).toFixed(2)} m`;
+    });
+    const control = this.control.document.position;
+    this.debug.note(
+      `puzzle bar re-placed: ${cm(bar.widthMeters)} wide (base ${cm(bar.baseWidthMeters)}); ${buttons.join('; ')}; ` +
+        `control center (${control.x.toFixed(3)}, ${control.y.toFixed(3)}, ${control.z.toFixed(3)})`,
+    );
   }
 
   requestClearFilter(): void {
@@ -1796,8 +2206,10 @@ export class JoinSystem
 
   /**
    * A NULL cell was poked (or ray-selected, or pinched): keep only rows
-   * where its column IS NULL, or clear that filter if it's the one set.
-   * A poke and a ray select on the same press count once.
+   * where its column IS NULL (or switch to that column). A press never
+   * clears the filter (only Clear does): on the column already filtered it
+   * ticks and pulses the WHERE lines, so it's acknowledged and shows which
+   * filter is active. A poke and a ray select on the same press count once.
    */
   private activateNullCell(key: string, row: number, column: number, path: PressPath): void {
     const view = this.results.get(key);
@@ -1821,8 +2233,24 @@ export class JoinSystem
     if (import.meta.env.DEV && this.debug) {
       this.debug.note(`NULL cell poked: row ${row}, ${view.result.columns[column].label} (${filter.tableId}.${filter.column})`);
     }
-    const current = state.filter ?? null;
-    this.applyTransition(current && sameFilter(current, filter) ? { type: 'clearFilter' } : { type: 'setFilter', filter });
+    const event = nullPokeEvent(state.filter ?? null, filter);
+    if (event === 'none') {
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(`NULL cell press on the column already filtered: no change (Clear removes the filter)`);
+      }
+      this.pulseWhereLine(view);
+      joinBridge.challenge?.onNullFilterRepeat();
+      return;
+    }
+    this.applyTransition({ type: 'setFilter', filter });
+  }
+
+  /** The caption's WHERE line dips and returns once (a press on the column already filtered). */
+  private pulseWhereLine(view: ResultView): void {
+    const opacity = view.doc.captionOpacity[2];
+    if (opacity) {
+      this.tweens.to(opacity, 0.3, 0.15, 0, easeOutCubic, () => this.tweens.to(opacity, 1, 0.3, 0, easeInOutCubic));
+    }
   }
 
   /**
@@ -2726,6 +3154,8 @@ export class JoinSystem
     this.placeControl(left, right);
     if (this.challengeLayout) {
       this.placeBarBesideControl(this.challengeLayout.bar);
+    } else if (this.freeBarPlaced) {
+      this.placeBarBesideControl(this.freeBarPlaced);
     }
     // In challenge mode the card sits beside the result slab (not on top of
     // it), so nothing stacks above the result.
@@ -2739,7 +3169,14 @@ export class JoinSystem
       view.doc.tabHeightMeters,
     );
     if (card) {
-      this.placeCard(view.object, view.doc.widthMeters, card);
+      // Clear of the band (control and bar) and the pair's top edge (the
+      // RIGHT slab may still be docking: measured in the LEFT slab's frame).
+      const bar = this.challengeLayout?.bar;
+      let below = this.topEdgeDeg(bar ? [this.controlPlaced, bar] : [this.controlPlaced], []);
+      this._g.set(0, pairTopLocalY(left, right), 0);
+      left.object.localToWorld(this._g);
+      below = Math.max(below, degreesFromForward(this._head, this.headPitchDown, this._g));
+      this.placeCard(view.object, view.doc.widthMeters, view.doc.heightMeters, card, below);
     }
   }
 
@@ -2862,16 +3299,19 @@ export class JoinSystem
 
   /**
    * Challenge mode: control + gap + bar as one group, centered where the
-   * control alone would sit (on the seam). Both share the control's
+   * control alone would sit (on the seam), for the bar at its base width;
+   * a wider bar extends to the right. Both share the control's
    * orientation and depth, and the bar is laid out along the control's own
    * horizontal axis, so the gap between them is exact (never an overlap)
    * and the bar keeps the control's clearance from the slabs (that axis
    * lies in the slabs' plane). Run after placeControl.
    */
-  private placeBarBesideControl(bar: PlacedElement): void {
+  private placeBarBesideControl(bar: PlacedBar): void {
     const control = this.control.document;
     this._e.set(1, 0, 0).applyQuaternion(control.quaternion);
-    const groupWidth = this.control.widthMeters + BAR_CONTROL_GAP_METERS + bar.widthMeters;
+    // Centered for the bar's base width (Hint and Next), so the control
+    // never moves when the bar grows (Filter, its chips): it grows right.
+    const groupWidth = this.control.widthMeters + BAR_CONTROL_GAP_METERS + bar.baseWidthMeters;
     // Shift the control left so the group is centered on its old center...
     control.position.addScaledVector(this._e, this.control.widthMeters / 2 - groupWidth / 2);
     // ...and put the bar to its right, one gap away.
@@ -2883,8 +3323,9 @@ export class JoinSystem
 
   /**
    * Places a touchable element (`width` x `height` m, origin at its center)
-   * in the band above the slabs' top edge at world point `anchor`: lifted
-   * CONTROL_SLAB_CLEARANCE_METERS toward the eyes, raised in view so its
+   * in the band above the slabs' top edge at world point `anchor`: brought
+   * toward the eyes along the sight line to BAND_DISTANCE_METERS from them
+   * (at least CONTROL_SLAB_CLEARANCE_METERS), raised in view so its
    * bottom edge clears that edge, oriented from `frame` (a slab: its yaw, a
    * lean that faces the eyes, zero roll), and pushed out until every corner
    * is that clearance off the slabs' plane. Leaves `_c`, `_d` and `_q1`
@@ -2892,8 +3333,12 @@ export class JoinSystem
    */
   private placeInBand(target: Object3D, width: number, height: number, anchor: Vector3, frame: Object3D): void {
     frame.updateWorldMatrix(true, false);
+    // Toward the eyes along the sight line, to BAND_DISTANCE_METERS from them
+    // (within near reach, the pair sits farther back), and at least the
+    // clearance off the slabs.
+    const pull = Math.max(CONTROL_SLAB_CLEARANCE_METERS, anchor.distanceTo(this._head) - BAND_DISTANCE_METERS);
     this._e.subVectors(this._head, anchor).normalize();
-    target.position.copy(anchor).addScaledVector(this._e, CONTROL_SLAB_CLEARANCE_METERS);
+    target.position.copy(anchor).addScaledVector(this._e, pull);
     this._viewUp.copy(UP).addScaledVector(this._e, -UP.dot(this._e)).normalize();
     const lift = height / 2 + target.position.distanceTo(this._head) * Math.tan(MathUtils.degToRad(CONTROL_VIEW_GAP_DEG));
     target.position.addScaledVector(this._viewUp, lift);
@@ -2934,16 +3379,20 @@ export class JoinSystem
   /**
    * Challenge mode: the puzzle card beside a top-anchored slot (the result
    * slab, or the silhouette before the join), on the side away from the
-   * INNER | LEFT control (CARD_SIDE), tops aligned, then toed in to face the
-   * eyes. Beside rather than above keeps the stack short, so the whole
-   * group, and the slabs with it, sits nearer the gaze.
+   * INNER | LEFT control (CARD_SIDE), bottoms aligned (nearer the gaze than
+   * tops aligned), then toed in to face the eyes. Never lower, in view, than
+   * CARD_CLEARANCE_DEG above `minBottomDeg` (the highest top edge of the
+   * band and the slabs below it), so it never covers them. Beside rather
+   * than above keeps the stack short, so the whole group sits nearer the gaze.
    */
-  private placeCard(slot: Object3D, slotWidth: number, card: PlacedElement): void {
+  private placeCard(slot: Object3D, slotWidth: number, slotHeight: number, card: PlacedElement, minBottomDeg: number): void {
     slot.updateWorldMatrix(true, false);
-    // The slot's top-edge center (its origin: top-anchored) and how wide it
-    // looks from the eyes (half its width, as an angle).
-    this._d.copy(slot.position).sub(this._head);
-    const slotTopY = slot.position.y;
+    // Its bottom edge (it leans back, so in its own frame): the nearest
+    // part, so the widest it looks from the eyes (half its width, as an angle).
+    this._f.set(0, -slotHeight, 0);
+    slot.localToWorld(this._f);
+    const slotBottomY = this._f.y;
+    this._d.copy(this._f).sub(this._head);
     this._d.y = 0;
     const slotHorizontal = Math.max(this._d.length(), 1e-3);
     this._d.divideScalar(slotHorizontal);
@@ -2954,14 +3403,42 @@ export class JoinSystem
     const turn = slotHalfAngle + MathUtils.degToRad(CARD_SIDE_GAP_DEG) + cardHalfAngle;
     // +angle about +Y turns toward the viewer's left.
     this._d.applyAxisAngle(UP, -CARD_SIDE * turn);
-    // Tops aligned: its center half its height below the slot's top edge.
-    const centerY = slotTopY - card.heightMeters / 2;
-    const rise = centerY - this._head.y;
-    const horizontal = Math.sqrt(Math.max(1e-4, PLANNED_CARD_DISTANCE_METERS ** 2 - rise * rise));
+    // Bottoms aligned, then raised (if needed) to clear what's below.
+    const half = card.heightMeters / 2;
+    let centerY = slotBottomY + half;
+    const minBottomRad = MathUtils.degToRad(minBottomDeg + CARD_CLEARANCE_DEG) - this.headPitchDown;
+    let horizontal = PLANNED_CARD_DISTANCE_METERS;
+    for (let i = 0; i < 3; i++) {
+      const rise = centerY - this._head.y;
+      horizontal = Math.sqrt(Math.max(1e-4, PLANNED_CARD_DISTANCE_METERS ** 2 - rise * rise));
+      const lowestBottomY = this._head.y + horizontal * Math.tan(minBottomRad);
+      if (centerY - half >= lowestBottomY - 1e-4) {
+        break;
+      }
+      centerY = lowestBottomY + half;
+    }
     card.object.position.copy(this._head).addScaledVector(this._d, horizontal);
     card.object.position.y = centerY;
     // Toed in: its face (+Z) toward the eyes, no roll.
     card.object.lookAt(this._head);
+  }
+
+  /** The highest top edge, in view (degrees from the gaze), of these elements: centered documents, or slabs (name tabs included). */
+  private topEdgeDeg(centered: readonly PlacedElement[], slabs: readonly SourceSlab[]): number {
+    let top = -90;
+    for (const element of centered) {
+      element.object.updateWorldMatrix(true, false);
+      this._g.set(0, element.heightMeters / 2, 0);
+      element.object.localToWorld(this._g);
+      top = Math.max(top, degreesFromForward(this._head, this.headPitchDown, this._g));
+    }
+    for (const slab of slabs) {
+      slab.object.updateWorldMatrix(true, false);
+      this._g.set(0, slabVisualTopLocalY(slab.doc), 0);
+      slab.object.localToWorld(this._g);
+      top = Math.max(top, degreesFromForward(this._head, this.headPitchDown, this._g));
+    }
+    return top;
   }
 
   /**
@@ -2996,8 +3473,74 @@ export class JoinSystem
     this._c.set(midX, topY, 0);
     a.object.localToWorld(this._c);
     this.placeAboveBand(slot.object, slot.heightMeters, layout.bar.object, layout.bar.heightMeters);
-    // Beside the silhouette, where it will be beside the result: no jump at the join.
-    this.placeCard(slot.object, slot.widthMeters, layout.card);
+    // Beside the silhouette, where it will be beside the result, and clear of
+    // the bar and both slabs (a short target's silhouette once let the card
+    // hang down onto the right-hand slab).
+    this.placeCard(slot.object, slot.widthMeters, slot.heightMeters, layout.card, this.topEdgeDeg([layout.bar], [a, b]));
+    if (import.meta.env.DEV && this.debug) {
+      this.noteCardClearance('before the join', [
+        { name: `${a.id} slab`, object: a.object, width: a.doc.widthMeters, top: slabVisualTopLocalY(a.doc), bottom: slabBottomLocalY(a.doc) },
+        { name: `${b.id} slab`, object: b.object, width: b.doc.widthMeters, top: slabVisualTopLocalY(b.doc), bottom: slabBottomLocalY(b.doc) },
+        { name: 'bar', object: layout.bar.object, width: layout.bar.widthMeters, top: layout.bar.heightMeters / 2, bottom: -layout.bar.heightMeters / 2 },
+        { name: 'silhouette', object: slot.object, width: slot.widthMeters, top: 0, bottom: -slot.heightMeters },
+      ]);
+    }
+  }
+
+  /**
+   * Dev: the card's clearance in view from each element: the angular gap
+   * between their view rectangles (yaw and pitch from the eyes), the larger
+   * of the horizontal and vertical gaps; 0 or less is an overlap. Warns
+   * below CARD_MIN_CLEARANCE_WARN_DEG. Allocates (dev only, per layout).
+   */
+  private noteCardClearance(
+    when: string,
+    elements: { name: string; object: Object3D; width: number; top: number; bottom: number }[],
+  ): void {
+    const card = this.challengeLayout?.card;
+    // Not before a session: the cold-start layout uses a default head pose.
+    if (!import.meta.env.DEV || !this.debug || !card || this.world.visibilityState.peek() === VisibilityState.NonImmersive) {
+      return;
+    }
+    const rect = (object: Object3D, width: number, top: number, bottom: number) => {
+      object.updateWorldMatrix(true, false);
+      const r = { yaw0: Infinity, yaw1: -Infinity, pitch0: Infinity, pitch1: -Infinity };
+      for (const x of [-width / 2, width / 2]) {
+        for (const y of [bottom, top]) {
+          this._g.set(x, y, 0);
+          object.localToWorld(this._g);
+          const yaw = MathUtils.radToDeg(Math.atan2(this._g.x - this._head.x, -(this._g.z - this._head.z)));
+          const pitch = degreesFromForward(this._head, this.headPitchDown, this._g);
+          r.yaw0 = Math.min(r.yaw0, yaw);
+          r.yaw1 = Math.max(r.yaw1, yaw);
+          r.pitch0 = Math.min(r.pitch0, pitch);
+          r.pitch1 = Math.max(r.pitch1, pitch);
+        }
+      }
+      return r;
+    };
+    const c = rect(card.object, card.widthMeters, card.heightMeters / 2, -card.heightMeters / 2);
+    const parts: string[] = [];
+    let worst = Infinity;
+    for (const element of elements) {
+      const e = rect(element.object, element.width, element.top, element.bottom);
+      const gapYaw = Math.max(e.yaw0 - c.yaw1, c.yaw0 - e.yaw1);
+      const gapPitch = Math.max(e.pitch0 - c.pitch1, c.pitch0 - e.pitch1);
+      const clearance = Math.max(gapYaw, gapPitch);
+      worst = Math.min(worst, clearance);
+      parts.push(`${element.name} ${clearance.toFixed(1)}°`);
+    }
+    card.object.updateWorldMatrix(true, false);
+    this._g.setFromMatrixPosition(card.object.matrixWorld);
+    const distance = this._g.distanceTo(this._head);
+    const text = card.textFontMeters ? `, row text ${textAngleDeg(card.textFontMeters, distance).toFixed(2)}°` : '';
+    this.debug.note(
+      `puzzle card clearance in view (${when}): ${parts.join(', ')}; card ${distance.toFixed(2)} m from the eyes${text}, ` +
+        `edges ${c.pitch0.toFixed(1)}° to ${c.pitch1.toFixed(1)}° from the gaze, ${c.yaw0.toFixed(1)}° to ${c.yaw1.toFixed(1)}° across`,
+    );
+    if (worst < CARD_MIN_CLEARANCE_WARN_DEG) {
+      this.debug.warn(`puzzle card is only ${worst.toFixed(1)}° from another element (${when}); see the line above`);
+    }
   }
 
   // --- Pinch near the control ---------------------------------------------------------
@@ -3017,8 +3560,8 @@ export class JoinSystem
   private updateSelect(): void {
     const controlLive =
       this.state.phase === 'joined' && this.control.document.visible && this.control.fade.peek() >= 0.5;
-    // Challenge mode's bar takes presses before a join, too.
-    if (!controlLive && !this.challengeLayout) {
+    // Challenge mode's bar (and free play's Recenter bar) takes presses before a join, too.
+    if (!controlLive && !this.challengeLayout && !this.freeBarPlaced) {
       return;
     }
     for (const hand of HANDS) {
@@ -3026,38 +3569,383 @@ export class JoinSystem
         continue;
       }
       const source = this.input.xr.getPrimaryInputSource(hand);
-      const isHand = !!source?.hand;
-      if (isHand && source && readPinchPoint(this.world, this.player, source, this._pinchA)) {
-        if (this.pinchSelect(hand, source, controlLive)) {
+      if (source?.hand) {
+        // Near wins: a pinch on a button (or a NULL) right there.
+        if (readPinchPoint(this.world, this.player, source, this._pinchA) && this.pinchSelect(hand, source, controlLive)) {
           continue;
         }
-        if (this.nearGrab(hand)) {
-          if (import.meta.env.DEV && this.debug) {
-            this.debug.note(`${hand} pinch at a slab (a near grab): no ray press`);
-          }
-          continue;
+        // Otherwise the hand pointer presses what it's on (its ray froze as the fingers closed).
+        const pointer = this.pointers[hand];
+        if (import.meta.env.DEV && this.debug) {
+          this.notePointerPinch(hand, pointer, controlLive);
         }
+        if (pointer.active) {
+          this.pressHit(hand, pointer.hit, 'ray');
+        }
+        continue;
       }
+      // A controller: its target ray at the trigger (the SDK's pointer may click too; each target counts once).
       if (!this.readRay(hand)) {
         continue;
       }
-      this.castRay(controlLive);
+      this.castRay(controlLive, HAND_POINTER_MAX_METERS);
       const hit = this._rayHit;
       if (import.meta.env.DEV && this.debug) {
         this.debug.note(
-          `${hand} ray select (${isHand ? 'hand' : 'controller'}): ` +
+          `${hand} ray select (controller): ` +
             (hit.target === 'none' ? 'hit nothing' : `${hit.name} at ${hit.distance.toFixed(2)} m`) +
             (hit.target === 'slab' || hit.target === 'result' ? ' (not a button: no press)' : ''),
         );
       }
-      if (hit.target === 'control') {
-        this.pressControl(hit.option, 'ray');
-      } else if (hit.target === 'bar') {
-        joinBridge.challenge?.pressBarAt(hit.point, hand, 'ray');
-      } else if (hit.target === 'null' && this.active) {
-        this.activateNullCell(this.active.key, hit.row, hit.column, 'ray');
+      this.pressHit(hand, hit, 'ray');
+    }
+  }
+
+  /** Presses what a ray hit (a control option, a bar button, a result NULL cell, Recenter); nothing for a slab or the result. */
+  private pressHit(hand: (typeof HANDS)[number], hit: RayHit, path: PressPath): void {
+    if (hit.target === 'control') {
+      this.pressControl(hit.option, path);
+    } else if (hit.target === 'bar') {
+      joinBridge.challenge?.pressBarAt(hit.point, hand, path);
+    } else if (hit.target === 'null' && this.active) {
+      this.activateNullCell(this.active.key, hit.row, hit.column, path);
+    } else if (hit.target === 'recenter') {
+      this.pressRecenter(path);
+    }
+  }
+
+  // --- The hand pointer ------------------------------------------------------------------
+
+  /**
+   * Each frame, per hand: the pointer (the hand's WebXR target ray, smoothed,
+   * frozen as a pinch closes, at most HAND_POINTER_MAX_METERS long, drawn as
+   * a thin ray with a cursor dot) while the hand is raised in front of the
+   * body -- seated and leaning back counts -- and isn't doing something near:
+   * a fingertip at a band button (poke) or the palm at a slab (near grab).
+   * What it's on is hovered (outlined, or a NULL's outline strengthened, or a
+   * slab's sides glowing), and a pinch presses it (updateSelect). The SDK's
+   * own hand ray is off, so there's never a double line; controllers keep it.
+   */
+  private updateHandPointers(delta: number): void {
+    const controlLive =
+      this.state.phase === 'joined' && this.control.document.visible && this.control.fade.peek() >= 0.5;
+    const head = this.player.head;
+    head.updateWorldMatrix(true, false);
+    this._pointerHead.setFromMatrixPosition(head.matrixWorld);
+    head.getWorldQuaternion(this._q2);
+    this._pointerFwd.set(0, 0, -1).applyQuaternion(this._q2);
+    this._pointerFwd.y = 0;
+    if (this._pointerFwd.lengthSq() < 1e-6) {
+      this._pointerFwd.set(0, 0, -1);
+    }
+    this._pointerFwd.normalize();
+    const now = this.tweens.now;
+
+    HANDS.forEach((hand, index) => {
+      const p = this.pointers[hand];
+      const source = this.input.xr.getPrimaryInputSource(hand);
+      const isHand = !!source?.hand;
+      if (this.sdkRayOff[hand] !== isHand) {
+        this.input.xr.multiPointers[hand].toggleSubPointer('ray', !isHand);
+        this.sdkRayOff[hand] = isHand;
+      }
+      // Why it's off, as a short code (the words are only in the dev log).
+      let reason: PointerOffReason | '' = '';
+      if (!source || !isHand) {
+        reason = 'untracked';
+      } else if (!readWristPoint(this.world, this.player, source, this._pointerWrist)) {
+        reason = 'lost';
+      } else {
+        this._pointerLocal.subVectors(this._pointerWrist, this._pointerHead);
+        p.forward = this._pointerLocal.dot(this._pointerFwd);
+        p.below = -this._pointerLocal.y;
+        if (!pointerRaised(p.forward, p.below)) {
+          reason = p.forward < HAND_POINTER_MIN_FORWARD_METERS ? 'body' : 'lowered';
+        } else if (this.fingertipAtButton(source, controlLive)) {
+          reason = 'poke';
+        } else if (this.nearGrab(hand)) {
+          reason = 'grab';
+        }
+      }
+      if (reason || !source || !this.readRay(hand)) {
+        this.setPointerActive(hand, p, false, reason || 'noray');
+        this.pointerLines.progress[index].value = 0;
+        this.pointerDots[hand].hide();
+        return;
+      }
+
+      // The platform ray, tilted up by the tuning offset (0 by default).
+      if (HAND_POINTER_PITCH_OFFSET_DEG !== 0) {
+        this._pointerAxis.crossVectors(this._rayDir, UP).normalize();
+        this._rayDir.applyAxisAngle(this._pointerAxis, MathUtils.degToRad(HAND_POINTER_PITCH_OFFSET_DEG));
+      }
+      p.history.push(
+        now,
+        this._rayOrigin.x,
+        this._rayOrigin.y,
+        this._rayOrigin.z,
+        this._rayDir.x,
+        this._rayDir.y,
+        this._rayDir.z,
+      );
+      // Frozen while a pinch closes: at the pose from just before the fingers started closing.
+      const tipsTracked =
+        readJointsPoint(this.world, this.player, source, THUMB_TIP, this._pointerThumb) &&
+        readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pointerIndex);
+      const frozen = tipsTracked ? pointerFrozen(this._pointerThumb.distanceTo(this._pointerIndex), p.frozen) : false;
+      if (frozen && !p.frozen && p.history.at(now, HAND_POINTER_FREEZE_LOOKBACK_SECONDS, this._poseBuffer)) {
+        const b = this._poseBuffer;
+        p.origin.set(b[0], b[1], b[2]);
+        p.dir.set(b[3], b[4], b[5]).normalize();
+      } else if (!frozen) {
+        if (!p.active) {
+          p.origin.copy(this._rayOrigin);
+          p.dir.copy(this._rayDir);
+        } else {
+          const alpha = smoothingAlpha(delta);
+          p.origin.lerp(this._rayOrigin, alpha);
+          p.dir.lerp(this._rayDir, alpha).normalize();
+        }
+      }
+      p.frozen = frozen;
+      this.setPointerActive(hand, p, true, '');
+
+      // What it's on.
+      this._rayOrigin.copy(p.origin);
+      this._rayDir.copy(p.dir);
+      this.castRay(controlLive, HAND_POINTER_MAX_METERS);
+      copyRayHit(this._rayHit, p.hit);
+      p.barIndex = p.hit.target === 'bar' ? this.barButtonIndexAt(p.hit.point) : -1;
+
+      // The ray and its cursor.
+      if (p.hit.target !== 'none') {
+        this._pointerEnd.copy(p.hit.point);
+        this.pointerDots[hand].place(p.hit.point, this._pointerHead);
+      } else {
+        this._pointerEnd.copy(p.origin).addScaledVector(p.dir, POINTER_STUB_METERS);
+        this.pointerDots[hand].hide();
+      }
+      this.pointerLines.setEndpoints(index, p.origin, this._pointerEnd);
+      this.pointerLines.progress[index].value = 1;
+      if (import.meta.env.DEV && this.debug) {
+        this.notePointerHover(hand, p);
+      }
+    });
+    this.pointerLines.update();
+    this.applyPointerHover();
+  }
+
+  /** Turns a hand's pointer on or off; off forgets its aim and hit. Dev: logs each change, with where the hand is. */
+  private setPointerActive(hand: (typeof HANDS)[number], p: HandPointer, active: boolean, reason: PointerOffReason | ''): void {
+    if (p.active === active && (active || p.offReason === reason)) {
+      return;
+    }
+    const was = p.active;
+    p.active = active;
+    p.offReason = reason;
+    if (!active) {
+      p.frozen = false;
+      p.history.clear();
+      p.hit.target = 'none';
+      p.barIndex = -1;
+    }
+    if (import.meta.env.DEV && this.debug && was !== active) {
+      this.debug.note(
+        `${hand} pointer ${active ? 'on' : `off (${pointerOffText(reason)})`}: wrist ${p.forward.toFixed(2)} m ahead ` +
+          `of the head, ${p.below.toFixed(2)} m below the eyes`,
+      );
+    }
+  }
+
+  /** Whether `source`'s index fingertip is just in front of a band button (the control's, the bar's, Recenter): poke applies. */
+  private fingertipAtButton(source: XRInputSource, controlLive: boolean): boolean {
+    if (!readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pointerIndex)) {
+      return false;
+    }
+    if (controlLive && this.nearButtons(this.control.document, this.controlTargets, this.control.optionHeightMeters)) {
+      return true;
+    }
+    const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
+    return !!bar && bar.object.visible && this.nearButtons(bar.object, bar.buttons, bar.buttonHeightMeters);
+  }
+
+  /** `_pointerIndex` (a fingertip) just in front of one of `buttons` on `object` (within a poke's margin). */
+  private nearButtons(object: Object3D, buttons: readonly { centerX: number; width: number }[], height: number): boolean {
+    object.updateWorldMatrix(true, false);
+    this._pointerLocal.copy(this._pointerIndex);
+    object.worldToLocal(this._pointerLocal);
+    const z = this._pointerLocal.z;
+    if (z > HAND_POINTER_NEAR_BUTTON_METERS || z < -CONTACT_HOVER_BEHIND_METERS * 3) {
+      return false;
+    }
+    for (const button of buttons) {
+      if (
+        Math.abs(this._pointerLocal.x - button.centerX) <= button.width / 2 + CONTROL_PINCH_MARGIN_METERS &&
+        Math.abs(this._pointerLocal.y) <= height / 2 + CONTROL_PINCH_MARGIN_METERS
+      ) {
+        return true;
       }
     }
+    return false;
+  }
+
+  /** Which of the puzzle bar's buttons a world point on its face is on, or -1. */
+  private barButtonIndexAt(point: Vector3): number {
+    const bar = this.challengeLayout?.bar;
+    if (!bar) {
+      return -1;
+    }
+    bar.object.updateWorldMatrix(true, false);
+    this._pointerLocal.copy(point);
+    bar.object.worldToLocal(this._pointerLocal);
+    // The nearest button within the bar's press margin (as a press there would choose).
+    const dy = Math.max(0, Math.abs(this._pointerLocal.y) - bar.buttonHeightMeters / 2);
+    let best = -1;
+    let bestDistance = CONTROL_PINCH_MARGIN_METERS;
+    for (let i = 0; i < bar.buttons.length; i++) {
+      const button = bar.buttons[i];
+      const distance = Math.hypot(Math.max(0, Math.abs(this._pointerLocal.x - button.centerX) - button.width / 2), dy);
+      if (distance <= bestDistance) {
+        bestDistance = distance;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Both hands' pointers as one hover state, applied only on a change: the
+   * control option outlined, the bar button outlined (via the challenge
+   * layout), free play's Recenter outlined, a slab's sides glowing. (NULL
+   * cells: updateNullPokeAndHover; Recenter's label: updateRecenterHover.)
+   */
+  private applyPointerHover(): void {
+    let option: JoinType | null = null;
+    let barIndex = -1;
+    let recenter = false;
+    let slab: SourceSlab | null = null;
+    for (const hand of HANDS) {
+      const p = this.pointers[hand];
+      if (!p.active) {
+        continue;
+      }
+      if (p.hit.target === 'control' && option === null) {
+        option = p.hit.option;
+      } else if (p.hit.target === 'bar' && barIndex < 0) {
+        barIndex = p.barIndex;
+      } else if (p.hit.target === 'recenter') {
+        recenter = true;
+      } else if (p.hit.target === 'slab' && !slab) {
+        slab = p.hit.slab;
+      }
+    }
+    const hover = this.pointerHover;
+    if (option !== hover.option) {
+      setTargetHover(this.control.inner, option === 'inner');
+      setTargetHover(this.control.left, option === 'left');
+      hover.option = option;
+    }
+    if (barIndex !== hover.barIndex) {
+      this.challengeLayout?.bar.onPointerHover?.(barIndex, hover.barIndex);
+      hover.barIndex = barIndex;
+    }
+    if (recenter !== hover.recenter && this.freeBar) {
+      setTargetHover(this.freeBar.recenter.container, recenter);
+    }
+    hover.recenter = recenter;
+    hover.slab = slab;
+    if (slab) {
+      const height = slab.doc.heightMeters;
+      this.pointerGlowA.place(slab.object, -slab.doc.widthMeters / 2, 0, height, POINTER_SLAB_GLOW);
+      this.pointerGlowB.place(slab.object, slab.doc.widthMeters / 2, 0, height, POINTER_SLAB_GLOW);
+    } else {
+      this.pointerGlowA.hide();
+      this.pointerGlowB.hide();
+    }
+  }
+
+  /** Dev: a hand pointer's hover changes (at most every POINTER_HOVER_LOG_SECONDS). */
+  private notePointerHover(hand: (typeof HANDS)[number], p: HandPointer): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    const name = p.hit.target === 'none' ? 'nothing' : p.hit.target === 'bar' ? `bar button ${p.barIndex}` : p.hit.name;
+    if (name === p.hoverKey || this.tweens.now - p.hoverLogAt < POINTER_HOVER_LOG_SECONDS) {
+      return;
+    }
+    p.hoverKey = name;
+    p.hoverLogAt = this.tweens.now;
+    this.debug.note(
+      `${hand} pointer on ${name}${p.hit.target === 'none' ? '' : ` at ${p.hit.distance.toFixed(2)} m`}` +
+        `${p.frozen ? ' (frozen: pinch closing)' : ''}`,
+    );
+  }
+
+  /**
+   * Dev: a pinch with the pointer: what it hit (or the nearest band target),
+   * the angle between the ray and that target's center and how far above or
+   * below it the ray points (to tune HAND_POINTER_PITCH_OFFSET_DEG from data),
+   * the ray's pitch and yaw, and where the hand was.
+   */
+  private notePointerPinch(hand: (typeof HANDS)[number], p: HandPointer, controlLive: boolean): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    if (!p.active) {
+      this.debug.note(`${hand} pointer pinch with the pointer off (${pointerOffText(p.offReason)}): no far press`);
+      return;
+    }
+    // Candidate centers: the hit's, else every band target's (the nearest by angle).
+    const candidates: { name: string; center: Vector3 }[] = [];
+    const at = (object: Object3D, x: number, y: number) => {
+      object.updateWorldMatrix(true, false);
+      return object.localToWorld(new Vector3(x, y, 0));
+    };
+    const hit = p.hit;
+    const view = this.active;
+    if (hit.target === 'control') {
+      candidates.push({ name: hit.name, center: at(this.control.document, hit.option === 'inner' ? this.control.innerCenterX : this.control.leftCenterX, 0) });
+    } else if (hit.target === 'bar' && this.challengeLayout && p.barIndex >= 0) {
+      const button = this.challengeLayout.bar.buttons[p.barIndex];
+      candidates.push({ name: `bar button "${button.name}"`, center: at(this.challengeLayout.bar.object, button.centerX, 0) });
+    } else if (hit.target === 'recenter' && this.freeBarPlaced) {
+      candidates.push({ name: hit.name, center: at(this.freeBarPlaced.object, 0, 0) });
+    } else if (hit.target === 'null' && view) {
+      const span = view.doc.columnSpans[hit.column];
+      candidates.push({ name: hit.name, center: at(view.object, (span.x0 + span.x1) / 2, rowCenterLocalY(view.doc, view.rowSlot[hit.row])) });
+    } else if (hit.target === 'slab' && hit.slab) {
+      candidates.push({ name: hit.name, center: at(hit.slab.object, 0, 0) });
+    } else {
+      if (controlLive) {
+        candidates.push({ name: 'INNER', center: at(this.control.document, this.control.innerCenterX, 0) });
+        candidates.push({ name: 'LEFT', center: at(this.control.document, this.control.leftCenterX, 0) });
+      }
+      const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
+      if (bar && bar.object.visible) {
+        for (const button of bar.buttons) {
+          candidates.push({ name: `bar button "${button.name}"`, center: at(bar.object, button.centerX, 0) });
+        }
+      }
+    }
+    let best: { name: string; angle: number; pitchDelta: number } | null = null;
+    for (const candidate of candidates) {
+      const to = candidate.center.sub(p.origin);
+      const angle = angleBetweenDeg(p.dir.x, p.dir.y, p.dir.z, to.x, to.y, to.z);
+      if (!best || angle < best.angle) {
+        best = { name: candidate.name, angle, pitchDelta: pitchDeg(p.dir.x, p.dir.y, p.dir.z) - pitchDeg(to.x, to.y, to.z) };
+      }
+    }
+    const aim = best
+      ? `aim ${best.angle.toFixed(1)}° off ${hit.target === 'none' ? `the nearest target, ${best.name}` : 'its center'} ` +
+        `(ray ${Math.abs(best.pitchDelta).toFixed(1)}° ${best.pitchDelta >= 0 ? 'above' : 'below'} it)`
+      : 'no band target to compare';
+    const yaw = MathUtils.radToDeg(Math.atan2(p.dir.x, -p.dir.z));
+    this.debug.note(
+      `${hand} pointer pinch: ${hit.target === 'none' ? 'hit nothing' : `${hit.name} at ${hit.distance.toFixed(2)} m`}` +
+        `${hit.target === 'slab' || hit.target === 'result' ? ' (not a button: no press)' : ''}; ${aim}; ` +
+        `ray pitch ${pitchDeg(p.dir.x, p.dir.y, p.dir.z).toFixed(1)}°, yaw ${yaw.toFixed(1)}°` +
+        `${p.frozen ? ' (frozen)' : ''}; wrist ${p.forward.toFixed(2)} m ahead, ${p.below.toFixed(2)} m below the eyes`,
+    );
   }
 
   /**
@@ -3079,6 +3967,21 @@ export class JoinSystem
     }
     if (controlLive && this.challengeLayout && this.evaluateNullPinch(hand, source, this._pinchA)) {
       return true;
+    }
+    // Free play's Recenter button: like a bar button (in plane, a little in front or behind).
+    const freeBar = this.freeBarPlaced;
+    if (freeBar && freeBar.object.visible) {
+      freeBar.object.updateWorldMatrix(true, false);
+      this._pinchB.copy(this._pinchA);
+      freeBar.object.worldToLocal(this._pinchB);
+      if (
+        this._pinchB.z <= BUTTON_PINCH_FRONT_DEPTH_METERS &&
+        this._pinchB.z >= -BUTTON_PINCH_BACK_DEPTH_METERS &&
+        this.freeBarDistance(this._pinchB) <= CONTROL_PINCH_MARGIN_METERS
+      ) {
+        this.pressRecenter('pinch');
+        return true;
+      }
     }
     return !!this.challengeLayout && this.sourceNullPinch(hand, this._pinchA);
   }
@@ -3155,12 +4058,15 @@ export class JoinSystem
    * NULL cell -- or, blocking what's behind, the result slab elsewhere or a
    * source slab.
    */
-  private castRay(controlLive: boolean): void {
+  private castRay(controlLive: boolean, maxDistance = Infinity): void {
     const hit = this._rayHit;
     hit.target = 'none';
     hit.distance = Infinity;
     hit.name = '';
+    hit.slab = null;
     const local = this._rayLocal;
+    // Names are only for the dev log (the pointer casts every frame: no strings in production).
+    const naming = import.meta.env.DEV && !!this.debug;
 
     if (controlLive) {
       const control = this.control;
@@ -3173,7 +4079,7 @@ export class JoinSystem
           hit.target = 'control';
           hit.distance = t;
           hit.option = inner <= left ? 'inner' : 'left';
-          hit.name = `the ${hit.option.toUpperCase()} option`;
+          hit.name = naming ? `the ${hit.option.toUpperCase()} option` : '';
         }
       }
     }
@@ -3193,6 +4099,16 @@ export class JoinSystem
       }
     }
 
+    const freeBar = this.freeBarPlaced;
+    if (freeBar && freeBar.object.visible) {
+      const t = this.rayPlane(freeBar.object, local);
+      if (t < hit.distance && this.freeBarDistance(local) <= RAY_BUTTON_TOLERANCE_METERS) {
+        hit.target = 'recenter';
+        hit.distance = t;
+        hit.name = 'the Recenter button';
+      }
+    }
+
     const view = this.active;
     if (view && this.state.phase === 'joined' && view.doc.fade.peek() >= 0.5) {
       const t = this.rayPlane(view.object, local);
@@ -3204,7 +4120,7 @@ export class JoinSystem
           hit.distance = t;
           hit.row = this._nullHit.row;
           hit.column = this._nullHit.column;
-          hit.name = `the NULL cell at row ${hit.row}, ${view.result.columns[hit.column].label}`;
+          hit.name = naming ? `the NULL cell at row ${hit.row}, ${view.result.columns[hit.column].label}` : '';
         } else if (
           Math.abs(local.x) <= view.doc.widthMeters / 2 &&
           local.y <= slabVisualTopLocalY(view.doc) &&
@@ -3227,8 +4143,18 @@ export class JoinSystem
       ) {
         hit.target = 'slab';
         hit.distance = t;
-        hit.name = `the ${slab.id} slab`;
+        hit.slab = slab;
+        hit.name = naming ? `the ${slab.id} slab` : '';
       }
+    }
+
+    // Out of range is a miss; otherwise where it hit.
+    if (hit.distance > maxDistance) {
+      hit.target = 'none';
+      hit.distance = Infinity;
+      hit.slab = null;
+    } else if (hit.target !== 'none') {
+      hit.point.copy(this._rayOrigin).addScaledVector(this._rayDir, hit.distance);
     }
   }
 
@@ -3396,12 +4322,10 @@ export class JoinSystem
       const distance = this._a.distanceTo(this._head);
       sourceDistance = Math.max(sourceDistance, distance);
       debug.note(
-        `${slab.id} slab (touch): center ${distance.toFixed(2)} m from the eyes (${reachNote(distance)}); ` +
+        `${slab.id} slab: center ${distance.toFixed(2)} m from the eyes (view target ${SLAB_VIEW_DISTANCE_METERS} m; ` +
+          `near reach: ${distance <= TOUCH_REACH_MAX_METERS + 0.005 ? 'yes' : 'no (ray grab)'}); ` +
           `${textNote(`${slab.id} slab`, slab.doc.rowFontMeters, distance)}; ${edges}`,
       );
-      if (distance > TOUCH_REACH_MAX_METERS + 0.005) {
-        debug.warn(`${slab.id} slab is ${distance.toFixed(2)} m from the eyes, beyond the ${TOUCH_REACH_MAX_METERS} m reach limit`);
-      }
     }
 
     // The pair's top edge where the control sits: at the seam (the same
@@ -3532,6 +4456,17 @@ export class JoinSystem
       });
       debug.note(`band touch targets (size, distance from the eyes, clearance to the slabs): ${lines.join('; ')}`);
     }
+
+    // The card against every element (the RIGHT slab still at its dock pose).
+    this.noteCardClearance('joined', [
+      { name: `${left.id} slab`, object: left.object, width: left.doc.widthMeters, top: slabVisualTopLocalY(left.doc), bottom: slabBottomLocalY(left.doc) },
+      { name: `${right.id} slab`, object: right.object, width: right.doc.widthMeters, top: slabVisualTopLocalY(right.doc), bottom: slabBottomLocalY(right.doc) },
+      { name: 'control', object: control.document, width: control.widthMeters, top: control.heightMeters / 2, bottom: -control.heightMeters / 2 },
+      ...(bar
+        ? [{ name: 'bar', object: bar.object, width: bar.widthMeters, top: bar.heightMeters / 2, bottom: -bar.heightMeters / 2 }]
+        : []),
+      { name: 'result', object: view.object, width: view.doc.widthMeters, top: slabVisualTopLocalY(view.doc), bottom: slabBottomLocalY(view.doc) },
+    ]);
 
     right.object.position.copy(restore);
     right.object.quaternion.copy(this._q2);
@@ -3836,6 +4771,14 @@ function pairTopLocalY(left: SourceSlab, right: SourceSlab): number {
 
 function cm(meters: number): string {
   return `${(meters * 100).toFixed(1)} cm`;
+}
+
+/** Whether `local` (a bar's frame, on or near its face) is on `button` (within a ray's tolerance). */
+function onButton(local: Vector3, button: { centerX: number; width: number }, height: number): boolean {
+  return (
+    Math.abs(local.x - button.centerX) <= button.width / 2 + RAY_BUTTON_TOLERANCE_METERS &&
+    Math.abs(local.y) <= height / 2 + RAY_BUTTON_TOLERANCE_METERS
+  );
 }
 
 /**

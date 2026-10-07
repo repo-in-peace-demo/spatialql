@@ -64,7 +64,7 @@ export function challengeStart(): ChallengeStart {
   const storage = safeStorage();
   const params = new URLSearchParams(window.location.search);
   if (import.meta.env.DEV && params.has('resetProgress')) {
-    saveProgress(storage, emptyProgress());
+    clearSavedProgress(storage);
   }
   const loaded = loadProgress(storage, isPuzzleId);
   // Dailies can solve puzzles out of practice order, so solves aren't
@@ -102,6 +102,36 @@ export function challengeStart(): ChallengeStart {
   };
   live = { progress, saveWorks };
   return start;
+}
+
+/** Saves empty progress: every puzzle, the streak, the resume point and the seen concepts. */
+function clearSavedProgress(storage: KeyValueStorage | null): void {
+  saveProgress(storage, emptyProgress());
+}
+
+/**
+ * The welcome screen's "Reset progress" (after its confirmation): clears the
+ * saved progress, as the dev `?resetProgress` does, and reloads the page so
+ * everything starts fresh on puzzle 1.
+ */
+export function resetAllProgress(): void {
+  clearSavedProgress(safeStorage());
+  window.location.reload();
+}
+
+/** A puzzle picked on the welcome screen, waiting for the challenge system to load it. */
+let picked: PuzzleId | null = null;
+
+/** The welcome screen's picker: the challenge system loads `id` (switching tables if needed). */
+export function pickPuzzle(id: PuzzleId): void {
+  picked = id;
+}
+
+/** The picked puzzle, once (null when none is waiting). */
+export function takePickedPuzzle(): PuzzleId | null {
+  const id = picked;
+  picked = null;
+  return id;
 }
 
 /** The challenge system's latest progress, and whether its last save went through. */

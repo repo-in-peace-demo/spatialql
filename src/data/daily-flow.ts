@@ -6,7 +6,9 @@
  * - The daily is offered once practice 1-3 are solved (a first launch is
  *   the tutorial, never day one's daily, which could be a trap puzzle).
  * - A session starts on today's daily while it's unsolved, else resumes
- *   practice.
+ *   practice. Prev and Next move through the puzzle numbers 1-20 (the daily
+ *   is one of them); the welcome screen's picker can jump to any unlocked
+ *   puzzle, or to today's daily.
  * - The daily may be any of the 20, locked or not: it's the one puzzle that
  *   ignores the unlock order. Solving it records it as solved and extends
  *   the streak, but unlocks nothing out of order (`isUnlocked`).
@@ -22,9 +24,9 @@ import {
   dailyCompletedToday,
   dailyRevealedToday,
   dailySolvedToday,
+  isRevealed,
   isSolved,
   isUnlocked,
-  nextPracticePuzzle,
   practiceRevealedCount,
   practiceSolvedCount,
   type Progress,
@@ -69,25 +71,71 @@ export function startPuzzle(progress: Progress, today: number, order: readonly P
 }
 
 /**
- * Where Next goes from `current` (once it's solved), or null if nowhere yet:
- * - to today's daily, if it's offered, unsolved and not this puzzle;
- * - from the daily, back to practice (the first unsolved puzzle);
- * - otherwise to the next practice puzzle, if it's unlocked.
+ * Where Next goes from `current` (once it's done): the next puzzle number,
+ * if it's unlocked (strict order), else null. Prev and Next always move
+ * through the numbers 1-20; today's daily is just one of them (with its
+ * "Today's puzzle" title), reached at session start or from the picker.
  */
-export function nextPuzzle(progress: Progress, current: PuzzleId, today: number, order: readonly PuzzleId[]): PuzzleId | null {
-  const daily = dailyPuzzleId(today);
-  const offered = dailyOffered(progress, order);
-  if (offered && !dailyCompletedToday(progress.daily, today) && daily !== current) {
-    return daily;
-  }
-  if (offered && current === daily) {
-    const resume = nextPracticePuzzle(progress, order);
-    if (resume && resume !== current) {
-      return resume;
-    }
-  }
+export function nextPuzzle(progress: Progress, current: PuzzleId, order: readonly PuzzleId[]): PuzzleId | null {
   const following = order[order.indexOf(current) + 1];
   return following !== undefined && isUnlocked(progress, following, order) ? following : null;
+}
+
+/**
+ * Where Prev goes from `current`: the previous puzzle number, or null on
+ * puzzle 1. Only a daily ahead of practice can have a locked number below
+ * it; then Prev goes to the highest unlocked puzzle below. Going back
+ * changes no progress; see `advanceResume`.
+ */
+export function prevPuzzle(progress: Progress, current: PuzzleId, order: readonly PuzzleId[]): PuzzleId | null {
+  for (let index = order.indexOf(current) - 1; index >= 0; index--) {
+    if (isUnlocked(progress, order[index], order)) {
+      return order[index];
+    }
+  }
+  return null;
+}
+
+export type PuzzleTileStatus = 'solved' | 'revealed' | 'open' | 'locked';
+
+/** One tile of the welcome screen's puzzle picker. */
+export type PuzzleTile = {
+  id: PuzzleId;
+  /** Its puzzle number (1-based). */
+  number: number;
+  status: PuzzleTileStatus;
+  /** Today's daily (marked, and selectable even ahead of practice once the daily is offered). */
+  today: boolean;
+  selectable: boolean;
+};
+
+/** The picker's tiles, in puzzle order: status, today's daily, and whether a tap selects it. */
+export function puzzleTiles(progress: Progress, today: number, order: readonly PuzzleId[]): PuzzleTile[] {
+  const daily = dailyOffered(progress, order) ? dailyPuzzleId(today) : null;
+  return order.map((id, index) => {
+    const unlocked = isUnlocked(progress, id, order);
+    const status: PuzzleTileStatus = isRevealed(progress, id)
+      ? 'revealed'
+      : isSolved(progress, id)
+        ? 'solved'
+        : unlocked
+          ? 'open'
+          : 'locked';
+    return { id, number: index + 1, status, today: id === daily, selectable: unlocked || id === daily };
+  });
+}
+
+/**
+ * The resume point after a practice puzzle loads: it moves forward only,
+ * so replaying an earlier puzzle (Prev) never sends the next session back
+ * to it.
+ */
+export function advanceResume(progress: Progress, id: PuzzleId, order: readonly PuzzleId[]): Progress {
+  const last = progress.lastPuzzle;
+  if (last && order.indexOf(id) < order.indexOf(last)) {
+    return progress;
+  }
+  return last === id ? progress : { ...progress, lastPuzzle: id };
 }
 
 /**

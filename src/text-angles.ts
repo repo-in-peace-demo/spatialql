@@ -16,12 +16,23 @@ export const MIN_ROW_FONT_CM = 0.9;
  * (slab documents aren't rebuilt when placed). The placement and join
  * readouts log the actual distance and resulting angle.
  */
-export const PLANNED_SOURCE_DISTANCE_METERS = 0.55;
-// Measured at join in the emulator (seated, desk); 0.65 m gave 1.33° text.
-export const PLANNED_RESULT_DISTANCE_METERS = 0.56;
-export const PLANNED_CONTROL_DISTANCE_METERS = 0.45;
-/** Challenge mode's puzzle card, just above the result slot (view only). */
-export const PLANNED_CARD_DISTANCE_METERS = 0.6;
+// The group sits back, out of the near field (headset logs of 2026-10-07:
+// players leaned back, or pushed the slabs to 0.60-0.70 m themselves); the
+// slabs are grabbed by ray from there, and only the band (control, bar)
+// stays within near reach.
+export const PLANNED_SOURCE_DISTANCE_METERS = 0.7;
+/** The result slab follows the pair, just behind and above it. */
+export const PLANNED_RESULT_DISTANCE_METERS = 0.72;
+/** The band (INNER | LEFT, the puzzle bar): poked and pinched, so within near reach. */
+export const PLANNED_CONTROL_DISTANCE_METERS = 0.5;
+/** Challenge mode's puzzle card, on an arc beside the result slot (view only). */
+export const PLANNED_CARD_DISTANCE_METERS = 0.75;
+/**
+ * The card's own text targets: larger than the slabs', since it sits well
+ * off-axis beside the result (the headset's lenses are least sharp there).
+ */
+export const CARD_ROW_TEXT_TARGET_DEG = 1.3;
+export const CARD_GOAL_TEXT_TARGET_DEG = 1.45;
 
 /** Physical font size (cm) that subtends `angleDeg` at `distance` meters. */
 export function fontCmForAngle(angleDeg: number, distance: number): number {

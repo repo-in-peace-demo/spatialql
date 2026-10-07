@@ -299,6 +299,30 @@ export function setSlabBadge(doc: TableSlabDocument, text: string | null, look: 
   });
 }
 
+const COLOR_POINTER_HOVER = '#5b4a8a';
+/** A hovered button's outline width (cm); it sits inside the button's fixed size, so layout doesn't move. */
+const POINTER_HOVER_BORDER_CM = 0.25;
+
+/**
+ * The hand pointer's hover look on a button (a control option, a bar button,
+ * Recenter): a firm outline while the pointer is on it. `rest` restores a
+ * button that has its own border (Clear); others go back to none.
+ */
+export function setTargetHover(
+  container: { setProperties(properties: object): void },
+  hovered: boolean,
+  rest: { color: string; width: number } | null = null,
+): void {
+  const width = hovered ? POINTER_HOVER_BORDER_CM : (rest?.width ?? 0);
+  container.setProperties({
+    borderColor: hovered ? COLOR_POINTER_HOVER : (rest?.color ?? COLOR_POINTER_HOVER),
+    borderTopWidth: width,
+    borderLeftWidth: width,
+    borderRightWidth: width,
+    borderBottomWidth: width,
+  });
+}
+
 /** Rows shown for `table` under `maxRows`, and whether a "+N more" row follows. */
 function visibleRowLayout(table: Table, maxRows: number): { visibleRowCount: number; overflow: boolean } {
   const overflow = table.rows.length > maxRows;

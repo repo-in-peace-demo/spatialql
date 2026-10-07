@@ -9,6 +9,7 @@
 
 import {
   BoxGeometry,
+  CircleGeometry,
   Color,
   InstancedMesh,
   Matrix4,
@@ -132,6 +133,37 @@ export class SegmentBatch {
       this.mesh.setMatrixAt(i, this._matrix);
     }
     this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  dispose(): void {
+    this.mesh.geometry.dispose();
+    this.material.dispose();
+  }
+}
+
+/** The hand pointer's cursor: a small dot where the ray hits, facing the eyes. */
+export class CursorDot {
+  readonly mesh: Mesh;
+  private readonly material: MeshBasicMaterial;
+
+  constructor(radius: number, color: string, opacity: number) {
+    this.material = new MeshBasicMaterial({ color: new Color(color), transparent: true, opacity, depthWrite: false });
+    this.mesh = new Mesh(new CircleGeometry(radius, 20), this.material);
+    this.mesh.raycast = noRaycast;
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 3;
+    this.mesh.visible = false;
+  }
+
+  /** At `point`, nudged 2 mm toward `eyes` (so it sits on the surface it hit), facing them. */
+  place(point: Vector3, eyes: Vector3): void {
+    this.mesh.position.copy(eyes).sub(point).normalize().multiplyScalar(0.002).add(point);
+    this.mesh.lookAt(eyes);
+    this.mesh.visible = true;
+  }
+
+  hide(): void {
+    this.mesh.visible = false;
   }
 
   dispose(): void {

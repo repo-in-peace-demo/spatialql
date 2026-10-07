@@ -1,11 +1,13 @@
 /**
  * Where the slabs go when a surface (a desk) was found: the rule, kept pure
- * (no IWSDK imports) so it's tested in Node. Reach wins over the surface:
+ * (no IWSDK imports) so it's tested in Node. The slabs' view distance
+ * (their centers SLAB_VIEW_DISTANCE_METERS from the eyes; "reach" below)
+ * wins over the surface:
  *
- * - **on-surface:** the surface's near edge is within reach: the slabs rest
- *   on it (bottom edges on the surface, clamped into its footprint).
- * - **desk-edge:** the near edge is beyond reach, but by at most
- *   DESK_EDGE_BEYOND_REACH_MAX_METERS: the slabs sit at reach distance at the
+ * - **on-surface:** the surface reaches the slabs' line: they rest on it
+ *   (bottom edges on the surface, clamped into its footprint).
+ * - **desk-edge:** its near edge is beyond the line, but by at most
+ *   DESK_EDGE_BEYOND_REACH_MAX_METERS: the slabs sit at the line at the
  *   desk's height, just in front of its edge. That close, it reads as "at
  *   the desk" in passthrough.
  * - **floating:** the surface is farther than that: the normal floating

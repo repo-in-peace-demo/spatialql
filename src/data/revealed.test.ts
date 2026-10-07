@@ -128,7 +128,7 @@ describe('Skip (Next after "Show answer", before the moves)', () => {
     const progress = recordSkip(emptyProgress(), PRACTICE_ORDER[0], D, 3, false);
     expect(isRevealed(progress, PRACTICE_ORDER[0])).toBe(true);
     expect(isUnlocked(progress, PRACTICE_ORDER[1], PRACTICE_ORDER)).toBe(true);
-    expect(nextPuzzle(progress, PRACTICE_ORDER[0], D, PRACTICE_ORDER)).toBe(PRACTICE_ORDER[1]);
+    expect(nextPuzzle(progress, PRACTICE_ORDER[0], PRACTICE_ORDER)).toBe(PRACTICE_ORDER[1]);
     expect(progress.daily).toEqual(emptyProgress().daily);
   });
 

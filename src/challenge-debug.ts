@@ -5,12 +5,13 @@
  *
  * Keys (clear of the emulator's WASD/QE and the join debug keys J/T/U/R):
  *   H  show the next hint
- *   F  poke the first shown NULL cell (filter on its column, or clear it)
+ *   F  poke the first shown NULL cell (filter on its column; never clears)
  *   N  next puzzle
  *   P  previous puzzle
  *   I  print the last diff, row by row
  *   G  apply the active puzzle's solution (through the real transitions)
  *   X  apply its authored wrong state (data/puzzle-checks.ts)
+ *   C  recenter (as the Recenter button)
  */
 
 import type { Comparison } from './data/compare.js';
@@ -24,6 +25,7 @@ export interface ChallengeDebugHost {
   debugPrev(): void;
   debugApply(which: 'solution' | 'wrong'): void;
   debugPoke(): boolean;
+  debugRecenter(): void;
   debugSnapshot(): { puzzle: Puzzle; output: QueryOutput; comparison: Comparison } | null;
 }
 
@@ -37,6 +39,7 @@ const KEY_HELP = [
   'I  print the diff',
   'G  apply the puzzle\'s solution (the goal)',
   'X  apply its authored wrong state (the trap, for puzzles 10, 18, 20)',
+  'C  recenter: the group glides back in front of you (as the Recenter button)',
 ];
 
 export class ChallengeDebug {
@@ -140,6 +143,9 @@ export class ChallengeDebug {
         break;
       case 'i':
         this.printDiff();
+        break;
+      case 'c':
+        this.host.debugRecenter();
         break;
     }
   };

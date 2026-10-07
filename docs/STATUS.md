@@ -24,7 +24,7 @@ events and logged state; nothing has been tested on a real Quest yet.
 | Area | What's built | Verified |
 | --- | --- | --- |
 | Placement | Slabs rest on a detected desk (or a synthetic one with `forceSurface`), or float at desk height; natural heights, bottom edges aligned. | Emulator: placement and reach logs, screenshots, nothing cut off |
-| Reach and view | Touchable elements within 0.60 m; whole group within an 80° window around the 8° natural gaze (was 18°; retuned from headset logs). On a desk, slab bottoms may sit a few degrees under the window (approved; the readout still warns). | Emulator: slabs 0.55–0.60 m, control 0.45–0.47 m; re-measure with the 8° gaze pending |
+| Reach and view | Source slabs at 0.70 m (grabbed by ray as well as by hand); the band (control, bar) at 0.50 m, within the 0.60 m reach; result about 0.72–0.78 m; card 0.75 m with 1.30° text. Whole group within an 80° window around the 4° natural gaze (was 18°, then 8°; retuned from headset logs). | Emulator, all 20 puzzles: floating, group +32.6° / -29.3° from the gaze, extent 59.5–61.8°; on a desk, +26.8° / -37.3°, extent 61.0–63.7°; card at least 1.4° from every element |
 | Text size | Sized by angle (rows 1.15°, headers 1.3°) from planned distances; ≥ 0.9 cm. | Emulator: source rows 1.10–1.12°, result 1.08–1.11° |
 | Grab | Hand pinch grabs a source slab when the palm is within 7 cm. | Emulator: grab and "no grab" reasons logged |
 | Join | Preview within 6 cm, commit on release, dock with bottoms aligned. | Emulator: grab-and-release joins, J / Shift+J |
@@ -46,14 +46,14 @@ events and logged state; nothing has been tested on a real Quest yet.
 | **Result slab is not grabbable.** | It's derived output; making it grabbable created a grab hazard next to the control. It follows the pair. |
 | **Pinch-to-grab on** (`useHandPinchForGrab`). | Hands have no grip button; pinch is the natural grab gesture on Quest. |
 | **Reach limit 0.60 m** (`TOUCH_REACH_MAX_METERS`) for everything you touch. | Seated use, within about 2 ft; reach wins over the view limits. |
-| **Natural gaze 8°** below horizontal (`NATURAL_GAZE_PITCH_DEG`), with an 80° group window. | A fixed gaze keeps placement independent of where the user looked at session start. It was 18° (seated desk work); on the Quest 3S, seated users held their heads 2–6° down, so 8°. The debug log records head pitch every 10 s for further tuning. |
+| **Natural gaze 4°** below horizontal (`NATURAL_GAZE_PITCH_DEG`), with an 80° group window. | A fixed gaze keeps placement independent of where the user looked at session start. It was 18° (seated desk work); on the Quest 3S, seated users held their heads 2–6° down, so 8°; at the start of a later session about level to a few degrees up, with the group felt as too low, so 4°. The debug log records head pitch every 10 s for further tuning. |
 | **Text sized by angle**, not centimeters. | Slabs at arm's length were physically oversized; angular sizing keeps text readable at any distance and the group in view. |
 | **Bottoms-aligned slabs** at their natural heights. | Both rest on a real desk (nothing hovers or sinks); rows don't need to line up, since matches are shown by color and lines. |
 
 ## Open items for headset testing
 
 - Hand-tracking feel of the grab, the preview "magnet", and release drift.
-- Reach and view constants (0.60 m, 8° gaze, 80° window) at a real desk;
+- View constants (slabs 0.70 m, band 0.50 m, 4° gaze, 80° window) at a real desk;
   the head-pitch lines in the debug log show how people actually hold their heads.
 - Text size at the 1.15° / 1.3° targets.
 - Sound, by ear: overall level and balance (measured: snap -6.9 dBFS, ticks

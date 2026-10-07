@@ -64,18 +64,18 @@ separate.
 
 ### Seated reach and the natural gaze
 
-View angles are measured from a **natural seated gaze**, 8° below horizontal
-along the head's yaw (it was 18°; on the Quest 3S, seated users held their
-heads 2–6° down), not from the head's actual pitch when the slabs are
+View angles are measured from a **natural seated gaze**, 4° below horizontal
+along the head's yaw (it was 18°, then 8°; headset logs showed seated users
+holding their heads about level), not from the head's actual pitch when the slabs are
 placed. The whole group (source pair, control, result slab) must fit one
-vertical window centered on that gaze. Everything you touch stays within
-seated reach. Constants are in `src/view-comfort.ts` and meant to be tuned on a
+vertical window centered on that gaze. Source slabs sit at 0.70 m (grabbed by
+ray as well as by hand); the band you poke (control, bar) stays within seated reach at 0.50 m. Constants are in `src/view-comfort.ts` and meant to be tuned on a
 headset:
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
-| `NATURAL_GAZE_PITCH_DEG` | 8° | The gaze all view angles are measured from |
-| `GROUP_MAX_VERTICAL_FOV_DEG` | 80° | Whole group's vertical extent: 40° below to 40° above the gaze (-48° to +32° from level) |
+| `NATURAL_GAZE_PITCH_DEG` | 4° | The gaze all view angles are measured from |
+| `GROUP_MAX_VERTICAL_FOV_DEG` | 80° | Whole group's vertical extent: 40° below to 40° above the gaze (-44° to +36° from level) |
 | `TOUCH_REACH_MAX_METERS` | 0.60 m | Max eye-to-center distance for source slabs and the control |
 | `MIN_ROW_TEXT_DEG` | 1.0° | Minimum row-text size on the result slab |
 | `ROW_TEXT_TARGET_DEG` / `HEADER_TEXT_TARGET_DEG` | 1.15° / 1.3° | Text is sized by angle: font = 2 × distance × tan(angle / 2) |
@@ -113,7 +113,7 @@ under the dev server (`import.meta.env.DEV`); production builds never read them.
 | Flag | What it does |
 | --- | --- |
 | `forceSurface` | Skips real surface detection. 1 s into the XR session, it places both slabs on a synthetic desk 0.45 m below the head. Slabs you've already grabbed (or that are docked) aren't moved. |
-| `seated` | Requests a 1.2 m eye height and an 8° downward pitch (the natural seated gaze) for the emulated headset, then checks what the app actually renders from. In the current emulator the request doesn't take, and the log says so: `[seated] the seated pose did NOT take …`. Set it by hand in the headset panel (Pos Y = 1.2, Rot X = -8) or with `npx @iwsdk/cli xr set-transform`, then re-enter XR so the slabs are placed from it; the log then reads `[seated] verified: head at 1.20 m, pitched 8.0° down`. Does nothing on a real headset. |
+| `seated` | Requests a 1.2 m eye height and a 4° downward pitch (the natural seated gaze) for the emulated headset, then checks what the app actually renders from. In the current emulator the request doesn't take, and the log says so: `[seated] the seated pose did NOT take …`. Set it by hand in the headset panel (Pos Y = 1.2, Rot X = -4) or with `npx @iwsdk/cli xr set-transform`, then re-enter XR so the slabs are placed from it; the log then reads `[seated] verified: head at 1.20 m, pitched 4.0° down`. Does nothing on a real headset. |
 | `debug` | Registers `GrabDebugSystem`, turns on the join debug keys, join and pinch logs, sound-event logs, and the placement readout. |
 | `mute` | Silences every join sound (the animation is unchanged). Sound events still log, as "not played". |
 
@@ -185,7 +185,7 @@ slab:
 [DeskPlacement debug] orders: center x.xx m from the eyes (reach limit 0.6 m, within reach); row font 1.10 cm = x.xx° (target 1.15°); edges top x.x°, bottom x.x° from the natural gaze (18° down; limit -40°)
 ```
 
-Angles are from the natural gaze (8° below horizontal; the example lines in
+Angles are from the natural gaze (4° below horizontal; the example lines in
 this guide were measured with the earlier 18°); the window is 40° below to
 40° above it. On a desk, a slab's bottom edge may sit a few degrees below the
 window: it rests on the desk, and the readout still warns. Warnings follow when a slab is out of that window

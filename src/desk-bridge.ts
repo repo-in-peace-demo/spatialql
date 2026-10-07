@@ -23,8 +23,19 @@ export interface DeskControls {
    * to use (the slabs float): the card suggests moving closer.
    */
   readonly surfaceTooFar: boolean;
+  /**
+   * The Recenter button: re-places the whole group in front of the player
+   * (as when the headset comes back on, or after a recenter), once no slab
+   * is held.
+   */
+  requestRecenter(): void;
+  /** Whether a recenter glide is moving the slabs (the join system re-places what follows them). */
+  readonly recenterGliding: boolean;
+  /** Counts re-placements; the join system forgets the slabs' home poses when it changes. */
+  readonly placementEpoch: number;
 }
 
+/** Registered in free play too (Recenter works there); challenge mode's switch only runs in challenge mode. */
 export const deskBridge: { desk: DeskControls | null } = { desk: null };
 
 /** Whether the desk is ready (not mid-switch); true when there's no desk bridge (free play before init). */

@@ -47,6 +47,7 @@ describe('the puzzle card fits its text', () => {
       CARD.usedAllHints,
       CARD.solveFirst,
       CARD.moveCloser,
+      CARD.recentered,
       WELCOME.streak(365),
     ];
     for (const status of statuses) {

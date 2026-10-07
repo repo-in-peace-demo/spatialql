@@ -11,14 +11,14 @@
 
 import { HEADER_METRICS, DATA_METRICS, measureTextCm, type GlyphMetrics } from './slab-metrics.js';
 import {
+  CARD_GOAL_TEXT_TARGET_DEG,
+  CARD_ROW_TEXT_TARGET_DEG,
   fontCmForAngle,
-  HEADER_TEXT_TARGET_DEG,
   MIN_ROW_FONT_CM,
   PLANNED_CARD_DISTANCE_METERS,
-  ROW_TEXT_TARGET_DEG,
 } from './text-angles.js';
 
-/** Card width, in goal-font ems (~27 cm at the planned distance). */
+/** Card width, in goal-font ems (~38 cm at the planned distance, ~29° wide). */
 export const CARD_WIDTH_EM = 20;
 export const CARD_GOAL_LINES = 3;
 export const CARD_MESSAGE_LINES = 5;
@@ -38,8 +38,8 @@ export type CardMetrics = {
 };
 
 export function cardMetrics(): CardMetrics {
-  const goalFont = Math.max(MIN_ROW_FONT_CM, fontCmForAngle(HEADER_TEXT_TARGET_DEG, PLANNED_CARD_DISTANCE_METERS));
-  const smallFont = Math.max(MIN_ROW_FONT_CM, fontCmForAngle(ROW_TEXT_TARGET_DEG, PLANNED_CARD_DISTANCE_METERS));
+  const goalFont = Math.max(MIN_ROW_FONT_CM, fontCmForAngle(CARD_GOAL_TEXT_TARGET_DEG, PLANNED_CARD_DISTANCE_METERS));
+  const smallFont = Math.max(MIN_ROW_FONT_CM, fontCmForAngle(CARD_ROW_TEXT_TARGET_DEG, PLANNED_CARD_DISTANCE_METERS));
   // The padding gives up the border's extra width, so its thickness doesn't change the card's size.
   const padding = smallFont * 0.8 - (CARD_BORDER_CM - PHASE2_CARD_BORDER_CM);
   const widthCm = CARD_WIDTH_EM * goalFont;

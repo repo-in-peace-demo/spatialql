@@ -31,6 +31,7 @@ import {
   PLANNED_SOURCE_DISTANCE_METERS,
   ROW_TEXT_TARGET_DEG,
   TEXT_ANGLE_TOLERANCE,
+  SLAB_VIEW_DISTANCE_METERS,
   TOUCH_REACH_MAX_METERS,
   VIEW_MAX_ABOVE_GAZE_DEG,
   VIEW_MAX_BELOW_GAZE_DEG,
@@ -187,7 +188,7 @@ export class PlacementDebug {
       const withinReach = slab.eyeDistance <= TOUCH_REACH_MAX_METERS + 0.005;
       console.log(
         `${LOG_PREFIX} ${slab.name}: center ${fmt(slab.eyeDistance)} m from the eyes ` +
-          `(reach limit ${TOUCH_REACH_MAX_METERS} m, ${withinReach ? 'within reach' : 'BEYOND REACH'}); ` +
+          `(view target ${SLAB_VIEW_DISTANCE_METERS} m; near reach: ${withinReach ? 'yes' : 'no (ray grab)'}); ` +
           `row font ${fmt(slab.rowFontCm)} cm = ${fmt(slab.rowTextDeg)}° (target ${ROW_TEXT_TARGET_DEG}°); ` +
           `edges top ${fmt(slab.topEdgeDeg, 1)}°, bottom ${fmt(slab.bottomEdgeDeg, 1)}° from the natural gaze ` +
           `(${NATURAL_GAZE_PITCH_DEG}° down; limit -${slab.maxBelowDeg}°)` +
@@ -199,7 +200,7 @@ export class PlacementDebug {
 
   /**
    * Warns, per slab placement didn't freeze, when its edges are out of view,
-   * its row text is off the angular target, or its center is beyond reach.
+   * its row text is off the angular target, or its center is off the view distance.
    */
   warnOutOfView(slabs: SlabReport[]): void {
     for (const slab of slabs) {
@@ -211,7 +212,7 @@ export class PlacementDebug {
           `[DeskPlacement] ${slab.name} slab edges are outside the comfortable view (top ` +
             `${fmt(slab.topEdgeDeg, 1)}°, bottom ${fmt(slab.bottomEdgeDeg, 1)}° from the natural gaze ` +
             `(${NATURAL_GAZE_PITCH_DEG}° down); limits -${VIEW_MAX_BELOW_GAZE_DEG}°/+${VIEW_MAX_ABOVE_GAZE_DEG}°): ` +
-            `reach (${TOUCH_REACH_MAX_METERS} m) wins, or the slab is clamped to the surface edge.`,
+            `the ${SLAB_VIEW_DISTANCE_METERS} m view distance wins, or the slab is clamped to the surface edge.`,
         );
       }
       if (Math.abs(slab.rowTextDeg / ROW_TEXT_TARGET_DEG - 1) > TEXT_ANGLE_TOLERANCE) {
@@ -221,10 +222,10 @@ export class PlacementDebug {
             `${PLANNED_SOURCE_DISTANCE_METERS} m).`,
         );
       }
-      if (slab.eyeDistance > TOUCH_REACH_MAX_METERS + 0.005) {
+      if (Math.abs(slab.eyeDistance - SLAB_VIEW_DISTANCE_METERS) > 0.05) {
         console.warn(
           `[DeskPlacement] ${slab.name} slab center is ${fmt(slab.eyeDistance)} m from the eyes, ` +
-            `beyond the ${TOUCH_REACH_MAX_METERS} m seated reach limit.`,
+            `more than 5 cm off its ${SLAB_VIEW_DISTANCE_METERS} m view distance.`,
         );
       }
     }

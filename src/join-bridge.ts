@@ -13,12 +13,28 @@ import type { QuerySpec } from './data/query.js';
 import type { PressPath } from './touch-probe.js';
 
 /** A challenge element the join system places, with its size (meters). */
-export type PlacedElement = { object: Object3D; widthMeters: number; heightMeters: number };
+export type PlacedElement = {
+  object: Object3D;
+  widthMeters: number;
+  heightMeters: number;
+  /** The card's row text size (meters), for the readout's text angle at its actual distance. */
+  textFontMeters?: number;
+};
 
 /** The bar also lists its buttons (in its own frame), for the readout. Its width changes with the chip. */
 export type PlacedBar = PlacedElement & {
   buttons: readonly { name: string; centerX: number; width: number }[];
   buttonHeightMeters: number;
+  /**
+   * Its width with only Hint and Next: the control and bar are centered for
+   * this width, so when the bar grows (Filter, its chips, the WHERE label)
+   * it grows to the right and the control never moves.
+   */
+  baseWidthMeters: number;
+  /** Shows or hides its Recenter button's hover label (the join system tracks fingertips and rays over it). */
+  onRecenterHover?: (hovered: boolean) => void;
+  /** The hand pointer is on `buttons[index]` (-1: none); `previous` was hovered before. Outlines it. */
+  onPointerHover?: (index: number, previous: number) => void;
 };
 
 export type ChallengeLayout = {
@@ -47,6 +63,8 @@ export interface ChallengeHooks {
    * filter): the card says where to poke instead.
    */
   onWrongNull(tableId: string, path: PressPath): void;
+  /** A press on a NULL in the column already filtered (no change): the bar's WHERE label pulses. */
+  onNullFilterRepeat(): void;
 }
 
 /** One Filter chip: a result column with a NULL the player sees, and its header. */

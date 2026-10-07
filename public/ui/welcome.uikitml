@@ -95,8 +95,54 @@
     margin-bottom: 24px;
   }
 
+  .button-mid {
+    justify-content: flex-start;
+    margin-left: 24px;
+    margin-right: 24px;
+    margin-top: 8px;
+  }
+
   .button-label {
     transform-translate-y: 1px;
+  }
+
+  .picker {
+    flex-direction: column;
+    width: 100%;
+    margin-top: 12px;
+  }
+
+  .picker-grid {
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .reset-link {
+    font-size: 12px;
+    line-height: 16px;
+    color: #5d5a52;
+    margin-top: 14px;
+    margin-left: 24px;
+    margin-bottom: 20px;
+  }
+
+  .reset-link:dark {
+    color: rgba(255, 255, 255, 0.6);
+  }
+
+  .confirm {
+    flex-direction: column;
+    margin-left: 24px;
+    margin-right: 24px;
+    margin-top: 16px;
+    margin-bottom: 20px;
+  }
+
+  .confirm-row {
+    flex-direction: row;
+    gap: 8px;
+    margin-top: 10px;
   }
 </style>
 <Panel class="panel-root">
@@ -115,6 +161,10 @@
       <div id="practice-line" class="line">Practice 0/20</div>
       <div id="save-line" class="line" style="display: none">Progress can't be saved in this browser.</div>
     </div>
+    <!-- The puzzle picker (challenge mode), shown in place of the lines above; panel.ts fills the grid with 4 rows of 5 tiles. -->
+    <div id="picker" class="picker" style="display: none">
+      <div id="picker-grid" class="picker-grid"></div>
+    </div>
   </div>
   <Button id="xr-button" class="button">
     <ButtonIcon>
@@ -122,10 +172,29 @@
     </ButtonIcon>
     <ButtonLabel id="xr-label" class="button-label">Start</ButtonLabel>
   </Button>
-  <Button id="mode-button" class="button-last">
+  <Button id="choose-button" class="button-mid">
+    <ButtonLabel id="choose-label" class="button-label">Choose puzzle</ButtonLabel>
+  </Button>
+  <Button id="picker-back" class="button-mid" style="display: none">
+    <ButtonLabel id="picker-back-label" class="button-label">Back</ButtonLabel>
+  </Button>
+  <Button id="mode-button" class="button-mid">
     <ButtonLabel id="mode-label" class="button-label">Free play</ButtonLabel>
   </Button>
   <Button id="exit-button" class="button-last" style="display: none">
     <ButtonLabel class="button-label">Exit to Browser</ButtonLabel>
   </Button>
+  <!-- Reset progress (challenge mode): a small link, then a confirmation in place of the buttons. -->
+  <div id="reset-link" class="reset-link">Reset progress</div>
+  <div id="reset-confirm" class="confirm" style="display: none">
+    <div id="reset-question" class="line">Reset all puzzles and your streak? This can't be undone.</div>
+    <div class="confirm-row">
+      <Button id="reset-cancel">
+        <ButtonLabel id="reset-cancel-label" class="button-label">Cancel</ButtonLabel>
+      </Button>
+      <Button id="reset-ok">
+        <ButtonLabel id="reset-ok-label" class="button-label">Reset</ButtonLabel>
+      </Button>
+    </div>
+  </div>
 </Panel>

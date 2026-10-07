@@ -282,6 +282,12 @@ export const CARD = {
    * far away to use (the slabs float instead).
    */
   moveCloser: 'Move closer to your table to use it.',
+  /** The status line, briefly, after the Recenter button brought the tables back in front of you. */
+  recentered: 'Recentered',
+  /** The status line on a replay (Prev) of a puzzle solved before; the takeaway shows again once it's re-solved. */
+  solvedBefore: 'Solved before',
+  /** The status line on a replay of a puzzle completed after "Show answer" (solving it now upgrades it). */
+  doneWithAnswerBefore: 'Done with answer before',
 };
 
 // --- The puzzle bar (next to INNER | LEFT) --------------------------------------------
@@ -296,7 +302,13 @@ export const BAR = {
   next: 'Next',
   /** Next after "Show answer", before the moves are made: moves on, recorded as revealed. */
   skip: 'Skip',
+  /** Back to the previous puzzle in practice order (from today's daily: back to practice). Off on puzzle 1. */
   prev: 'Prev',
+  /**
+   * The Recenter icon button's label, shown above it while a fingertip or a
+   * hand's ray hovers it (it brings the tables back in front of you).
+   */
+  recenter: 'Recenter',
   daily: 'Today',
   /** The filter chip's own button, after its WHERE clause. */
   clearFilter: 'Clear',
@@ -348,4 +360,20 @@ export const WELCOME = {
   streak: (days: number) => (days === 1 ? 'Streak: 1 day' : `Streak: ${days} days`),
   streakAtRisk: 'Solve today to keep it.',
   saveUnavailable: "Progress can't be saved in this browser.",
+  /** Opens the puzzle picker (a grid of 1-20) in place of the progress lines. */
+  choosePuzzle: 'Choose puzzle',
+  /** Closes the picker. */
+  pickerBack: 'Back',
+  /** Under today's daily's number in the picker. */
+  pickerToday: 'Today',
+  /** The Start button once a puzzle is picked. */
+  startPuzzle: (number: number) => `Start puzzle ${number}`,
+  /**
+   * A small link at the bottom: clears all progress, after a confirmation.
+   * (Not named `resetProgress`: that's the dev URL flag the dist grep looks for.)
+   */
+  resetLink: 'Reset progress',
+  resetQuestion: "Reset all puzzles and your streak? This can't be undone.",
+  resetCancel: 'Cancel',
+  resetConfirm: 'Reset',
 };
