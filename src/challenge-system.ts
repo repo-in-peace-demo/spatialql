@@ -50,9 +50,18 @@ import {
   type PuzzleCardView,
 } from './challenge-view.js';
 import { compareToTarget, fanOutGroups, type Comparison } from './data/compare.js';
-import { BAR, CARD, CONCEPT_INTROS, NULL_EXPLAINER, WELCOME } from './data/copy.js';
-import { isoFromDay } from './data/daily.js';
-import { advanceResume, aheadConcepts, isTodaysDaily, nextPuzzle, prevPuzzle } from './data/daily-flow.js';
+import { BAR, CARD, COMPLETE, CONCEPT_INTROS, NULL_EXPLAINER, TARGET_OUTLINE, WELCOME } from './data/copy.js';
+import { dailyPuzzleId, isoFromDay } from './data/daily.js';
+import {
+  advanceResume,
+  aheadConcepts,
+  completionLines,
+  finishAction,
+  isTodaysDaily,
+  nextPuzzle,
+  prevPuzzle,
+  type FinishAction,
+} from './data/daily-flow.js';
 import { DATASETS } from './data/datasets.js';
 import { canEvaluate, canStartSwitch, deskTableIds, type DeskState } from './data/desk-session.js';
 import type { JoinState } from './data/join-state.js';
@@ -142,6 +151,11 @@ const CARD_FADE_IN_PER_SECOND = 3;
 const SWITCH_FADE_OUT_PER_SECOND = 1 / 0.35;
 /** Frames to wait after activation before fading in: the join system places them first. */
 const REVEAL_DELAY_FRAMES = 2;
+/** Every label the Next button shows. */
+const NEXT_LABELS = [BAR.next, BAR.skip, BAR.finish, BAR.daily, BAR.done] as const;
+/** The completion's sound: the win, again a moment later, then a chime. */
+const COMPLETION_ECHO_SECONDS = 0.45;
+const COMPLETION_CHIME_SECONDS = 0.9;
 
 export class ChallengeSystem extends createSystem({}) implements ChallengeHooks, ChallengeDebugHost {
   private join: JoinControls | null = null;
@@ -193,6 +207,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private moveCloserShown = false;
   /** The NULL cells' first-time cue waits for the first result with a NULL. */
   private nullCuePending = false;
+  /** The card shows the completion state (every puzzle done; after "Finish"). */
+  private completionShowing = false;
   /** The Filter chips are open (Back and one chip per choice). */
   private filterOpen = false;
   /** The chips' columns, in the order shown (from the join, at the last bar update). */
@@ -251,7 +267,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.bar = buildPuzzleBar(slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm, {
       prev: BAR.prev,
       hint: BAR.hintLabels,
-      next: [BAR.next, BAR.skip],
+      // Every label Next shows (it's sized for the widest, so relabeling never resizes the bar).
+      next: NEXT_LABELS,
       recenter: BAR.recenter,
       clear: BAR.clearFilter,
       filter: BAR.filter,
@@ -412,8 +429,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this.lastState = state;
       this.updateBar();
     }
-    // Next pulses once the puzzle is won, until it's pressed.
-    if (this.session.solved && this.nextAvailable()) {
+    // Next pulses once the puzzle is won, until it's pressed (Finish too).
+    if (this.session.solved && (this.nextAvailable() || this.finishAction() === 'finish')) {
       this.bar.nextOpacity.value = 0.75 + 0.25 * Math.sin(this.clock * 4);
     }
     // "Solve it first" (an inactive Next) gives way to the status it covered.
@@ -474,7 +491,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
    * before", or nothing.
    */
   private restingStatus(): string {
-    if (this.session.solved) {
+    if (this.session.solved || this.completionShowing) {
       return this.solvedStatus();
     }
     if (this.lastComparison) {
@@ -646,6 +663,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private updateBadge(): void {
     const join = this.join;
     if (!join) {
+      return;
+    }
+    if (this.completionShowing) {
+      join.setResultBadge(COMPLETE.badge, 'won');
       return;
     }
     if (this.session.solved) {
@@ -836,11 +857,12 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.text = puzzleText(this.puzzle);
     this.target = puzzleTarget(this.puzzle);
     this.session = startSession(id);
+    this.completionShowing = false;
     this.updateHintLabel();
     this.lastComparison = null;
     this.lastState = null;
 
-    // The silhouette: the target's headers and row outlines, in the result slot.
+    // The silhouette (target outline): the target's headers, one empty row and the row count, in the result slot.
     this.silhouette?.entity.dispose();
     const doc = buildSilhouette(this.puzzle, this.target);
     // It appears with the card: hidden until placed (after a switch the card
@@ -849,7 +871,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.revealFrames = REVEAL_DELAY_FRAMES;
     const entity = this.world.createTransformEntity(doc.document);
     this.silhouette = { doc, entity };
-    join.setSilhouette({ object: doc.document, widthMeters: doc.widthMeters, heightMeters: doc.heightMeters });
+    // Its height as shown: one row (the rest are hidden; they only size the columns).
+    join.setSilhouette({ object: doc.document, widthMeters: doc.widthMeters, heightMeters: doc.heightForRowsMeters(1) });
 
     // The card.
     this.isDaily = isTodaysDaily(this.progress, id, this.today, PRACTICE_ORDER);
@@ -938,7 +961,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.introLines = [];
     this.messageFlashUntil = 0;
     this.filterOpen = false;
-    const lastNote = this.nextId() === null ? CARD.morePuzzlesSoon : null;
+    // Nowhere further: "More puzzles soon." -- unless every puzzle is done (Next says Finish).
+    const lastNote = this.nextId() === null && this.finishAction() === null ? CARD.morePuzzlesSoon : null;
     if (revealed) {
       // A daily says why the streak didn't grow. A fan-out takeaway takes two
       // lines, so there the note stands in for the query line (the caption
@@ -1111,6 +1135,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
    * were used; for a solved daily, the streak; else how many hints it took.
    */
   private solvedStatus(): string {
+    if (this.completionShowing) {
+      return completionLines(this.progress, PLAYABLE, this.today).streak ?? '';
+    }
     if (answerRevealed(this.session)) {
       return CARD.usedAllHints;
     }
@@ -1131,11 +1158,82 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     );
   }
 
-  /** Next's look (active or not) and label ("Skip" while the answer is showing and the puzzle isn't done). */
+  /**
+   * Next's look (active or not) and label: "Skip" while the answer is
+   * showing and the puzzle isn't done; on the last puzzle with every puzzle
+   * done, "Finish", then "Today" or "Done".
+   */
   private updateNextLook(): void {
     setPrevAvailable(this.bar, this.prevAvailable());
-    setNextAvailable(this.bar, this.nextAvailable());
-    setNextLabel(this.bar, this.canSkip() ? BAR.skip : BAR.next);
+    const finish = this.finishAction();
+    setNextAvailable(this.bar, finish !== null || this.nextAvailable());
+    setNextLabel(
+      this.bar,
+      finish === 'finish'
+        ? BAR.finish
+        : finish === 'today'
+          ? BAR.daily
+          : finish === 'done'
+            ? BAR.done
+            : this.canSkip()
+              ? BAR.skip
+              : BAR.next,
+    );
+  }
+
+  /** Next's role on the last puzzle once every puzzle is done (null: Next as usual). */
+  private finishAction(): FinishAction | null {
+    if (this.pending || !this.puzzle) {
+      return null;
+    }
+    return finishAction(this.progress, this.puzzle.id, PLAYABLE, this.today, this.completionShowing);
+  }
+
+  /** Finish, Today or Done (Next on the last puzzle, every puzzle done). */
+  private pressFinish(action: FinishAction): void {
+    if (action === 'finish') {
+      this.showCompletion();
+    } else if (action === 'today') {
+      const id = dailyPuzzleId(this.today);
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(`Today pressed: today's daily ${id}`);
+      }
+      this.join?.resetToHome();
+      this.loadPuzzle(id);
+    } else {
+      // A deliberate last step: no hold. Back to the welcome screen.
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note('Done pressed: ending the XR session');
+      }
+      void this.xrManager.getSession()?.end();
+    }
+  }
+
+  /**
+   * Every puzzle done: the card's completion state (gold), with its own
+   * sound -- the win, its echo, a chime -- and the badge. Next becomes
+   * "Today" (today's daily open) or "Done".
+   */
+  private showCompletion(): void {
+    const lines = completionLines(this.progress, PLAYABLE, this.today);
+    this.completionShowing = true;
+    this.messageFlashUntil = 0;
+    this.statusFlashUntil = 0;
+    this.introShown = false;
+    this.introLines = [];
+    setCardWin(this.card, { headline: lines.headline, takeaway: lines.summary, query: lines.next, note: null });
+    this.card.status.setProperties({ text: lines.streak ?? '' });
+    this.updateBadge();
+    this.card.document.updateWorldMatrix(true, false);
+    this._point.setFromMatrixPosition(this.card.document.matrixWorld);
+    sounds.playWin(this._point);
+    sounds.playWin(this._point, COMPLETION_ECHO_SECONDS);
+    sounds.playHint(this._point, COMPLETION_CHIME_SECONDS);
+    this.bar.nextOpacity.value = 1;
+    this.updateNextLook();
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`completion: ${lines.headline} ${lines.summary} ${lines.next}`);
+    }
   }
 
   private setMessage(text: string): void {
@@ -1219,12 +1317,22 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (import.meta.env.DEV && this.debug) {
       touchProbe.pressed(button === 'chip' ? CHIP_NAMES[chip] : button, path);
     }
-    // An inactive Next does nothing, so it makes no click either. Before the
-    // puzzle is done, the card says why, briefly.
+    // Next on the last puzzle with every puzzle done: Finish, then Today or Done.
+    const finish = button === 'next' ? this.finishAction() : null;
+    if (finish) {
+      this.bar.document.updateWorldMatrix(true, false);
+      this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
+      sounds.playClick(this._point);
+      this.pressFinish(finish);
+      return;
+    }
+    // An inactive Next does nothing, so it makes no click either. The card
+    // says why, briefly: solve it first, or (the last puzzle, done) there's
+    // no next one yet -- a press always shows it was felt.
     if (button === 'next' && !this.nextAvailable()) {
       const done = !!this.puzzle && (this.session.solved || isSolved(this.progress, this.puzzle.id));
-      if (!done && !this.pending) {
-        this.card.status.setProperties({ text: CARD.solveFirst });
+      if (!this.pending) {
+        this.card.status.setProperties({ text: done ? CARD.morePuzzlesSoon : CARD.solveFirst });
         this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
       }
       if (import.meta.env.DEV && this.debug) {
@@ -1337,21 +1445,33 @@ function diffSummary(comparison: Comparison): string {
   return parts.join(', ');
 }
 
-/** The target silhouette: the target's headers and an outline per row; `revealRow` keeps its text. */
+/**
+ * The target outline, the same for every puzzle: the target's headers, one
+ * empty row, and "Answer: N rows" where the result's SQL caption will be.
+ * Its columns are sized from every target row (as the result's will be), but
+ * only the first row shows, as an empty outline.
+ */
 function buildSilhouette(puzzle: Puzzle, target: QueryOutput): TableSlabDocument {
   const visible = visibleRowIndices(target);
+  const columns = target.result.table.columns;
+  const rows = visible.map((row) => target.result.table.rows[row]);
+  if (rows.length === 0) {
+    rows.push(Object.fromEntries(columns.map((column) => [column, null])));
+  }
   const table: Table = {
     id: `silhouette-${puzzle.id}`,
-    columns: target.result.table.columns,
+    columns,
     columnLabels: target.result.table.columnLabels,
-    rows: visible.map((row) => target.result.table.rows[row]),
+    rows,
   };
-  const reveal = puzzle.revealRow === undefined ? -1 : visible.indexOf(puzzle.revealRow);
+  const label = TARGET_OUTLINE.answerRows(visible.length);
   return buildTableSlabDocument(table, {
     maxRows: MAX_RESULT_ROWS,
+    hiddenRows: new Set(rows.map((_, index) => index).filter((index) => index > 0)),
+    caption: { lines: [label], fitLines: [label] },
     anchorTop: true,
     text: slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS),
-    silhouette: { revealRow: reveal >= 0 ? reveal : null },
+    silhouette: { revealRow: null },
     accent: DATASETS[puzzle.datasetId].theme.accent,
   });
 }

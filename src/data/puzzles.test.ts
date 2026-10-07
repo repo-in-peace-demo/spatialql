@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { compareToTarget, fanOutGroups } from './compare.js';
-import { CONCEPT_INTROS, DATASET_TITLES, PUZZLE_COPY } from './copy.js';
+import { measureTextCm, MONO_METRICS, slabMetrics } from '../slab-metrics.js';
+import { PLANNED_RESULT_DISTANCE_METERS, slabTextSizeAt } from '../text-angles.js';
+import { CONCEPT_INTROS, DATASET_TITLES, PUZZLE_COPY, TARGET_OUTLINE } from './copy.js';
 import { DATASETS } from './datasets.js';
 import {
   canActivatePuzzle,
@@ -58,6 +60,18 @@ describe.each(PUZZLES.map((puzzle): [string, Puzzle] => [puzzle.id, puzzle]))('p
     }
   });
 
+  it('its target outline says how many rows the answer has, and the label never widens the outline', () => {
+    const count = visibleRowIndices(target).length;
+    const label = TARGET_OUTLINE.answerRows(count);
+    expect(label).toMatch(/^[\x20-\x7e]+$/);
+    expect(label).toContain(count === 1 ? '1 row' : count === 0 ? 'no rows' : `${count} rows`);
+    // The outline is at least its columns at their minimum width; the label (the caption's font) fits inside that.
+    const m = slabMetrics(slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS));
+    const columns = target.result.table.columns.length;
+    const narrowest = columns * m.columnMinWidth + (columns - 1) * m.columnGap;
+    expect(measureTextCm(label, MONO_METRICS, m.captionFont)).toBeLessThanOrEqual(narrowest);
+  });
+
   it('the first join (INNER, no filter) solves it only when that is the lesson', () => {
     const [a, b] = puzzle.tables;
     const firstJoins: QuerySpec[] = [
@@ -68,14 +82,6 @@ describe.each(PUZZLES.map((puzzle): [string, Puzzle] => [puzzle.id, puzzle]))('p
     for (const spec of firstJoins) {
       expect(solves(puzzle, spec), describeSpec(spec)).toBe(expected);
     }
-  });
-
-  it('reveals only a matched target row', () => {
-    if (puzzle.revealRow === undefined) {
-      return;
-    }
-    expect(target.visible[puzzle.revealRow]).toBe(true);
-    expect(target.result.lineage[puzzle.revealRow].ghost).toBe(false);
   });
 
   it('fan-out puzzles have repeats to highlight (their takeaway explains them)', () => {

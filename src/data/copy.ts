@@ -290,6 +290,23 @@ export const CARD = {
   doneWithAnswerBefore: 'Done with answer before',
 };
 
+// --- Every puzzle done (the card, after "Finish" on the last puzzle) --------------------
+
+export const COMPLETE = {
+  /** The headline, gold, in the win's place (fits one line, tested). */
+  headline: (total: number) => `All ${total} puzzles done!`,
+  /** How they were done, when some were completed after "Show answer". */
+  summary: (solved: number, revealed: number) => `Solved: ${solved}. With the answer: ${revealed}.`,
+  /** ...and when none were. */
+  allSolved: 'All solved yourself!',
+  /** What's next, once today's daily is done. */
+  comeBackTomorrow: 'Come back tomorrow for a new daily puzzle.',
+  /** What's next while today's daily is open (Next says "Today"). */
+  dailyOpen: "Today's puzzle is still open.",
+  /** The result slab's badge. */
+  badge: 'All done!',
+};
+
 // --- The puzzle bar (next to INNER | LEFT) --------------------------------------------
 
 export const BAR = {
@@ -302,6 +319,10 @@ export const BAR = {
   next: 'Next',
   /** Next after "Show answer", before the moves are made: moves on, recorded as revealed. */
   skip: 'Skip',
+  /** Next on the last puzzle once every puzzle is done: shows the completion state. */
+  finish: 'Finish',
+  /** Then, while today's daily is open: loads it (`daily`, "Today"). Else: ends the session. */
+  done: 'Done',
   /** Back to the previous puzzle in practice order (from today's daily: back to practice). Off on puzzle 1. */
   prev: 'Prev',
   /**
@@ -318,6 +339,18 @@ export const BAR = {
   filterBack: 'Back',
   /** One chip: the column's header as the result slab shows it. */
   filterChip: (header: string) => `${header} is NULL`,
+};
+
+// --- The target outline (in the result's place, before a join) --------------------------
+
+export const TARGET_OUTLINE = {
+  /**
+   * The outline's one label, where the result's SQL caption will be: how
+   * many rows the answer has (the clue). The outline is the same for every
+   * puzzle: headers, one empty row, this label.
+   */
+  answerRows: (count: number) =>
+    count === 0 ? 'Answer: no rows' : count === 1 ? 'Answer: 1 row' : `Answer: ${count} rows`,
 };
 
 // --- Diff markers on the result slab ---------------------------------------------------
@@ -353,6 +386,9 @@ export const WELCOME = {
   /** When some were completed after "Show answer": they count in the total, and are named. */
   practiceProgressWithAnswers: (completed: number, total: number, revealed: number) =>
     `Practice ${completed}/${total} (${revealed} with answer)`,
+  /** In place of the practice count once every puzzle is done. */
+  allDone: (total: number) => `All ${total} puzzles done`,
+  allDoneWithAnswers: (total: number, revealed: number) => `All ${total} puzzles done (${revealed} with answer)`,
   /** Today's daily, completed after "Show answer". */
   dailyRevealed: "Today's puzzle: done with the answer.",
   dailyOpen: (dataset: DatasetId) => `Today's puzzle: ${DATASET_TITLES[dataset]}`,

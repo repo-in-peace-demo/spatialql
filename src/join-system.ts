@@ -83,15 +83,20 @@ import { COLOR_MATCH_LINE, COLOR_PREVIEW, CursorDot, EdgeGlow, lineColorForTint,
 import {
   angleBetweenDeg,
   HAND_POINTER_FREEZE_LOOKBACK_SECONDS,
+  HAND_POINTER_FLICKER_OPEN_SECONDS,
+  HAND_POINTER_FREEZE_MAX_SECONDS,
+  HAND_POINTER_MAX_BELOW_EYES_METERS,
+  HAND_POINTER_PRESS_GAP_SECONDS,
   HAND_POINTER_MAX_METERS,
-  HAND_POINTER_MIN_FORWARD_METERS,
   HAND_POINTER_NEAR_BUTTON_METERS,
   HAND_POINTER_PITCH_OFFSET_DEG,
   pitchDeg,
-  pointerFrozen,
+  PinchFreeze,
   pointerRaised,
   PoseHistory,
   smoothingAlpha,
+  StaleRay,
+  type PressBlock,
 } from './hand-pointer-math.js';
 import {
   BUTTON_PINCH_BACK_DEPTH_METERS,
@@ -101,7 +106,7 @@ import {
   POKE_TARGET_TOLERANCE_METERS,
   type PokeVerdict,
 } from './contact-poke.js';
-import { indexStraightness, readJointsPoint, readPinchPoint, readWristPoint } from './pinch.js';
+import { indexStraightness, readJointsPoint, readPinchPoint, readTargetRay, readWristPoint } from './pinch.js';
 import { JoinDocked, JoinResultSlab, TableSlab, TableSlabRuntime } from './table-slab-component.js';
 import {
   buildJoinTypeControl,
@@ -331,6 +336,12 @@ const POINTER_SLAB_GLOW = 0.3;
 /** Dev log: a hover change is logged at most this often per hand. */
 const POINTER_HOVER_LOG_SECONDS = 0.25;
 const THUMB_TIP: readonly XRHandJoint[] = ['thumb-tip'];
+/**
+ * Dev on localhost runs the XR emulator (IWER), whose hands hold perfectly
+ * still: its ray would always read as stale, so the stale check is skipped there.
+ */
+const EMULATED_HANDS =
+  import.meta.env.DEV && typeof location !== 'undefined' && (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
 /** A fingertip this close in front of a NULL cell hovers it (its outline strengthens)... */
 const NULL_HOVER_DEPTH_METERS = 0.04;
 /** ...or up to this far behind its face (pressing into it). */
@@ -403,7 +414,7 @@ function copyRayHit(from: RayHit, to: RayHit): void {
  * lost, the hand at the body or lowered, a fingertip at a button (poke
  * applies), the palm at a slab (a grab applies), or no ray.
  */
-type PointerOffReason = 'untracked' | 'lost' | 'body' | 'lowered' | 'poke' | 'grab' | 'noray';
+type PointerOffReason = 'untracked' | 'lost' | 'body' | 'lowered' | 'poke' | 'grab' | 'noray' | 'stale';
 
 /**
  * The dev log's words for a pointer-off code. Only called inside dev-only
@@ -428,7 +439,9 @@ function pointerOffText(reason: PointerOffReason | ''): string {
     case 'grab':
       return 'palm at a slab (near grab)';
     case 'noray':
-      return 'no ray';
+      return 'tracking lost: no ray pose';
+    case 'stale':
+      return 'ray stale';
     default:
       return '';
   }
@@ -437,7 +450,14 @@ function pointerOffText(reason: PointerOffReason | ''): string {
 /** One hand's pointer: on or off (and why), its smoothed or frozen ray, and what it hits. */
 type HandPointer = {
   active: boolean;
+  /** The ray is frozen this frame (a pinch closing; see `freeze`). */
   frozen: boolean;
+  /** The pre-pinch freeze and the one-press-per-pinch gate. */
+  freeze: PinchFreeze;
+  /** Detects a ray pose the platform stopped updating. */
+  stale: StaleRay;
+  /** This frame's ray pose was live (read from the frame, and changing). */
+  fresh: boolean;
   origin: Vector3;
   dir: Vector3;
   history: PoseHistory;
@@ -457,6 +477,9 @@ function makeHandPointer(): HandPointer {
   return {
     active: false,
     frozen: false,
+    freeze: new PinchFreeze(),
+    stale: new StaleRay(),
+    fresh: false,
     origin: new Vector3(),
     dir: new Vector3(0, 0, -1),
     history: new PoseHistory(),
@@ -468,6 +491,11 @@ function makeHandPointer(): HandPointer {
     hoverKey: '',
     hoverLogAt: -Infinity,
   };
+}
+
+/** A slab's panel height now (meters): its animated height, or its full height. */
+function shownHeightMeters(doc: TableSlabDocument): number {
+  return doc.panelHeightCm ? doc.panelHeightCm.peek() / 100 : doc.heightMeters;
 }
 
 type ResultView = {
@@ -692,6 +720,14 @@ export class JoinSystem
   private readonly _euler = new Euler();
   private readonly _color = new Color();
   private readonly _head = new Vector3();
+  /** Where placeAboveBand put a slab's bottom edge, and its up axis. */
+  private readonly _placedBottom = new Vector3();
+  private readonly _placedUp = new Vector3();
+  /** The result slab's placed bottom edge and up axis (followResultHeight keeps it there). */
+  private readonly _resultBottom = new Vector3();
+  private readonly _resultUp = new Vector3();
+  private resultPlaced: ResultView | null = null;
+  private resultPlacedHeight = -1;
   private headPitchDown = 0;
   private readonly _edges: SlabEdgeAngles = { topDeg: 0, bottomDeg: 0, fits: true };
   private readonly _prox = { side: 1, gap: 0, depth: 0, vertical: 0, angleDeg: 0 };
@@ -882,6 +918,7 @@ export class JoinSystem
       this.resultViewFor(pending[0], pending[1]);
     }
     this.followRecenter();
+    this.followResultHeight();
     if (this.challengeLayout) {
       this.updateChallengeLayout();
       this.updateWinGlow();
@@ -1700,9 +1737,9 @@ export class JoinSystem
       anchorTop: true,
       // Same angular text size as the source slabs, at the result's own distance.
       text: slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS),
-      // Height follows the rows shown (INNER hides the trailing ghost rows);
-      // placement still reserves the full LEFT height, so it never grows
-      // into the control.
+      // Height follows the rows shown (INNER hides the trailing ghost rows).
+      // Placement fits the tallest state (the reserve) but keeps the bottom
+      // edge fixed above the control: it grows upward (followResultHeight).
       animatedHeight: true,
       // Each row's LEFT-table and RIGHT-table cells can fly in separately
       // from their own source rows.
@@ -2578,6 +2615,12 @@ export class JoinSystem
     // again when the pair does.
     this.setControlSelection(joinType);
     this.showResult(view);
+    // Its height for this join before placing it (anchored by its bottom
+    // edge, it's positioned for its height now; the sequence sets the same).
+    if (view.doc.panelHeightCm) {
+      const rows = view.matchedRowCount + (joinType === 'left' ? view.ghostRows.length : 0) + view.placeholdersShown;
+      this.tweens.set(view.doc.panelHeightCm, view.doc.heightForRowsMeters(rows) * 100);
+    }
     this.readHead();
     this.placeResult(view, left, right);
     // A pair joined high (lifted toward the eyes) stacks the control, result
@@ -3055,9 +3098,9 @@ export class JoinSystem
       }
     });
 
-    // The panel's height follows the rows shown. Its origin is its top edge,
-    // so it grows and shrinks at the bottom: it grows as the incoming rows
-    // slide in, and shrinks once the outgoing rows have slid out.
+    // The panel's height follows the rows shown. Its bottom edge stays put
+    // (followResultHeight), so it grows and shrinks at the top: it grows as
+    // the incoming rows slide in, and shrinks once the outgoing rows have slid out.
     const panelHeight = view.doc.panelHeightCm;
     if (panelHeight) {
       const rows = view.matchedRowCount + (shown ? view.ghostRows.length : 0) + view.placeholdersShown;
@@ -3160,14 +3203,21 @@ export class JoinSystem
     // In challenge mode the card sits beside the result slab (not on top of
     // it), so nothing stacks above the result.
     const card = this.challengeLayout?.card;
-    // Its status badge (challenge mode) rises above its top edge.
+    // Its status badge (challenge mode) rises above its top edge. Fitted for
+    // its tallest state, anchored by its bottom edge at its height now.
+    const shown = shownHeightMeters(view.doc);
     this.placeAboveBand(
       view.object,
       view.doc.heightMeters,
       this.control.document,
       this.control.heightMeters,
       view.doc.tabHeightMeters,
+      shown,
     );
+    this._resultBottom.copy(this._placedBottom);
+    this._resultUp.copy(this._placedUp);
+    this.resultPlaced = view;
+    this.resultPlacedHeight = shown;
     if (card) {
       // Clear of the band (control and bar) and the pair's top edge (the
       // RIGHT slab may still be docking: measured in the LEFT slab's frame).
@@ -3176,18 +3226,28 @@ export class JoinSystem
       this._g.set(0, pairTopLocalY(left, right), 0);
       left.object.localToWorld(this._g);
       below = Math.max(below, degreesFromForward(this._head, this.headPitchDown, this._g));
-      this.placeCard(view.object, view.doc.widthMeters, view.doc.heightMeters, card, below);
+      this.placeCard(view.object, view.doc.widthMeters, shown, card, below);
     }
   }
 
   /**
-   * Places a top-anchored slab (`object`, `height` m tall) whose bottom-edge
-   * midpoint starts at `_c` (on the pair's top-edge line, in the frame of
-   * `_q1`): lifted above that line, kept above `band`'s top edge in view,
-   * leaning to face the eyes, pushed back if its top would leave the view.
-   * Overwrites `_c`.
+   * Places a top-anchored slab (`object`) whose bottom-edge midpoint starts
+   * at `_c` (on the pair's top-edge line, in the frame of `_q1`): lifted
+   * above that line, kept above `band`'s top edge in view, leaning to face
+   * the eyes, pushed back if its top would leave the view. Fitted for its
+   * tallest state (`height` m: the result's 12-row reserve), but anchored by
+   * its bottom edge: positioned for `shownHeight` (its height now), so a
+   * short result sits low and only grows upward. Leaves that bottom edge in
+   * `_placedBottom` and the slab's up axis in `_placedUp`. Overwrites `_c`.
    */
-  private placeAboveBand(object: Object3D, height: number, band: Object3D, bandHeight: number, above = 0): void {
+  private placeAboveBand(
+    object: Object3D,
+    height: number,
+    band: Object3D,
+    bandHeight: number,
+    above = 0,
+    shownHeight = height,
+  ): void {
     this._up.copy(UP).applyQuaternion(this._q1);
     this._normal.set(0, 0, 1).applyQuaternion(this._q1);
     this._c.addScaledVector(this._up, RESULT_GAP_ABOVE_METERS).addScaledVector(this._normal, -RESULT_BEHIND_METERS);
@@ -3271,12 +3331,32 @@ export class JoinSystem
       lean = eyeFacingLeanFromBottom(this._head.y - this._c.y, this._a.dot(this._b), height);
     }
 
-    // Top-anchored document: origin = bottom edge + slab-up * height.
+    // Top-anchored document: origin = bottom edge + slab-up * its height now.
     this._euler.set(-lean, yaw, 0, 'YXZ');
     this._q2.setFromEuler(this._euler);
     this._up.copy(UP).applyQuaternion(this._q2);
     object.quaternion.copy(this._q2);
-    object.position.copy(this._c).addScaledVector(this._up, height);
+    object.position.copy(this._c).addScaledVector(this._up, shownHeight);
+    this._placedBottom.copy(this._c);
+    this._placedUp.copy(this._up);
+  }
+
+  /**
+   * Keeps the result slab's bottom edge where it was placed while its height
+   * changes (rows, placeholders, INNER / LEFT, a filter): it's top-anchored,
+   * so it moves up by exactly its height. Each frame; writes only on a change.
+   */
+  private followResultHeight(): void {
+    const view = this.active;
+    if (!view || view !== this.resultPlaced || (this.state.phase !== 'joined' && this.state.phase !== 'separating')) {
+      return;
+    }
+    const height = shownHeightMeters(view.doc);
+    if (Math.abs(height - this.resultPlacedHeight) < 1e-5) {
+      return;
+    }
+    this.resultPlacedHeight = height;
+    view.object.position.copy(this._resultBottom).addScaledVector(this._resultUp, height);
   }
 
   /**
@@ -3472,11 +3552,27 @@ export class JoinSystem
     a.object.getWorldQuaternion(this._q1);
     this._c.set(midX, topY, 0);
     a.object.localToWorld(this._c);
-    this.placeAboveBand(slot.object, slot.heightMeters, layout.bar.object, layout.bar.heightMeters);
+    // Fitted like the result it stands in for (its tallest state), at its own
+    // height: so the outline and the result share their bottom edge.
+    let fitHeight = slot.heightMeters;
+    for (const key of [resultKey(a.id, b.id), resultKey(b.id, a.id)]) {
+      fitHeight = Math.max(fitHeight, this.results.get(key)?.doc.heightMeters ?? 0);
+    }
+    this.placeAboveBand(slot.object, fitHeight, layout.bar.object, layout.bar.heightMeters, 0, slot.heightMeters);
     // Beside the silhouette, where it will be beside the result, and clear of
     // the bar and both slabs (a short target's silhouette once let the card
     // hang down onto the right-hand slab).
     this.placeCard(slot.object, slot.widthMeters, slot.heightMeters, layout.card, this.topEdgeDeg([layout.bar], [a, b]));
+    if (import.meta.env.DEV && this.debug && this.world.visibilityState.peek() !== VisibilityState.NonImmersive) {
+      // The result will share this bottom edge (compare its "edges ... bottom" line once joined).
+      slot.object.updateWorldMatrix(true, false);
+      this._g.set(0, -slot.heightMeters, 0);
+      slot.object.localToWorld(this._g);
+      this.debug.note(
+        `target outline: bottom edge ${degreesFromForward(this._head, this.headPitchDown, this._g).toFixed(1)}° from the ` +
+          `natural gaze, ${cm(slot.heightMeters)} tall (one row and its label)`,
+      );
+    }
     if (import.meta.env.DEV && this.debug) {
       this.noteCardClearance('before the join', [
         { name: `${a.id} slab`, object: a.object, width: a.doc.widthMeters, top: slabVisualTopLocalY(a.doc), bottom: slabBottomLocalY(a.doc) },
@@ -3580,7 +3676,18 @@ export class JoinSystem
           this.notePointerPinch(hand, pointer, controlLive);
         }
         if (pointer.active) {
-          this.pressHit(hand, pointer.hit, 'ray');
+          // Every platform pinch may press once: never from a stale pose, nor a flicker of a pinch that pressed.
+          const now = this.tweens.now;
+          const block = pointer.freeze.pinchStart(pointer.fresh, now);
+          const presses = pointer.hit.target !== 'none' && pointer.hit.target !== 'slab' && pointer.hit.target !== 'result';
+          if (block === '') {
+            if (presses) {
+              pointer.freeze.pressed(now);
+            }
+            this.pressHit(hand, pointer.hit, 'ray');
+          } else if (import.meta.env.DEV && this.debug) {
+            this.notePressBlocked(hand, pointer, block, now);
+          }
         }
         continue;
       }
@@ -3643,6 +3750,10 @@ export class JoinSystem
 
     HANDS.forEach((hand, index) => {
       const p = this.pointers[hand];
+      // The platform's pinch ended: the freeze re-arms, and the flicker rule times the opening.
+      if (this.input.xr.gamepads[hand]?.getSelectEnd()) {
+        p.freeze.released(now);
+      }
       const source = this.input.xr.getPrimaryInputSource(hand);
       const isHand = !!source?.hand;
       if (this.sdkRayOff[hand] !== isHand) {
@@ -3659,16 +3770,33 @@ export class JoinSystem
         this._pointerLocal.subVectors(this._pointerWrist, this._pointerHead);
         p.forward = this._pointerLocal.dot(this._pointerFwd);
         p.below = -this._pointerLocal.y;
-        if (!pointerRaised(p.forward, p.below)) {
-          reason = p.forward < HAND_POINTER_MIN_FORWARD_METERS ? 'body' : 'lowered';
+        if (!pointerRaised(p.forward, p.below, p.active)) {
+          reason = p.below > HAND_POINTER_MAX_BELOW_EYES_METERS ? 'lowered' : 'body';
         } else if (this.fingertipAtButton(source, controlLive)) {
           reason = 'poke';
         } else if (this.nearGrab(hand)) {
           reason = 'grab';
         }
       }
-      if (reason || !source || !this.readRay(hand)) {
-        this.setPointerActive(hand, p, false, reason || 'noray');
+      // The ray straight from this frame: none (tracking lost) or unchanged too long (stale) hides it.
+      p.fresh = false;
+      if (!reason && source) {
+        if (!readTargetRay(this.world, this.player, source, this._rayOrigin, this._rayDir)) {
+          reason = 'noray';
+        } else if (
+          p.stale.step(now, this._rayOrigin.x, this._rayOrigin.y, this._rayOrigin.z, this._rayDir.x, this._rayDir.y, this._rayDir.z) &&
+          !EMULATED_HANDS
+        ) {
+          reason = 'stale';
+        } else {
+          p.fresh = true;
+        }
+      }
+      if (reason || !source) {
+        if (reason !== 'stale') {
+          p.stale.reset();
+        }
+        this.setPointerActive(hand, p, false, reason || 'untracked');
         this.pointerLines.progress[index].value = 0;
         this.pointerDots[hand].hide();
         return;
@@ -3688,12 +3816,20 @@ export class JoinSystem
         this._rayDir.y,
         this._rayDir.z,
       );
-      // Frozen while a pinch closes: at the pose from just before the fingers started closing.
+      // Frozen while a pinch closes (at most HAND_POINTER_FREEZE_MAX_SECONDS):
+      // at the pose from just before the fingers started closing.
       const tipsTracked =
         readJointsPoint(this.world, this.player, source, THUMB_TIP, this._pointerThumb) &&
         readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pointerIndex);
-      const frozen = tipsTracked ? pointerFrozen(this._pointerThumb.distanceTo(this._pointerIndex), p.frozen) : false;
-      if (frozen && !p.frozen && p.history.at(now, HAND_POINTER_FREEZE_LOOKBACK_SECONDS, this._poseBuffer)) {
+      const event = p.freeze.step(tipsTracked ? this._pointerThumb.distanceTo(this._pointerIndex) : null, now);
+      const frozen = p.freeze.frozen;
+      if (import.meta.env.DEV && this.debug && event === 'expired') {
+        this.debug.note(
+          `${hand} pointer unfrozen: the fingers stayed closed for over ${HAND_POINTER_FREEZE_MAX_SECONDS} s ` +
+            `(the ray follows the hand again; the next pinch still presses)`,
+        );
+      }
+      if (event === 'started' && p.history.at(now, HAND_POINTER_FREEZE_LOOKBACK_SECONDS, this._poseBuffer)) {
         const b = this._poseBuffer;
         p.origin.set(b[0], b[1], b[2]);
         p.dir.set(b[3], b[4], b[5]).normalize();
@@ -3744,14 +3880,22 @@ export class JoinSystem
     p.active = active;
     p.offReason = reason;
     if (!active) {
+      // Unfrozen, but the press gate stays (a flicker off and on mid-pinch mustn't allow a second press).
       p.frozen = false;
+      p.freeze.frozen = false;
       p.history.clear();
       p.hit.target = 'none';
       p.barIndex = -1;
     }
     if (import.meta.env.DEV && this.debug && was !== active) {
+      const lost =
+        reason === 'stale'
+          ? ` for ${Math.round(p.stale.unchangedFor(this.tweens.now) * 1000)} ms: pointer hidden`
+          : reason === 'noray'
+            ? ': pointer hidden'
+            : '';
       this.debug.note(
-        `${hand} pointer ${active ? 'on' : `off (${pointerOffText(reason)})`}: wrist ${p.forward.toFixed(2)} m ahead ` +
+        `${hand} pointer ${active ? 'on' : `off (${pointerOffText(reason)}${lost})`}: wrist ${p.forward.toFixed(2)} m ahead ` +
           `of the head, ${p.below.toFixed(2)} m below the eyes`,
       );
     }
@@ -3864,6 +4008,23 @@ export class JoinSystem
     }
   }
 
+  /** Dev: a pointer pinch that wasn't allowed to press, and why. */
+  private notePressBlocked(hand: (typeof HANDS)[number], p: HandPointer, block: PressBlock, now: number): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    const target = p.hit.target === 'none' ? 'nothing' : p.hit.target === 'bar' ? `bar button ${p.barIndex}` : p.hit.name;
+    const why =
+      block === 'stale'
+        ? `stale pose (ray unchanged for ${Math.round(p.stale.unchangedFor(now) * 1000)} ms)`
+        : block === 'flicker'
+          ? `flicker: the pinch ended only ${Math.round(p.freeze.openFor(now) * 1000)} ms ago and had already pressed ` +
+            `(same pinch; needs ${HAND_POINTER_FLICKER_OPEN_SECONDS * 1000} ms open)`
+          : `repeat pinch ${Math.round(p.freeze.sinceLastPress(now) * 1000)} ms after the last press ` +
+            `(needs ${HAND_POINTER_PRESS_GAP_SECONDS * 1000} ms)`;
+    this.debug.note(`${hand} pointer press blocked: ${why}; it was on ${target}`);
+  }
+
   /** Dev: a hand pointer's hover changes (at most every POINTER_HOVER_LOG_SECONDS). */
   private notePointerHover(hand: (typeof HANDS)[number], p: HandPointer): void {
     if (!import.meta.env.DEV || !this.debug) {
@@ -3944,7 +4105,8 @@ export class JoinSystem
       `${hand} pointer pinch: ${hit.target === 'none' ? 'hit nothing' : `${hit.name} at ${hit.distance.toFixed(2)} m`}` +
         `${hit.target === 'slab' || hit.target === 'result' ? ' (not a button: no press)' : ''}; ${aim}; ` +
         `ray pitch ${pitchDeg(p.dir.x, p.dir.y, p.dir.z).toFixed(1)}°, yaw ${yaw.toFixed(1)}°` +
-        `${p.frozen ? ' (frozen)' : ''}; wrist ${p.forward.toFixed(2)} m ahead, ${p.below.toFixed(2)} m below the eyes`,
+        `${p.frozen ? ' (frozen)' : ''}; wrist ${p.forward.toFixed(2)} m ahead, ${p.below.toFixed(2)} m below the eyes; ` +
+        `released ${Number.isFinite(p.freeze.openFor(this.tweens.now)) ? `${Math.round(p.freeze.openFor(this.tweens.now) * 1000)} ms` : 'never'} before`,
     );
   }
 
@@ -4299,6 +4461,8 @@ export class JoinSystem
       return `row font ${cm(fontMeters)} = ${deg.toFixed(2)}° (target ${ROW_TEXT_TARGET_DEG}°)`;
     };
 
+    // The result's height now (it's anchored by its bottom edge).
+    const shownHeight = shownHeightMeters(view.doc);
     // The RIGHT slab is still animating into its dock; measure it there.
     const restore = this._c.copy(right.object.position);
     this._q2.copy(right.object.quaternion);
@@ -4465,25 +4629,34 @@ export class JoinSystem
       ...(bar
         ? [{ name: 'bar', object: bar.object, width: bar.widthMeters, top: bar.heightMeters / 2, bottom: -bar.heightMeters / 2 }]
         : []),
-      { name: 'result', object: view.object, width: view.doc.widthMeters, top: slabVisualTopLocalY(view.doc), bottom: slabBottomLocalY(view.doc) },
+      { name: 'result', object: view.object, width: view.doc.widthMeters, top: slabVisualTopLocalY(view.doc), bottom: -shownHeight },
     ]);
 
     right.object.position.copy(restore);
     right.object.quaternion.copy(this._q2);
 
-    // Result slab: viewed, not touched.
+    // Result slab: viewed, not touched. Anchored by its bottom edge at its
+    // height now; also where its top reaches at its tallest (the reserve).
     measureSlabEdges(
       this._head,
       this.headPitchDown,
       view.object,
       slabTopLocalY(view.doc),
-      slabBottomLocalY(view.doc),
+      -shownHeight,
       this._a,
       this._edges,
     );
     const resultBottomDeg = this._edges.bottomDeg;
-    const resultEdges = edgeNote('result slab', this._edges.topDeg, resultBottomDeg);
-    this._a.set(0, -view.doc.heightMeters / 2, 0);
+    this._a.set(0, view.doc.heightMeters - shownHeight + view.doc.tabHeightMeters, 0);
+    view.object.localToWorld(this._a);
+    const tallestTopDeg = degreesFromForward(this._head, this.headPitchDown, this._a);
+    const resultEdges =
+      `${edgeNote('result slab', this._edges.topDeg, resultBottomDeg)}; at its tallest ` +
+      `(${cm(view.doc.heightMeters)}) its top reaches ${tallestTopDeg.toFixed(1)}° (view top +${VIEW_MAX_ABOVE_GAZE_DEG}°)`;
+    if (tallestTopDeg > VIEW_MAX_ABOVE_GAZE_DEG + FIT_DROP_TOLERANCE_DEG) {
+      debug.warn(`result slab at its tallest would reach ${tallestTopDeg.toFixed(1)}°, above the view's top`);
+    }
+    this._a.set(0, -shownHeight / 2, 0);
     view.object.localToWorld(this._a);
     const resultDistance = this._a.distanceTo(this._head);
     const resultTextDeg = textAngleDeg(view.doc.rowFontMeters, resultDistance);
@@ -4557,8 +4730,7 @@ export class JoinSystem
     }
     debug.note(
       `layout gaps in view: pair top -> control bottom ${(controlBottomDeg - pairTopDeg).toFixed(1)}°, ` +
-        `control top -> result bottom ${(resultBottomDeg - controlTopDeg).toFixed(1)}° (result bottom at its full ` +
-        `LEFT height; INNER sits higher)`,
+        `control top -> result bottom ${(resultBottomDeg - controlTopDeg).toFixed(1)}° (its bottom edge stays put; it grows upward)`,
     );
     if (controlBottomDeg < pairTopDeg) {
       debug.warn(

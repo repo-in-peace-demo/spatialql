@@ -46,6 +46,7 @@ describe('the puzzle card fits its text', () => {
       CARD.solvedWithHints(3),
       CARD.usedAllHints,
       CARD.solveFirst,
+      CARD.morePuzzlesSoon,
       CARD.moveCloser,
       CARD.recentered,
       WELCOME.streak(365),

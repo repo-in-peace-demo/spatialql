@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { cardMessageLines } from '../card-metrics.js';
-import { CARD, CONCEPT_INTROS, WELCOME } from './copy.js';
+import { CARD_MESSAGE_LINES, cardHeadlineFontCm, cardMessageLines, cardMetrics, wrappedLines } from '../card-metrics.js';
+import { HEADER_METRICS } from '../slab-metrics.js';
+import { CARD, COMPLETE, CONCEPT_INTROS, WELCOME } from './copy.js';
 import { DAILY_EPOCH_DAY, dailyPuzzleId } from './daily.js';
 import {
   advanceResume,
   aheadConcepts,
+  allPuzzlesDone,
+  completionLines,
   dailyOffered,
+  finishAction,
   isTodaysDaily,
   nextPuzzle,
   prevPuzzle,
@@ -103,11 +107,11 @@ describe('where Next goes: the next puzzle number, if unlocked', () => {
     expect(nextPuzzle(progress, 'library-fanout', ORDER)).toBe('shop-every-order');
   });
 
-  it('from the daily, to the number after it if unlocked; nowhere if it is locked', () => {
+  it('from the daily, to the number after it if unlocked; nowhere if it is locked; from 20, the lowest open one', () => {
     const today = dayFor(LATE_DAILY);
     const progress = markDailySolved(markSolved(solved(FIRST_THREE), LATE_DAILY, today, 0), today);
-    // The daily is puzzle 20: nothing after it.
-    expect(nextPuzzle(progress, LATE_DAILY, ORDER)).toBeNull();
+    // The daily is puzzle 20: nothing after it, so the lowest open puzzle (practice's next, puzzle 4).
+    expect(nextPuzzle(progress, LATE_DAILY, ORDER)).toBe('library-fanout');
     // A daily ahead of practice (puzzle 8 here): puzzle 9 is still locked.
     expect(nextPuzzle(markSolved(solved(FIRST_THREE), ORDER[7], today, 0), ORDER[7], ORDER)).toBeNull();
   });
@@ -323,11 +327,85 @@ describe('welcome screen lines', () => {
       WELCOME.dailyDone,
       WELCOME.saveUnavailable,
       WELCOME.practiceProgress(20, 20),
+      WELCOME.allDone(20),
+      WELCOME.allDoneWithAnswers(20, 19),
       `${WELCOME.streak(365)}. ${WELCOME.streakAtRisk}`,
       ...DATASET_IDS.map((id) => WELCOME.dailyOpen(id)),
     ];
     for (const line of lines) {
       expect(line.length, line).toBeLessThanOrEqual(WELCOME_LINE_MAX_CHARS);
+    }
+  });
+});
+
+describe('finishing all 20 puzzles', () => {
+  const LAST = ORDER[ORDER.length - 1];
+  const all = solved(ORDER);
+  /** All done, these after "Show answer". */
+  const withAnswers = (ids: readonly PuzzleId[]) =>
+    ids.reduce((progress, id) => ({ ...progress, solved: { ...progress.solved, [id]: { firstSolvedDay: 1, hintsUsed: 3, revealed: true as const } } }), all);
+  /** A day whose daily isn't the last puzzle, so "today's daily" is a different one. */
+  const today = dayFor('shop-every-customer');
+
+  it('counts only when every puzzle is done (solved or with the answer)', () => {
+    expect(allPuzzlesDone(all, ORDER)).toBe(true);
+    expect(allPuzzlesDone(withAnswers(['library-no-due', 'cafe-no-milk']), ORDER)).toBe(true);
+    expect(allPuzzlesDone(solved(ORDER.slice(0, 19)), ORDER)).toBe(false);
+    // The last puzzle done (as a daily ahead of practice) with an earlier one open: not done.
+    const gap = solved(ORDER.filter((id) => id !== 'school-twice'));
+    expect(allPuzzlesDone(gap, ORDER)).toBe(false);
+    expect(finishAction(gap, LAST, ORDER, today, false)).toBeNull();
+  });
+
+  it('Next on the last puzzle goes to the lowest open puzzle while one is open', () => {
+    const gap = solved(ORDER.filter((id) => id !== 'school-twice' && id !== 'cafe-menu'));
+    expect(nextPuzzle(gap, LAST, ORDER)).toBe('school-twice');
+    expect(nextPuzzle(all, LAST, ORDER)).toBeNull();
+  });
+
+  it('Next says Finish, then Today (today\'s daily open) or Done', () => {
+    expect(finishAction(all, LAST, ORDER, today, false)).toBe('finish');
+    expect(finishAction(all, LAST, ORDER, today, true)).toBe('today');
+    const dailyDone = markDailySolved(all, today);
+    expect(finishAction(dailyDone, LAST, ORDER, today, true)).toBe('done');
+    // Anywhere but the last puzzle: Next as usual.
+    expect(finishAction(all, ORDER[5], ORDER, today, false)).toBeNull();
+  });
+
+  it('the completion state: summary, what next, the streak', () => {
+    expect(completionLines(all, ORDER, today)).toEqual({
+      headline: 'All 20 puzzles done!',
+      summary: COMPLETE.allSolved,
+      next: COMPLETE.dailyOpen,
+      streak: null,
+    });
+    const mixed = markDailySolved(withAnswers(['library-no-due', 'cafe-no-milk']), today);
+    expect(completionLines(mixed, ORDER, today)).toEqual({
+      headline: 'All 20 puzzles done!',
+      summary: 'Solved: 18. With the answer: 2.',
+      next: COMPLETE.comeBackTomorrow,
+      streak: 'Streak: 1 day',
+    });
+  });
+
+  it('the welcome screen says so in place of the practice count', () => {
+    expect(welcomeLines(all, today, ORDER, true).practice).toBe('All 20 puzzles done');
+    expect(welcomeLines(withAnswers(['cafe-no-milk']), today, ORDER, true).practice).toBe('All 20 puzzles done (1 with answer)');
+  });
+
+  it('its copy fits the card: the headline on one line, bigger than the goal; the rest within the message area', () => {
+    const m = cardMetrics();
+    const headline = COMPLETE.headline(ORDER.length);
+    const font = cardHeadlineFontCm(headline);
+    expect(wrappedLines(headline, HEADER_METRICS, font, m.innerWidthCm)).toBe(1);
+    expect(font).toBeGreaterThanOrEqual(1.2 * m.goalFont);
+    // "Solved!" keeps its full size.
+    expect(cardHeadlineFontCm(CARD.headline)).toBeCloseTo(cardHeadlineFontCm(''));
+    const summaries = [COMPLETE.allSolved, COMPLETE.summary(10, 10)].map(cardMessageLines);
+    const nexts = [COMPLETE.comeBackTomorrow, COMPLETE.dailyOpen].map(cardMessageLines);
+    expect(Math.max(...summaries) + Math.max(...nexts)).toBeLessThanOrEqual(CARD_MESSAGE_LINES);
+    for (const text of [headline, COMPLETE.allSolved, COMPLETE.summary(18, 2), COMPLETE.comeBackTomorrow, COMPLETE.dailyOpen, COMPLETE.badge]) {
+      expect(text).toMatch(/^[\x20-\x7e]+$/);
     }
   });
 });

@@ -9,7 +9,7 @@
  * line and note) on up to CARD_MESSAGE_LINES lines.
  */
 
-import { HEADER_METRICS, DATA_METRICS, measureTextCm, type GlyphMetrics } from './slab-metrics.js';
+import { HEADER_METRICS, DATA_METRICS, LINE_HEIGHT_FACTOR, measureTextCm, type GlyphMetrics } from './slab-metrics.js';
 import {
   CARD_GOAL_TEXT_TARGET_DEG,
   CARD_ROW_TEXT_TARGET_DEG,
@@ -71,6 +71,22 @@ export function wrappedLines(text: string, metrics: GlyphMetrics, fontCm: number
     }
   }
   return lines;
+}
+
+/** The win headline's size in goal fonts ("Solved!"), in the goal's slot. */
+export const HEADLINE_SCALE = 1.8;
+
+/**
+ * The win headline's font (cm) for `text`: HEADLINE_SCALE goal fonts (at
+ * most what the goal's slot holds), smaller only when `text` wouldn't fit
+ * one line ("All 20 puzzles done!").
+ */
+export function cardHeadlineFontCm(text: string): number {
+  const m = cardMetrics();
+  const goalHeight = CARD_GOAL_LINES * m.goalFont * LINE_HEIGHT_FACTOR;
+  const max = Math.min(m.goalFont * HEADLINE_SCALE, goalHeight / LINE_HEIGHT_FACTOR);
+  const width = measureTextCm(text, HEADER_METRICS, max);
+  return width <= m.innerWidthCm ? max : (max * m.innerWidthCm) / width;
 }
 
 /** Lines `text` takes in the card's message area (regular small font). */

@@ -17,6 +17,8 @@ import { nullFilterColumns, type QueryOutput } from './query.js';
 
 /** The bar's label size: the control's header size by angle, as challenge-system.ts builds it. */
 const LABEL_FONT_CM = slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm;
+/** Every label Next shows (challenge-system.ts's NEXT_LABELS). */
+const NEXT_LABELS = [BAR.next, BAR.skip, BAR.finish, BAR.daily, BAR.done];
 
 describe('puzzle bar labels', () => {
   it('the hint button fits every label it shows, so relabeling never resizes it', () => {
@@ -36,16 +38,18 @@ describe('puzzle bar labels', () => {
     const rest = barRowWidthCm([
       barButtonWidthCm([BAR.prev], LABEL_FONT_CM),
       barButtonWidthCm(BAR.hintLabels, LABEL_FONT_CM),
-      barButtonWidthCm([BAR.next, BAR.skip], LABEL_FONT_CM),
+      barButtonWidthCm(NEXT_LABELS, LABEL_FONT_CM),
       CONTROL_OPTION_MIN_WIDTH_CM,
     ]);
     expect(label).toBeLessThanOrEqual(rest / 2);
     expect(BAR.recenter).toMatch(/^[\x20-\x7e]+$/);
   });
 
-  it('Next fits both its labels (Next, and Skip after "Show answer")', () => {
-    const width = barButtonWidthCm([BAR.next, BAR.skip], LABEL_FONT_CM);
-    for (const label of [BAR.next, BAR.skip]) {
+  it('Next fits all its labels (Next; Skip after "Show answer"; Finish, Today, Done once every puzzle is done)', () => {
+    const width = barButtonWidthCm(NEXT_LABELS, LABEL_FONT_CM);
+    // Short words: "Today", not "Today's puzzle", so the widest bar stays within reach.
+    expect(width).toBeLessThanOrEqual(barButtonWidthCm([BAR.next, BAR.skip], LABEL_FONT_CM) + 1);
+    for (const label of NEXT_LABELS) {
       const needed = measureTextCm(label, HEADER_METRICS, LABEL_FONT_CM) + 2 * BAR_BUTTON_PADDING_EM * LABEL_FONT_CM;
       expect(needed, label).toBeLessThanOrEqual(width + 1e-9);
     }
@@ -53,7 +57,7 @@ describe('puzzle bar labels', () => {
 
   it('says what it shows next, in order, in plain ASCII', () => {
     expect(BAR.hintLabels).toEqual(['Hint', 'Another hint', 'Show answer']);
-    for (const label of [BAR.prev, ...BAR.hintLabels, BAR.next, BAR.skip, BAR.recenter, BAR.clearFilter, BAR.filter, BAR.filterBack]) {
+    for (const label of [BAR.prev, ...BAR.hintLabels, ...NEXT_LABELS, BAR.recenter, BAR.clearFilter, BAR.filter, BAR.filterBack]) {
       expect(label, label).toMatch(/^[\x20-\x7e]+$/);
     }
   });
@@ -111,7 +115,7 @@ describe('the Filter chips', () => {
     const width = barRowWidthCm([
       barButtonWidthCm([BAR.prev], LABEL_FONT_CM),
       barButtonWidthCm(BAR.hintLabels, LABEL_FONT_CM),
-      barButtonWidthCm([BAR.next, BAR.skip], LABEL_FONT_CM),
+      barButtonWidthCm(NEXT_LABELS, LABEL_FONT_CM),
       // Recenter: an icon at the minimum target size.
       CONTROL_OPTION_MIN_WIDTH_CM,
       widest,

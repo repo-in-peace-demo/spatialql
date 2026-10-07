@@ -42,6 +42,30 @@ export function readJointsPoint(
   return true;
 }
 
+/**
+ * `source`'s target ray this frame, straight from the XR frame (world space:
+ * origin into `origin`, unit direction into `dir`); false when the platform
+ * reports no pose for it (tracking lost). Unlike the player rig's ray space,
+ * which keeps its last pose, a missing pose shows here.
+ */
+export function readTargetRay(world: World, player: Object3D, source: XRInputSource, origin: Vector3, dir: Vector3): boolean {
+  const frame = world.xrFrame;
+  const space = world.xrReferenceSpace;
+  if (!frame || !space) {
+    return false;
+  }
+  const pose = frame.getPose(source.targetRaySpace, space);
+  if (!pose) {
+    return false;
+  }
+  // Column-major: translation in 12-14, the local -Z axis is -(8, 9, 10).
+  const m = pose.transform.matrix;
+  player.updateWorldMatrix(true, false);
+  origin.set(m[12], m[13], m[14]).applyMatrix4(player.matrixWorld);
+  dir.set(-m[8], -m[9], -m[10]).transformDirection(player.matrixWorld);
+  return true;
+}
+
 /** World-space midpoint of the thumb and index fingertips. */
 export function readPinchPoint(world: World, player: Object3D, source: XRInputSource, out: Vector3): boolean {
   return readJointsPoint(world, player, source, PINCH_JOINTS, out);

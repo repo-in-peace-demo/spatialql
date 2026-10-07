@@ -62,8 +62,6 @@ export type Puzzle = {
    * (`NULL` for a side with no source row), in any order.
    */
   expected: readonly string[];
-  /** Index into the target's rows to show filled in the silhouette. */
-  revealRow?: number;
   /** On a win, highlight rows that repeat for this reason (fan-out puzzles). */
   fanOutHighlight?: FanOutCause;
 };
@@ -140,7 +138,6 @@ export const PUZZLES: readonly Puzzle[] = [
     concept: 'left',
     solution: leftJoin('customers', 'orders'),
     expected: [...SHOP_MATCHED, 'Odalys Ferreira / NULL'],
-    revealRow: 0,
   },
   // 3. customers <- orders, LEFT, WHERE o.id IS NULL. Introduces the NULL poke.
   {
@@ -169,7 +166,6 @@ export const PUZZLES: readonly Puzzle[] = [
     concept: 'direction',
     solution: leftJoin('orders', 'customers'),
     expected: [...SHOP_MATCHED, 'NULL / 108'],
-    revealRow: 0,
   },
   // 6. books <- borrowers, LEFT, WHERE br.id IS NULL.
   {
@@ -207,7 +203,6 @@ export const PUZZLES: readonly Puzzle[] = [
     concept: 'direction',
     solution: leftJoin('books', 'borrowers'),
     expected: [...LIBRARY_MATCHED, 'NULL / Paper Moons', 'NULL / Small Hours'],
-    revealRow: 0,
   },
   // 10. Any INNER, WHERE bk.due IS NULL. In a LEFT result the same filter also keeps unmatched rows.
   {
@@ -235,7 +230,6 @@ export const PUZZLES: readonly Puzzle[] = [
     concept: 'left',
     solution: leftJoin('clubs', 'students'),
     expected: [...SCHOOL_MATCHED, 'Gardening / NULL'],
-    revealRow: 0,
   },
   // 13. clubs <- students, LEFT, WHERE st.id IS NULL.
   {
@@ -254,7 +248,6 @@ export const PUZZLES: readonly Puzzle[] = [
     concept: 'direction',
     solution: leftJoin('students', 'clubs'),
     expected: [...SCHOOL_MATCHED, 'NULL / Lio Sandoval', 'NULL / Odette Rue'],
-    revealRow: 0,
   },
   // 15. students <- clubs, LEFT, WHERE cl.id IS NULL. A NULL club id and an unknown one (9) both miss.
   {
@@ -273,7 +266,6 @@ export const PUZZLES: readonly Puzzle[] = [
     concept: 'left',
     solution: leftJoin('drinks', 'tickets'),
     expected: [...CAFE_MATCHED, 'Matcha / NULL'],
-    revealRow: 0,
   },
   // 17. tickets <- drinks, LEFT, WHERE d.id IS NULL.
   {
@@ -301,7 +293,6 @@ export const PUZZLES: readonly Puzzle[] = [
     concept: 'direction',
     solution: leftJoin('tickets', 'drinks'),
     expected: [...CAFE_MATCHED, 'NULL / 407'],
-    revealRow: 0,
   },
   // 20. drinks <- tickets, LEFT, WHERE t.id IS NULL. The trap: filtering on milk also keeps 402 and 406.
   {

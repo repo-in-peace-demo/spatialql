@@ -23,7 +23,7 @@ import { Coffee } from '@pmndrs/uikit-lucide/dist/Coffee.js';
 import { LocateFixed } from '@pmndrs/uikit-lucide/dist/LocateFixed.js';
 import { School } from '@pmndrs/uikit-lucide/dist/School.js';
 import { ShoppingBag } from '@pmndrs/uikit-lucide/dist/ShoppingBag.js';
-import { CARD_GOAL_LINES, CARD_MESSAGE_LINES, cardMetrics } from './card-metrics.js';
+import { CARD_GOAL_LINES, CARD_MESSAGE_LINES, cardHeadlineFontCm, cardMetrics } from './card-metrics.js';
 import type { DatasetIcon } from './data/datasets.js';
 import {
   BAR_BORDER_CM,
@@ -55,8 +55,6 @@ const COLOR_TEXT_SECONDARY = '#4a4538';
 const COLOR_BAR_TRACK = '#e2ddd0';
 /** The win headline: the result slab's gold caption color. */
 const COLOR_HEADLINE = '#8a4b00';
-/** The headline's size relative to the goal font (capped to fit the goal's two-line slot). */
-const HEADLINE_SCALE = 1.8;
 /** The dataset icon's size relative to the title text. */
 const ICON_SCALE = 1.25;
 // --- Puzzle card ------------------------------------------------------------------
@@ -164,7 +162,7 @@ export function buildPuzzleCard(): PuzzleCardView {
   // On a win, the headline takes the goal's two-line slot (the card can't grow).
   const headline = new UIKit.Text({
     text: '',
-    fontSize: Math.min(goalFont * HEADLINE_SCALE, goalHeight / LINE_HEIGHT_FACTOR),
+    fontSize: cardHeadlineFontCm(''),
     fontWeight: 'bold',
     color: COLOR_HEADLINE,
     wordBreak: 'keep-all',
@@ -235,6 +233,8 @@ export function setCardWin(card: PuzzleCardView, win: CardWin | null): void {
   card.headline.setProperties({
     display: win ? 'flex' : 'none',
     text: win?.headline ?? '',
+    // Its full size, unless the text needs smaller to fit one line.
+    ...(win ? { fontSize: cardHeadlineFontCm(win.headline) } : {}),
     color: won ? COLOR_HEADLINE : COLOR_TEXT,
   });
   card.message.setProperties({ text: win?.takeaway ?? '' });

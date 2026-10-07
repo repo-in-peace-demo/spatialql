@@ -16,7 +16,7 @@
  *   for the day it was loaded.
  */
 
-import { WELCOME } from './copy.js';
+import { COMPLETE, WELCOME } from './copy.js';
 import { dailyPuzzleId } from './daily.js';
 import { resumePuzzle } from './desk-session.js';
 import {
@@ -27,6 +27,7 @@ import {
   isRevealed,
   isSolved,
   isUnlocked,
+  nextPracticePuzzle,
   practiceRevealedCount,
   practiceSolvedCount,
   type Progress,
@@ -78,7 +79,64 @@ export function startPuzzle(progress: Progress, today: number, order: readonly P
  */
 export function nextPuzzle(progress: Progress, current: PuzzleId, order: readonly PuzzleId[]): PuzzleId | null {
   const following = order[order.indexOf(current) + 1];
-  return following !== undefined && isUnlocked(progress, following, order) ? following : null;
+  if (following === undefined) {
+    // The last puzzle (finished as the daily, say, ahead of practice): on to the lowest open one.
+    const open = nextPracticePuzzle(progress, order);
+    return open !== null && open !== current ? open : null;
+  }
+  return isUnlocked(progress, following, order) ? following : null;
+}
+
+/** Every puzzle done: solved, or completed after "Show answer". */
+export function allPuzzlesDone(progress: Progress, order: readonly PuzzleId[]): boolean {
+  return order.every((id) => isSolved(progress, id));
+}
+
+/** How the puzzles were done: solved without the answer, and completed after "Show answer". */
+export function doneCounts(progress: Progress, order: readonly PuzzleId[]): { solved: number; revealed: number } {
+  const revealed = order.filter((id) => isRevealed(progress, id)).length;
+  const done = order.filter((id) => isSolved(progress, id)).length;
+  return { solved: done - revealed, revealed };
+}
+
+/**
+ * Next on the last puzzle once every puzzle is done: "Finish" (shows the
+ * completion state on the card), then "Today" while today's daily is still
+ * open (it loads it), else "Done" (ends the XR session). Null anywhere else:
+ * Next as usual.
+ */
+export type FinishAction = 'finish' | 'today' | 'done';
+
+export function finishAction(
+  progress: Progress,
+  current: PuzzleId,
+  order: readonly PuzzleId[],
+  today: number,
+  completionShowing: boolean,
+): FinishAction | null {
+  if (current !== order[order.length - 1] || !allPuzzlesDone(progress, order)) {
+    return null;
+  }
+  if (!completionShowing) {
+    return 'finish';
+  }
+  return dailyCompletedToday(progress.daily, today) ? 'done' : 'today';
+}
+
+/** The completion state's lines: the summary, what's next, and the streak (null at 0). */
+export function completionLines(
+  progress: Progress,
+  order: readonly PuzzleId[],
+  today: number,
+): { headline: string; summary: string; next: string; streak: string | null } {
+  const { solved, revealed } = doneCounts(progress, order);
+  const streak = currentStreak(progress.daily, today);
+  return {
+    headline: COMPLETE.headline(order.length),
+    summary: revealed === 0 ? COMPLETE.allSolved : COMPLETE.summary(solved, revealed),
+    next: dailyCompletedToday(progress.daily, today) ? COMPLETE.comeBackTomorrow : COMPLETE.dailyOpen,
+    streak: streak > 0 ? WELCOME.streak(streak) : null,
+  };
 }
 
 /**
@@ -187,8 +245,11 @@ export function welcomeLines(
     daily,
     // Done today (solved, or revealed on a bridged day): nothing to nudge.
     streak: streak === 0 ? null : doneToday ? WELCOME.streak(streak) : `${WELCOME.streak(streak)}. ${WELCOME.streakAtRisk}`,
-    practice:
-      revealed > 0
+    practice: allPuzzlesDone(progress, order)
+      ? revealed > 0
+        ? WELCOME.allDoneWithAnswers(order.length, revealed)
+        : WELCOME.allDone(order.length)
+      : revealed > 0
         ? WELCOME.practiceProgressWithAnswers(completed, order.length, revealed)
         : WELCOME.practiceProgress(completed, order.length),
     save: saveWorks ? null : WELCOME.saveUnavailable,
