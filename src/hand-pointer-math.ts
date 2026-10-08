@@ -73,7 +73,7 @@ export function smoothingAlpha(deltaSeconds: number): number {
 export type FreezeEvent = 'none' | 'started' | 'expired';
 
 /** Why a pointer press was refused (see `PinchFreeze.pinchStart`, `PinchMotion`), or '' when it may press. */
-export type PressBlock = '' | 'stale' | 'flicker' | 'repeat' | 'no-opening';
+export type PressBlock = '' | 'stale' | 'flicker' | 'repeat' | 'no-opening' | 'start-open' | 'not-visible';
 
 /**
  * A real pinch is a motion: the thumb and index tips open past this, then
@@ -87,6 +87,12 @@ export type PressBlock = '' | 'stale' | 'flicker' | 'repeat' | 'no-opening';
  * 1.3-2.0 cm. 2.2 cm keeps a 0.4 cm margin under the real ones.
  */
 export const PINCH_OPEN_METERS = 0.022;
+/**
+ * NULL cells (a reversible filter, undone by Clear) take pinches from a
+ * smaller opening: on the headset (2026-10-09 03:57 log) deliberate re-pinches
+ * on a NULL cell opened only 1.6-2.1 cm.
+ */
+export const PINCH_OPEN_NULL_METERS = 0.015;
 /** The opening must come within this long before the platform's pinch starts. */
 export const PINCH_OPENING_WINDOW_SECONDS = 0.4;
 /** Tip-distance samples kept per hand (at 90 fps, ~0.7 s: more than the window). */
@@ -100,6 +106,9 @@ export const PINCH_MOTION_HISTORY = 64;
  * again (a re-arm: closed, then open). Pure state, no allocation.
  */
 export class PinchMotion {
+  /** The opening this tracker requires (PINCH_OPEN_METERS, or PINCH_OPEN_NULL_METERS). */
+  constructor(private readonly openMeters = PINCH_OPEN_METERS) {}
+
   private readonly times = new Float64Array(PINCH_MOTION_HISTORY);
   private readonly gaps = new Float64Array(PINCH_MOTION_HISTORY);
   private count = 0;
@@ -132,7 +141,7 @@ export class PinchMotion {
     this.gaps[this.head] = tipDistanceMeters;
     this.head = (this.head + 1) % PINCH_MOTION_HISTORY;
     this.count = Math.min(this.count + 1, PINCH_MOTION_HISTORY);
-    if (tipDistanceMeters < PINCH_OPEN_METERS) {
+    if (tipDistanceMeters < this.openMeters) {
       this.closedSincePress = true;
       return;
     }
@@ -278,6 +287,144 @@ export class PinchFreeze {
   /** Seconds the fingers were apart before this pinch (since the platform's pinch last ended). */
   openFor(now: number): number {
     return now - this.releasedAt;
+  }
+}
+
+// --- Pinch press constants: FROZEN (2026-10-09) ------------------------------------------
+// Tuned over five headset sessions (2026-10-09 00:33-04:29) against logged
+// real and phantom pinches. Change them only for a clear regression seen in a
+// session log (scripts/headset_log.py summary / pinches); hand-pointer.test.ts
+// pins the values. PINCH_OPEN_METERS and PINCH_OPEN_NULL_METERS above are part
+// of the set.
+
+/**
+ * A hand's pointer presses only once it has been shown for this long: a hand
+ * resting in the lap or at the side (pointer off) never presses, nor one
+ * just raised.
+ */
+export const POINTER_PRESS_MIN_VISIBLE_SECONDS = 0.2;
+/**
+ * A pinch whose pointer isn't on a pressable target at its start presses
+ * the last one it was on within this long (the ray hops at small, far
+ * targets: the headset log had it switching between a NULL cell, the result
+ * and a slab every ~250 ms).
+ */
+export const PINCH_TARGET_LOCK_SECONDS = 0.25;
+/** Recenter acts only when held this long (a stray pinch moved the whole group). */
+export const RECENTER_HOLD_SECONDS = 0.6;
+/**
+ * The platform's pinch must start with the tips at most this far apart: a
+ * headset log (2026-10-09 02:57) had Hint pressed by a pinch reported at
+ * 3.4 cm as the pointer swept onto it; intended presses started at 0.3-1.9 cm,
+ * and a few just-raised hands' real attempts at 2.1-2.2 cm (04:22 log), so 2.5.
+ */
+export const PINCH_START_MAX_METERS = 0.025;
+/**
+ * A clear pinch: after the platform's pinch starts, the tips close to at
+ * most PINCH_CLOSED_METERS and stay there PINCH_CLOSED_HOLD_SECONDS, within
+ * PINCH_CLOSE_WINDOW_SECONDS of the start -- or, a quick tap, the pinch ends
+ * within the window having reached it. Only then does it press. The
+ * 2026-10-09 03:57 log: every deliberate pinch reached 1.8 cm (narrowest
+ * 0.2-1.8, median 1.0), a quarter lasted under 122 ms, and 1.2 cm for 60 ms
+ * took 3-4 pinches on LEFT and on NULL cells.
+ */
+export const PINCH_CLOSED_METERS = 0.018;
+export const PINCH_CLOSED_HOLD_SECONDS = 0.04;
+/** 0.5 s, not 0.3: a slow real pinch (04:25:00 log) closed after 0.3 s. */
+export const PINCH_CLOSE_WINDOW_SECONDS = 0.5;
+
+/**
+ * Whether a hand's platform pinch may start a press (before it closes):
+ * '' if so; else why not. `motion`: PinchMotion's verdict; `startGap`: the
+ * tips' distance at the start (null: untracked); `visibleFor`: seconds the
+ * hand's pointer has been shown.
+ */
+export function pinchStartVerdict(motion: boolean, startGap: number | null, visibleFor: number): PressBlock {
+  if (visibleFor < POINTER_PRESS_MIN_VISIBLE_SECONDS) {
+    return 'not-visible';
+  }
+  if (!motion) {
+    return 'no-opening';
+  }
+  if (startGap === null || startGap > PINCH_START_MAX_METERS) {
+    return 'start-open';
+  }
+  return '';
+}
+
+/** A pending pinch press, frame by frame: still closing, press now, or dropped (it didn't close, or ended first). */
+export type PinchConfirmStep = 'pending' | 'press' | 'no-close' | 'released';
+
+/**
+ * One hand's pinch from its platform start: whether it becomes a clear
+ * pinch (see PINCH_CLOSED_METERS), and -- for the log, on any pinch -- its
+ * narrowest tip distance and how long the tips stayed closed. Pure state.
+ */
+export class PinchConfirm {
+  /** A press is waiting for the pinch to close. */
+  pending = false;
+  /** The current (or last) pinch: when it started, its narrowest tip distance, and seconds closed. */
+  startAt = -Infinity;
+  minGap = Infinity;
+  closedFor = 0;
+  private closedSince = -Infinity;
+
+  /** The platform's pinch started; `press`: it may press once it closes. */
+  start(now: number, gap: number | null, press: boolean): void {
+    this.pending = press;
+    this.startAt = now;
+    this.minGap = gap ?? Infinity;
+    this.closedFor = 0;
+    this.closedSince = gap !== null && gap <= PINCH_CLOSED_METERS ? now : -Infinity;
+  }
+
+  /** One frame while the pinch is held (`selecting`), with the tips' distance (null: untracked). */
+  step(now: number, gap: number | null, selecting: boolean): PinchConfirmStep {
+    if (gap !== null) {
+      this.minGap = Math.min(this.minGap, gap);
+    }
+    const closed = gap !== null && gap <= PINCH_CLOSED_METERS;
+    if (closed && this.closedSince === -Infinity) {
+      this.closedSince = now;
+    } else if (!closed && this.closedSince !== -Infinity) {
+      this.closedFor += now - this.closedSince;
+      this.closedSince = -Infinity;
+    }
+    if (!this.pending) {
+      return 'pending';
+    }
+    if (!selecting) {
+      this.pending = false;
+      // A quick tap: it ended within the window, having closed.
+      return this.minGap <= PINCH_CLOSED_METERS && now - this.startAt <= PINCH_CLOSE_WINDOW_SECONDS + 1e-9 ? 'press' : 'released';
+    }
+    if (closed && now - this.closedSince >= PINCH_CLOSED_HOLD_SECONDS - 1e-9) {
+      this.pending = false;
+      return 'press';
+    }
+    if (now - this.startAt > PINCH_CLOSE_WINDOW_SECONDS) {
+      this.pending = false;
+      return 'no-close';
+    }
+    return 'pending';
+  }
+
+  /**
+   * One frame of the platform's pinch, as the join system runs it: while held
+   * (`selecting`), and on the frame it ends (`selectEnd`), where a quick tap
+   * presses. 'press' at most once per pinch. (A headset log showed taps
+   * ignored when only the held path was acted on.)
+   */
+  frame(now: number, gap: number | null, selecting: boolean, selectEnd: boolean): PinchConfirmStep {
+    if (selectEnd) {
+      return this.step(now, gap, false);
+    }
+    return selecting ? this.step(now, gap, true) : 'pending';
+  }
+
+  /** Seconds the tips have been closed in this pinch (for the log at its end). */
+  closedSeconds(now: number): number {
+    return this.closedFor + (this.closedSince === -Infinity ? 0 : now - this.closedSince);
   }
 }
 

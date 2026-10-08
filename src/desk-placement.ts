@@ -408,15 +408,17 @@ export class DeskPlacementSystem
    * The Recenter button: starts the "Look straight ahead" countdown
    * (recenter-countdown.ts); the recenter itself runs at its end, facing
    * where the head then looks (the median yaw of its last moments). A press
-   * during a countdown is ignored.
+   * during a countdown cancels it.
    */
   requestRecenter(button?: Vector3): void {
     if (!this.sessionActive) {
       return;
     }
     if (this.countdown.active) {
+      this.countdown.cancel();
+      this.prompt.hide();
       if (import.meta.env.DEV && this.debug) {
-        console.log('[DeskPlacement debug] Recenter pressed during its countdown: ignored');
+        console.log('[DeskPlacement debug] recenter countdown cancelled: Recenter pressed again');
       }
       return;
     }
@@ -466,14 +468,17 @@ export class DeskPlacementSystem
     }
     this.readHeadPose();
     const step = this.countdown.step(delta, this._headYaw);
-    if (step === 'extended') {
+    if (step === 'cancelled') {
+      this.prompt.hide();
       if (import.meta.env.DEV && this.debug) {
         console.log(
-          `[DeskPlacement debug] recenter countdown: the head still faces ${yawRightDeg(this.countdown.yaw())}, more than ` +
-            `${RECENTER_TURNED_MAX_DEG} degrees toward the button: counting once more`,
+          `[DeskPlacement debug] recenter countdown cancelled: the head looked back toward the button (it faces ` +
+            `${yawRightDeg(this.countdown.yaw())}, more than ${RECENTER_TURNED_MAX_DEG} degrees from the group toward it)`,
         );
       }
-    } else if (step === 'done') {
+      return;
+    }
+    if (step === 'done') {
       this.prompt.hide();
       this.recenterYaw = this.countdown.yaw();
       this.recenter.request('button', performance.now());

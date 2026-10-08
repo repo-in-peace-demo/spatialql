@@ -730,7 +730,26 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
   }
 
+  /** Recenter (held, or the debug key): the group glides back in front of the player (desk placement; it waits for a held slab). */
+  private recenter(path: string): void {
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`Recenter (${path})`);
+    }
+    this.bar.document.updateWorldMatrix(true, false);
+    this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
+    // After its countdown ("Look straight ahead"); the card says so once the tables move.
+    deskBridge.desk?.requestRecenter(this._point);
+    this.awaitingRecenter = true;
+  }
+
   onHoldComplete(name: string): void {
+    if (name === 'recenter') {
+      this.bar.document.updateWorldMatrix(true, false);
+      this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
+      sounds.playClick(this._point);
+      this.recenter('hold');
+      return;
+    }
     // Show answer, held its full time: the answer.
     if (name === 'hint' && this.nextHintRevealsAnswer()) {
       this.hintGate.pressed(this.clock);
@@ -1354,8 +1373,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   /** One press on a bar button from any path; `chip` says which filter chip (else -1). */
   private press(button: BarButton, path: PressPath, chip = -1): void {
-    // Exit only ends the session when held (the join system times the hold); a press does nothing.
-    if (button === 'exit') {
+    // Exit and Recenter act only when held (the join system times the hold); a press does nothing
+    // (the debug key still recenters).
+    if (button === 'exit' || (button === 'recenter' && path !== 'debug-key')) {
       return;
     }
     if (this.clock - this.lastPress < BAR_PRESS_DEBOUNCE_SECONDS) {
@@ -1425,13 +1445,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (button === 'prev') {
       this.prev();
     } else if (button === 'recenter') {
-      // The group glides back in front of the player (desk placement; it waits for a held slab).
-      if (import.meta.env.DEV && this.debug) {
-        this.debug.note(`Recenter pressed (${path})`);
-      }
-      // After its countdown ("Look straight ahead"); the card says so once the tables move.
-      deskBridge.desk?.requestRecenter(this._point);
-      this.awaitingRecenter = true;
+      this.recenter(path);
     } else if (button === 'hint') {
       this.showHint();
     } else if (button === 'next') {

@@ -6,9 +6,10 @@
  * button every time -- a headset log drifted it 0° -> -93° in nine presses.
  * So a press starts a countdown ("Look straight ahead"), and the recenter
  * uses the head's yaw at its end: the median over the last
- * RECENTER_YAW_WINDOW_SECONDS, smoothing small movements. If the head is
- * still turned more than RECENTER_TURNED_MAX_DEG toward the button then, the
- * countdown runs once more; after that it proceeds.
+ * RECENTER_YAW_WINDOW_SECONDS, smoothing small movements. Looking back
+ * toward the button (more than RECENTER_TURNED_MAX_DEG, after the first
+ * RECENTER_LOOK_AWAY_SECONDS to look away) cancels it, as does pressing
+ * Recenter again (the caller's `cancel`).
  *
  * Yaws are radians, + to the left (three.js's rotation about +Y).
  */
@@ -16,11 +17,13 @@
 export const RECENTER_COUNTDOWN_SECONDS = 1.5;
 export const RECENTER_YAW_WINDOW_SECONDS = 0.3;
 export const RECENTER_TURNED_MAX_DEG = 25;
+/** Time to look away from the button after pressing it, before looking back at it cancels. */
+export const RECENTER_LOOK_AWAY_SECONDS = 0.5;
 /** Head-yaw samples kept (at 90 fps, ~0.7 s: more than the window). */
 const SAMPLES = 64;
 
-/** One frame of the countdown: still counting, counting again (the head was still turned), or done (`yaw()`). */
-export type CountdownStep = 'counting' | 'extended' | 'done';
+/** One frame of the countdown: still counting, cancelled (the head turned back toward the button), or done (`yaw()`). */
+export type CountdownStep = 'counting' | 'cancelled' | 'done';
 
 /** The signed difference a - b, wrapped to (-pi, pi]. */
 export function yawDelta(a: number, b: number): number {
@@ -42,7 +45,6 @@ export class RecenterCountdown {
   pressYaw = 0;
   groupYaw = 0;
   buttonYaw = 0;
-  private extended = false;
   private readonly times = new Float64Array(SAMPLES);
   private readonly yaws = new Float64Array(SAMPLES);
   private readonly window = new Float64Array(SAMPLES);
@@ -54,7 +56,6 @@ export class RecenterCountdown {
   start(headYaw: number, groupYaw: number, buttonYaw: number): void {
     this.active = true;
     this.elapsed = 0;
-    this.extended = false;
     this.pressYaw = headYaw;
     this.groupYaw = groupYaw;
     this.buttonYaw = buttonYaw;
@@ -80,13 +81,12 @@ export class RecenterCountdown {
     this.yaws[this.head] = headYaw;
     this.head = (this.head + 1) % SAMPLES;
     this.count = Math.min(this.count + 1, SAMPLES);
+    if (this.elapsed >= RECENTER_LOOK_AWAY_SECONDS && this.turnedTowardButton(this.yaw())) {
+      this.active = false;
+      return 'cancelled';
+    }
     if (this.elapsed < RECENTER_COUNTDOWN_SECONDS) {
       return 'counting';
-    }
-    if (!this.extended && this.turnedTowardButton(this.yaw())) {
-      this.extended = true;
-      this.elapsed = 0;
-      return 'extended';
     }
     this.active = false;
     return 'done';

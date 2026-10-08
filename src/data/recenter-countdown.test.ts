@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   RECENTER_COUNTDOWN_SECONDS,
+  RECENTER_LOOK_AWAY_SECONDS,
   RECENTER_TURNED_MAX_DEG,
   RECENTER_YAW_WINDOW_SECONDS,
   RecenterCountdown,
@@ -12,26 +13,26 @@ const FRAME = 1 / 90;
 /** The Recenter button's direction from the eyes, relative to the group's (the column's bottom-left cell: ~39° left). */
 const BUTTON_OFFSET = 39 * DEG;
 
-/** Runs one countdown to its end with the head's yaw at each moment (`headAt(t)`, t from the press); returns the yaw it recenters to and how long it took. */
-function runCountdown(groupYaw: number, headAt: (t: number) => number): { yaw: number; seconds: number; extended: boolean } {
+/** Runs one countdown to its end with the head's yaw at each moment (`headAt(t)`, t from the press); returns the yaw it recenters to (or the group's, cancelled) and how long it took. */
+function runCountdown(groupYaw: number, headAt: (t: number) => number): { yaw: number; seconds: number; cancelled: boolean } {
   const c = new RecenterCountdown();
   c.start(headAt(0), groupYaw, groupYaw + BUTTON_OFFSET);
   let t = 0;
-  let extended = false;
   for (;;) {
     t += FRAME;
     const step = c.step(FRAME, headAt(t));
-    if (step === 'extended') {
-      extended = true;
+    if (step === 'cancelled') {
+      return { yaw: groupYaw, seconds: t, cancelled: true };
     } else if (step === 'done') {
-      return { yaw: c.yaw(), seconds: t, extended };
+      return { yaw: c.yaw(), seconds: t, cancelled: false };
     }
   }
 }
 
 describe('the Recenter countdown', () => {
-  it('counts 1.5 s, takes the median of the last 0.3 s, extends once if still turned more than 25° toward the button', () => {
+  it('counts 1.5 s, takes the median of the last 0.3 s; looking back over 25° toward the button after 0.5 s cancels', () => {
     expect(RECENTER_COUNTDOWN_SECONDS).toBe(1.5);
+    expect(RECENTER_LOOK_AWAY_SECONDS).toBe(0.5);
     expect(RECENTER_YAW_WINDOW_SECONDS).toBe(0.3);
     expect(RECENTER_TURNED_MAX_DEG).toBe(25);
   });
@@ -53,16 +54,22 @@ describe('the Recenter countdown', () => {
     }
   });
 
-  it('a head still on the button gets one more countdown, then it proceeds there (the player chose it)', () => {
+  it('a head still on the button cancels it once the look-away time is up (nothing moves)', () => {
     const result = runCountdown(0, () => BUTTON_OFFSET);
-    expect(result.extended).toBe(true);
-    expect(result.seconds).toBeCloseTo(2 * RECENTER_COUNTDOWN_SECONDS, 1);
-    expect(result.yaw / DEG).toBeCloseTo(39, 6);
+    expect(result.cancelled).toBe(true);
+    expect(result.seconds).toBeCloseTo(RECENTER_LOOK_AWAY_SECONDS, 1);
+  });
+
+  it('looking back at the button mid-countdown cancels it', () => {
+    const result = runCountdown(0, (t) => (t < 0.9 ? 0 : BUTTON_OFFSET));
+    expect(result.cancelled).toBe(true);
+    expect(result.seconds).toBeGreaterThan(0.9);
+    expect(result.seconds).toBeLessThan(RECENTER_COUNTDOWN_SECONDS);
   });
 
   it('a head turned the other way (away from the button) is not held back', () => {
     const result = runCountdown(0, () => -30 * DEG);
-    expect(result.extended).toBe(false);
+    expect(result.cancelled).toBe(false);
     expect(result.seconds).toBeCloseTo(RECENTER_COUNTDOWN_SECONDS, 1);
     expect(result.yaw / DEG).toBeCloseTo(-30, 6);
   });

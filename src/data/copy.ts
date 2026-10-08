@@ -339,7 +339,8 @@ export const BAR = {
    * The Recenter icon button's label, shown above it while a fingertip or a
    * hand's ray hovers it (it brings the tables back in front of you).
    */
-  recenter: 'Recenter',
+  /** Recenter's hover label: it acts only when held (a stray pinch once moved the whole group). */
+  recenter: 'Hold to recenter',
   /** Shown centered in view for a moment after Recenter is pressed: it recenters on where you then look. */
   recenterPrompt: 'Look straight ahead',
   /**

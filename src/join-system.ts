@@ -98,9 +98,19 @@ import {
   pitchDeg,
   PinchFreeze,
   HoldSelect,
+  PINCH_CLOSE_WINDOW_SECONDS,
+  PINCH_CLOSED_HOLD_SECONDS,
+  PINCH_CLOSED_METERS,
+  PINCH_START_MAX_METERS,
+  PinchConfirm,
+  pinchStartVerdict,
+  POINTER_PRESS_MIN_VISIBLE_SECONDS,
   PinchMotion,
   PINCH_OPEN_METERS,
+  PINCH_OPEN_NULL_METERS,
   PINCH_OPENING_WINDOW_SECONDS,
+  PINCH_TARGET_LOCK_SECONDS,
+  RECENTER_HOLD_SECONDS,
   pointerRaised,
   PoseHistory,
   smoothingAlpha,
@@ -341,7 +351,7 @@ const NULL_ACTIVATION_DEBOUNCE_SECONDS = 0.3;
 /** A pinch selects a NULL cell within this of it in plane (and CONTROL_PINCH_DEPTH_METERS off it). */
 const NULL_PINCH_MARGIN_METERS = 0.01;
 /** A ray hit or fingertip counts as on a NULL cell within this of its rectangle. */
-const NULL_RAY_TOLERANCE_METERS = 0.003;
+const NULL_RAY_TOLERANCE_METERS = 0.01;
 /** A ray hit counts as on a control option within this of its rectangle (bar buttons: the bar's pinch margin). */
 const RAY_BUTTON_TOLERANCE_METERS = 0.005;
 // The hand pointer's look: a thin ray and a cursor dot, and when it hits nothing, a short stub.
@@ -428,10 +438,27 @@ type RayHit = {
   name: string;
   point: Vector3;
   slab: SourceSlab | null;
+  /** A source slab the ray passed through to reach its target (slabs never block a press), or null. */
+  through: SourceSlab | null;
 };
 
 function makeRayHit(): RayHit {
-  return { target: 'none', distance: Infinity, option: 'inner', row: -1, column: -1, name: '', point: new Vector3(), slab: null };
+  return {
+    target: 'none',
+    distance: Infinity,
+    option: 'inner',
+    row: -1,
+    column: -1,
+    name: '',
+    point: new Vector3(),
+    slab: null,
+    through: null,
+  };
+}
+
+/** Whether a ray hit is something a press acts on (not nothing, a slab, or the result between its NULL cells). */
+function pressable(hit: RayHit): boolean {
+  return hit.target !== 'none' && hit.target !== 'slab' && hit.target !== 'result';
 }
 
 function copyRayHit(from: RayHit, to: RayHit): void {
@@ -443,6 +470,7 @@ function copyRayHit(from: RayHit, to: RayHit): void {
   to.name = from.name;
   to.point.copy(from.point);
   to.slab = from.slab;
+  to.through = from.through;
 }
 
 /**
@@ -486,6 +514,8 @@ function pointerOffText(reason: PointerOffReason | ''): string {
 /** One hand's pointer: on or off (and why), its smoothed or frozen ray, and what it hits. */
 type HandPointer = {
   active: boolean;
+  /** When it was last shown (seconds, `tweens.now`): it presses only after POINTER_PRESS_MIN_VISIBLE_SECONDS. */
+  activeSince: number;
   /** The ray is frozen this frame (a pinch closing; see `freeze`). */
   frozen: boolean;
   /** The pre-pinch freeze and the one-press-per-pinch gate. */
@@ -512,6 +542,7 @@ type HandPointer = {
 function makeHandPointer(): HandPointer {
   return {
     active: false,
+    activeSince: Infinity,
     frozen: false,
     freeze: new PinchFreeze(),
     stale: new StaleRay(),
@@ -760,12 +791,27 @@ export class JoinSystem
   private readonly holdSelect = { left: new HoldSelect(), right: new HoldSelect() };
   /** Per hand: the hold button its current select started on ('' if none). */
   private readonly holdTarget = { left: '', right: '' };
-  /** Per hand: its pinch motion (hand-pointer-math.ts), sampled every frame. */
+  /** Per hand: its pinch motion (hand-pointer-math.ts), sampled every frame; NULL cells' takes a smaller opening. */
   private readonly pinchMotion = { left: new PinchMotion(), right: new PinchMotion() };
+  private readonly pinchMotionNull = { left: new PinchMotion(PINCH_OPEN_NULL_METERS), right: new PinchMotion(PINCH_OPEN_NULL_METERS) };
+  /** Per hand: the last pressable target its pointer was on, and when (the target lock: PINCH_TARGET_LOCK_SECONDS). */
+  private readonly recentTarget = { left: makeRayHit(), right: makeRayHit() };
+  private readonly recentTargetAt = { left: -Infinity, right: -Infinity };
+  /** Per hand: this frame's pinch took its target from the lock, this many seconds old (-1: its pointer was on it). */
+  private readonly pinchTargetAge = { left: -1, right: -1 };
   /** Per hand: whether this frame's select start may press (a controller's trigger, or a hand's pinch motion). */
   private readonly pinchStartOk = { left: false, right: false };
   /** Dev log: the widest tip distance before this frame's pinch start (meters). */
   private readonly pinchStartWidest = { left: -1, right: -1 };
+  /** Per hand: why this frame's pinch start may not press ('' if it may), and its tips' distance then (meters; -1 untracked). */
+  private readonly pinchStartBlock: Record<(typeof HANDS)[number], PressBlock> = { left: '', right: '' };
+  private readonly pinchStartGap = { left: -1, right: -1 };
+  /** Per hand: the current pinch, confirmed as a clear pinch before it presses (PinchConfirm). */
+  private readonly pinchConfirm = { left: new PinchConfirm(), right: new PinchConfirm() };
+  /** Per hand: what the pointer was on at the pinch's start -- what the press goes to once it's confirmed. */
+  private readonly pinchTarget = { left: makeRayHit(), right: makeRayHit() };
+  /** Per hand: its pending pinch was confirmed this frame (updateSelect presses `pinchTarget`). */
+  private readonly pinchConfirmed = { left: false, right: false };
   private readonly _motionThumb = new Vector3();
   private readonly _motionIndex = new Vector3();
   private holdRing!: Mesh<RingGeometry, MeshBasicMaterial>;
@@ -1019,6 +1065,8 @@ export class JoinSystem
         this.holdSelect.right.reset();
         this.pinchMotion.left.reset();
         this.pinchMotion.right.reset();
+        this.pinchMotionNull.left.reset();
+        this.pinchMotionNull.right.reset();
         this.layoutDirty = true;
       }),
     );
@@ -1132,15 +1180,21 @@ export class JoinSystem
     this.recenterWasGliding = gliding;
   }
 
-  /** The Recenter button, from any path (poke, pinch, ray, click); counts once per press. */
+  /** Free play's Recenter button pressed (poke, ray, click): it acts only when held (updateHolds), so nothing. */
   private pressRecenter(path: PressPath): void {
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`Recenter pressed (${path}): it acts only when held ${RECENTER_HOLD_SECONDS} s`);
+    }
+  }
+
+  /** Recenter, held its full time (free play): the group comes back in front of you (after its countdown). */
+  private recenterNow(path: string): void {
     if (this.tweens.now - this.lastRecenterPress < CONTROL_PRESS_DEBOUNCE_SECONDS) {
       return;
     }
     this.lastRecenterPress = this.tweens.now;
     if (import.meta.env.DEV && this.debug) {
-      touchProbe.pressed('recenter', path);
-      this.debug.note(`Recenter pressed (${path})`);
+      this.debug.note(`Recenter (${path})`);
     }
     const bar = this.freeBar;
     if (bar) {
@@ -1292,6 +1346,9 @@ export class JoinSystem
     if (name === 'exit') {
       return EXIT_HOLD_SECONDS;
     }
+    if (name === 'recenter') {
+      return RECENTER_HOLD_SECONDS;
+    }
     return bar.holdButton?.name === name ? bar.holdButton.seconds : 0;
   }
 
@@ -1322,7 +1379,7 @@ export class JoinSystem
         if (import.meta.env.DEV && this.debug) {
           this.debug.note(`${this.holdName} hold cancelled after ${this.holdHeld.toFixed(2)} s`);
         }
-        if (this.holdName !== 'exit') {
+        if (this.holdName !== 'exit' && this.challengeLayout) {
           joinBridge.challenge?.onHoldCancelled(this.holdName);
         }
       }
@@ -1366,6 +1423,8 @@ export class JoinSystem
       this.exitEnded = true;
       sounds.playClick(this._a);
       void this.xrManager.getSession()?.end();
+    } else if (name === 'recenter' && !this.challengeLayout) {
+      this.recenterNow('hold');
     } else {
       joinBridge.challenge?.onHoldComplete(name);
     }
@@ -1393,7 +1452,8 @@ export class JoinSystem
     const selectStart = !!gamepad?.getSelectStart();
     let on: BarButtonRect | null = null;
     if (hold.needsOnTarget(selecting, selectStart)) {
-      on = this.selectOn(hand, source, bar);
+      // A hand's pinch starts on its locked target (what its pointer showed at the start, or just before).
+      on = this.selectOn(hand, source, bar, selectStart && !!source.hand ? this.pinchTarget[hand] : null);
       if (selectStart) {
         this.holdTarget[hand] = on?.name ?? '';
       } else if (on && on.name !== this.holdTarget[hand]) {
@@ -1429,30 +1489,30 @@ export class JoinSystem
   }
 
   /** The hold button `hand`'s select is on now: its pointer (a hand), or its ray (a controller); or null. */
-  private selectOn(hand: (typeof HANDS)[number], source: XRInputSource, bar: PlacedBar): BarButtonRect | null {
-    let button: BarButtonRect | undefined;
+  private selectOn(
+    hand: (typeof HANDS)[number],
+    source: XRInputSource,
+    bar: PlacedBar,
+    locked: RayHit | null,
+  ): BarButtonRect | null {
+    let hit: RayHit | null = null;
     if (source.hand) {
       // A pinch through the hand pointer (a pinch right at a button does nothing: only a fingertip presses there).
       const pointer = this.pointers[hand];
-      if (pointer.active) {
-        button =
-          pointer.hit.target === 'exit'
-            ? bar.buttons.find((candidate) => candidate.name === 'exit')
-            : pointer.hit.target === 'bar'
-              ? bar.buttons[pointer.barIndex]
-              : undefined;
-      }
+      hit = locked ?? (pointer.active ? pointer.hit : null);
     } else if (this.readRay(hand)) {
       // A controller: its ray on it.
       this.castRay(false, HAND_POINTER_MAX_METERS);
-      const hit = this._rayHit;
-      button =
-        hit.target === 'exit'
-          ? bar.buttons.find((candidate) => candidate.name === 'exit')
-          : hit.target === 'bar'
-            ? bar.buttons[this.barButtonIndexAt(hit.point)]
-            : undefined;
+      hit = this._rayHit;
     }
+    // Free play's bar targets are 'recenter' / 'exit'; the puzzle bar's, its buttons.
+    const button: BarButtonRect | undefined = !hit
+      ? undefined
+      : hit.target === 'exit' || hit.target === 'recenter'
+        ? bar.buttons.find((candidate) => candidate.name === hit.target)
+        : hit.target === 'bar'
+          ? bar.buttons[this.barButtonIndexAt(hit.point)]
+          : undefined;
     if (!button || this.holdSeconds(bar, button.name) === 0) {
       return null;
     }
@@ -1756,10 +1816,68 @@ export class JoinSystem
         !!source?.hand &&
         readJointsPoint(this.world, this.player, source, THUMB_TIP, this._motionThumb) &&
         readJointsPoint(this.world, this.player, source, INDEX_TIP, this._motionIndex);
-      this.pinchMotion[hand].sample(tracked ? this._motionThumb.distanceTo(this._motionIndex) : null, now);
-      if (this.input.xr.gamepads[hand]?.getSelectStart()) {
-        this.pinchStartOk[hand] = !source?.hand || this.pinchMotion[hand].isPinchMotion(now);
+      const gap = tracked ? this._motionThumb.distanceTo(this._motionIndex) : null;
+      this.pinchMotion[hand].sample(gap, now);
+      this.pinchMotionNull[hand].sample(gap, now);
+      const gamepad = this.input.xr.gamepads[hand];
+      const confirm = this.pinchConfirm[hand];
+      this.pinchConfirmed[hand] = false;
+      const pointer = this.pointers[hand];
+      // The target lock: the last pressable target this hand's pointer was on (last frame's hit).
+      if (pointer.active && pressable(pointer.hit) && !gamepad?.getSelectStart()) {
+        copyRayHit(pointer.hit, this.recentTarget[hand]);
+        this.recentTargetAt[hand] = now;
+      }
+      if (gamepad?.getSelectStart()) {
+        // Its target: what the pointer is on, or (if that isn't pressable) what it was on just before.
+        const target = this.pinchTarget[hand];
+        this.pinchTargetAge[hand] = -1;
+        if (pointer.active && !pressable(pointer.hit) && now - this.recentTargetAt[hand] <= PINCH_TARGET_LOCK_SECONDS) {
+          copyRayHit(this.recentTarget[hand], target);
+          this.pinchTargetAge[hand] = now - this.recentTargetAt[hand];
+        } else {
+          copyRayHit(pointer.hit, target);
+          if (!pointer.active) {
+            target.target = 'none';
+          }
+        }
+        // A hand's pinch may press only from a pointer shown long enough, as a pinch motion (NULL cells: a smaller
+        // opening), starting closed enough.
+        const visibleFor = pointer.active ? now - pointer.activeSince : 0;
+        const motion = (target.target === 'null' ? this.pinchMotionNull : this.pinchMotion)[hand].isPinchMotion(now);
+        this.pinchStartBlock[hand] = source?.hand ? pinchStartVerdict(motion, gap, visibleFor) : '';
+        this.pinchStartOk[hand] = this.pinchStartBlock[hand] === '';
         this.pinchStartWidest[hand] = source?.hand ? this.pinchMotion[hand].widest(now) : -1;
+        this.pinchStartGap[hand] = gap ?? -1;
+        // Its press (armed by updateSelect) waits until it closes.
+        confirm.start(now, gap, false);
+      } else if (source?.hand) {
+        // Held, or ending this frame (a quick tap presses on its release).
+        const selectEnd = !!gamepad?.getSelectEnd();
+        const step = confirm.frame(now, gap, !!gamepad?.getSelecting(), selectEnd);
+        if (step === 'press') {
+          this.pinchConfirmed[hand] = true;
+        } else if (step === 'no-close') {
+          // Not a clear pinch: it presses nothing and holds nothing.
+          this.holdSelect[hand].reset();
+          if (import.meta.env.DEV && this.debug) {
+            this.debug.note(
+              `${hand} pinch dropped: never closed to ${cm(PINCH_CLOSED_METERS)} for ${PINCH_CLOSED_HOLD_SECONDS * 1000} ms ` +
+                `within ${PINCH_CLOSE_WINDOW_SECONDS} s (narrowest ${cm(confirm.minGap)})`,
+            );
+          }
+        } else if (step === 'released' && import.meta.env.DEV && this.debug) {
+          this.debug.note(`${hand} pinch dropped: released before it closed (narrowest ${cm(confirm.minGap)})`);
+        }
+      }
+      if (source?.hand && gamepad?.getSelectEnd()) {
+        if (import.meta.env.DEV && this.debug && Number.isFinite(confirm.startAt)) {
+          this.debug.note(
+            `${hand} pinch ended after ${Math.round((now - confirm.startAt) * 1000)} ms: narrowest ` +
+              `${Number.isFinite(confirm.minGap) ? cm(confirm.minGap) : 'untracked'}, closed (<= ${cm(PINCH_CLOSED_METERS)}) ` +
+              `${Math.round(confirm.closedSeconds(now) * 1000)} ms`,
+          );
+        }
       }
     }
   }
@@ -4246,19 +4364,33 @@ export class JoinSystem
       return;
     }
     for (const hand of HANDS) {
+      // A pinch confirmed as clear this frame: it presses what its pointer was on when it started.
+      if (this.pinchConfirmed[hand]) {
+        this.pinchConfirmed[hand] = false;
+        const now = this.tweens.now;
+        this.pointers[hand].freeze.pressed(now);
+        this.pinchMotion[hand].pressed();
+        this.pinchMotionNull[hand].pressed();
+        if (import.meta.env.DEV && this.debug) {
+          const target = this.pinchTarget[hand];
+          this.debug.note(
+            `${hand} pinch confirmed after ${Math.round((now - this.pinchConfirm[hand].startAt) * 1000)} ms ` +
+              `(closed to ${cm(this.pinchConfirm[hand].minGap)}): pressing ${target.name || target.target}` +
+              (target.through ? `; the press ray passed through the ${target.through.id} slab` : ''),
+          );
+        }
+        this.pressHit(hand, this.pinchTarget[hand], 'ray');
+      }
       if (!this.input.xr.gamepads[hand]?.getSelectStart()) {
         continue;
       }
       const source = this.input.xr.getPrimaryInputSource(hand);
       if (source?.hand) {
-        // Only a pinch motion presses: a resting hand's flickering pinch never does (PinchMotion).
+        // Only from a pointer shown long enough, as a pinch motion, starting closed enough (pinchStartVerdict).
         if (!this.pinchStartOk[hand]) {
           if (import.meta.env.DEV && this.debug) {
             this.notePointerPinch(hand, this.pointers[hand], controlLive);
-            this.debug.note(
-              `${hand} pinch ignored: no opening motion (widest ${this.widestNote(hand)} in the last ` +
-                `${PINCH_OPENING_WINDOW_SECONDS} s; needs ${cm(PINCH_OPEN_METERS)}, opened again after a press)`,
-            );
+            this.debug.note(`${hand} pinch ignored: ${this.pinchBlockNote(hand)}`);
           }
           continue;
         }
@@ -4274,13 +4406,15 @@ export class JoinSystem
           // Every platform pinch may press once: never from a stale pose, nor a flicker of a pinch that pressed.
           const now = this.tweens.now;
           const block = pointer.freeze.pinchStart(pointer.fresh, now);
-          const presses = pointer.hit.target !== 'none' && pointer.hit.target !== 'slab' && pointer.hit.target !== 'result';
+          const target = this.pinchTarget[hand];
+          if (import.meta.env.DEV && this.debug) {
+            this.noteNullAim(hand, target);
+          }
           if (block === '') {
-            if (presses) {
-              pointer.freeze.pressed(now);
-              this.pinchMotion[hand].pressed();
+            // It presses once it closes (samplePinchMotion), what the pointer showed at its start (or just before).
+            if (pressable(target)) {
+              this.pinchConfirm[hand].pending = true;
             }
-            this.pressHit(hand, pointer.hit, 'ray');
           } else if (import.meta.env.DEV && this.debug) {
             this.notePressBlocked(hand, pointer, block, now);
           }
@@ -4297,10 +4431,61 @@ export class JoinSystem
         this.debug.note(
           `${hand} ray select (controller): ` +
             (hit.target === 'none' ? 'hit nothing' : `${hit.name} at ${hit.distance.toFixed(2)} m`) +
-            (hit.target === 'slab' || hit.target === 'result' ? ' (not a button: no press)' : ''),
+            (hit.target === 'slab' || hit.target === 'result' ? ' (not a button: no press)' : '') +
+            (hit.through ? `; it passed through the ${hit.through.id} slab` : ''),
         );
       }
       this.pressHit(hand, hit, 'ray');
+    }
+  }
+
+  /**
+   * Dev log, at a pinch start: the target lock (if the target came from just
+   * before), a slab the ray passed through, and -- on the result -- how far
+   * the ray was from the nearest NULL cell (it counts within NULL_RAY_TOLERANCE_METERS).
+   */
+  private noteNullAim(hand: (typeof HANDS)[number], target: RayHit): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    const parts: string[] = [];
+    const age = this.pinchTargetAge[hand];
+    if (age >= 0) {
+      parts.push(`target locked from ${Math.round(age * 1000)} ms before (${target.name || target.target})`);
+    }
+    if (target.through) {
+      parts.push(`the press ray passed through the ${target.through.id} slab`);
+    }
+    const view = this.active;
+    if (view && (target.target === 'null' || target.target === 'result') && this.nearestNullCell(view, target.point)) {
+      const { row, column, distance } = this._nullHit;
+      parts.push(
+        `ray ${cm(distance)} from the nearest NULL cell (row ${row}, column ${column}; counts within ${cm(NULL_RAY_TOLERANCE_METERS)})`,
+      );
+    }
+    if (parts.length > 0) {
+      this.debug.note(`${hand} pinch aim: ${parts.join('; ')}`);
+    }
+  }
+
+  /** Dev log: why this frame's pinch start may not press. */
+  private pinchBlockNote(hand: (typeof HANDS)[number]): string {
+    if (!import.meta.env.DEV) {
+      return '';
+    }
+    const pointer = this.pointers[hand];
+    switch (this.pinchStartBlock[hand]) {
+      case 'not-visible':
+        return pointer.active
+          ? `pointer shown only ${Math.round((this.tweens.now - pointer.activeSince) * 1000)} ms (needs ${POINTER_PRESS_MIN_VISIBLE_SECONDS * 1000} ms)`
+          : `pointer not shown (${pointer.offReason || 'off'})`;
+      case 'start-open':
+        return `tips ${this.pinchStartGap[hand] < 0 ? 'untracked' : cm(this.pinchStartGap[hand])} apart at its start (needs <= ${cm(PINCH_START_MAX_METERS)})`;
+      default:
+        return (
+          `no opening motion (widest ${this.widestNote(hand)} in the last ${PINCH_OPENING_WINDOW_SECONDS} s; ` +
+          `needs ${cm(PINCH_OPEN_METERS)}, opened again after a press)`
+        );
     }
   }
 
@@ -4481,6 +4666,9 @@ export class JoinSystem
     const was = p.active;
     p.active = active;
     p.offReason = reason;
+    if (active && !was) {
+      p.activeSince = this.tweens.now;
+    }
     if (!active) {
       // Unfrozen, but the press gate stays (a flicker off and on mid-pinch mustn't allow a second press).
       p.frozen = false;
@@ -4829,6 +5017,7 @@ export class JoinSystem
     hit.distance = Infinity;
     hit.name = '';
     hit.slab = null;
+    hit.through = null;
     const local = this._rayLocal;
     // Names are only for the dev log (the pointer casts every frame: no strings in production).
     const naming = import.meta.env.DEV && !!this.debug;
@@ -4902,19 +5091,30 @@ export class JoinSystem
       }
     }
 
+    // Source slabs never block a press: the ray passes through them to what's
+    // behind (the result, the card, the controls); a slab is the hit only when
+    // nothing is behind it (its hover glow). Near grab is GrabSystem's, unaffected.
+    let slabHit: SourceSlab | null = null;
+    let slabDistance = Infinity;
     for (const slab of this.sources.values()) {
       const t = this.rayPlane(slab.object, local);
       if (
-        t < hit.distance &&
+        t < slabDistance &&
         Math.abs(local.x) <= slab.doc.widthMeters / 2 &&
         local.y <= slabVisualTopLocalY(slab.doc) &&
         local.y >= slabBottomLocalY(slab.doc)
       ) {
-        hit.target = 'slab';
-        hit.distance = t;
-        hit.slab = slab;
-        hit.name = naming ? `the ${slab.id} slab` : '';
+        slabHit = slab;
+        slabDistance = t;
       }
+    }
+    if (slabHit && hit.target === 'none') {
+      hit.target = 'slab';
+      hit.distance = slabDistance;
+      hit.slab = slabHit;
+      hit.name = naming ? `the ${slabHit.id} slab` : '';
+    } else if (slabHit && slabDistance < hit.distance) {
+      hit.through = slabHit;
     }
 
     // Out of range is a miss; otherwise where it hit.
