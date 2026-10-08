@@ -40,26 +40,28 @@ for the general emulator and headset workflow.
 
 ### The join-type control
 
-When the slabs dock, an **INNER | LEFT** control fades in in the band between
-the pair's top edge and the result slab, centered on the seam between the two
-slabs, right next to the SQL caption it switches. It fades out when they
-separate.
+When the slabs dock, an **INNER | LEFT** control fades in in its row of the
+control column (left of the result slab, 0.5 m from the eyes, its bottom
+level with the result's bottom; see `placeColumn` in `src/join-system.ts`).
+It fades out when they separate.
 
 - **Size:** each option is at least 4.0 cm wide and 2.5 cm tall
   (`CONTROL_OPTION_MIN_WIDTH_CM`, `CONTROL_OPTION_MIN_HEIGHT_CM`). The selected
   option is dark with light text; the other is light.
-- **Placement:** it floats `CONTROL_SLAB_CLEARANCE_METERS` (10 cm) off the slabs
-  toward your eyes and sits just above the pair's top edge in view, facing you.
-  The result slab's bottom edge stays above it in view. It's its own entity,
-  not a child of any slab.
+- **Placement:** on the column's arc around the eyes, facing them with no roll,
+  above the pair's top edge in view and at least 10 cm
+  (`CONTROL_SLAB_CLEARANCE_METERS`) from the slabs. It's its own entity, not
+  a child of any slab.
 - **No grab hazard:** every point of the control is at least 10 cm from both
   source slabs, 3 cm more than the 7 cm palm grab sphere. A palm on the control
   can't reach a slab's grab surface, and the result slab isn't grabbable, so
   pressing or pinching the control never starts a grab.
-- **Input:** it responds to a fingertip poke and a ray select (both are UIKit
-  clicks), and to a pinch whose pinch point (midway between thumb and index
-  tips) lands within 1.5 cm of an option in its plane and within 3 cm of its
-  surface. Selecting the option that's already selected changes nothing.
+- **Input:** a fingertip poke, a hand-pointer pinch, or a controller ray.
+  A hand pinch presses only as a pinch motion: the thumb and index tips opened
+  past 2.2 cm within 0.4 s before it (`PINCH_OPEN_METERS`), and again after
+  each press. A pinch right at the control (the pointer hidden) does nothing;
+  up close, only a fingertip presses. Selecting the option that's already
+  selected changes nothing.
 - The SQL caption stays on the result slab and updates when you switch.
 
 ### Seated reach and the natural gaze
@@ -69,7 +71,7 @@ along the head's yaw (it was 18°, then 8°; headset logs showed seated users
 holding their heads about level), not from the head's actual pitch when the slabs are
 placed. The whole group (source pair, control, result slab) must fit one
 vertical window centered on that gaze. Source slabs sit at 0.70 m (grabbed by
-ray as well as by hand); the band you poke (control, bar) stays within seated reach at 0.50 m. Constants are in `src/view-comfort.ts` and meant to be tuned on a
+ray as well as by hand); the control column stays at 0.50 m, left of the result. Constants are in `src/view-comfort.ts` and meant to be tuned on a
 headset:
 
 | Constant | Value | Meaning |
@@ -294,11 +296,13 @@ Once the preview shows, it survives small movements. It only drops after you
 go past looser limits for more than 0.15 s: a 9 cm gap, 12 cm of overlap, 12 cm
 out of plane, 16 cm vertical, or 35°.
 
-### 2.3 Press the control: poke, pinch, or ray
+### 2.3 Press the control: poke, or point and pinch
 
 - **Poke:** set Pose to point and push the fingertip into LEFT.
-- **Pinch:** put the pinch point on LEFT and set Pinch to 1, then 0.
-- **Ray:** point the hand's ray at LEFT from a distance and pinch.
+- **Ray:** point the hand's ray at LEFT from a distance and pinch (the emulated
+  hand opens its fingers first, so it counts as a pinch motion).
+- **Pinch up close does nothing:** with the pinch point on LEFT (the pointer
+  hidden), a pinch presses nothing.
 
 Expected, for any of the three:
 
@@ -307,16 +311,16 @@ Expected, for any of the three:
   pairings: N matched, N unmatched-left, N unmatched-right; result rows (LEFT): N
 ```
 
-Every pinch while the control is showing is also evaluated against it:
+Every hand pinch logs whether it was a pinch motion:
 
 ```
-[Join debug] <hand> pinch evaluated against the control: pinch point 0.0 cm from LEFT in plane, 0.8 cm off its surface -> selected LEFT
-[Join debug] <hand> pinch evaluated against the control: pinch point 4.2 cm from LEFT in plane, 1.1 cm off its surface -> not selected (needs <= 1.5 cm in plane and <= 3.0 cm off the surface)
+[Join debug] <hand> pinch motion: tips opened to 3.1 cm in the last 0.4 s
+[Join debug] <hand> pinch ignored: no opening motion (widest 1.4 cm in the last 0.4 s; needs 2.2 cm, opened again after a press)
 ```
 
-(Numbers are examples.) If a press should have worked and didn't, this line
-tells you how far off the pinch point was. `(already selected)` means the
-option was already active, so nothing changed.
+(Numbers are examples.) If a press should have worked and didn't, the
+second line says how far the fingers opened. Every poke press logs its
+approach and the thumb-index gap (`[Touch debug] poke press on ...`).
 
 There should be **no** `[Grab debug] … hand grabbed …` line for any of these.
 
@@ -330,7 +334,6 @@ range of every source slab). The result slab can't be grabbed at all.
 Measured in the emulator, pinching at the control's center:
 
 ```
-[Join debug] right pinch evaluated against the control: pinch point 1.8 cm from LEFT in plane, 0.9 cm off its surface -> not selected (needs <= 1.5 cm in plane and <= 3.0 cm off the surface)
 [Grab debug] right pinch: no grab - palm is 14.5 cm from the orders slab surface (beside it); move the palm within 7.0 cm.
 ```
 

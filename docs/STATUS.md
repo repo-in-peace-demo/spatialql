@@ -11,25 +11,30 @@ A seated mixed-reality SQL join for Meta Quest. Two tables, `customers` and
 `orders`, appear as slabs within arm's reach in passthrough. You pinch one,
 bring it to the other, and release: the slabs snap together, match lines fan
 out between rows with the same key, and the join result assembles above them,
-row by row, from its source rows. An INNER | LEFT control switches the join
-type; pulling a slab away undoes it.
+row by row, from its source rows. A control column on the left holds the
+INNER | LEFT switch and the puzzle buttons; pulling a slab away undoes the
+join.
 
 Live: https://spatialql.vercel.app/ (production deploys from `main`).
 
 ## Built and verified
 
 "Emulator" means verified in the IWSDK emulator (IWER) with real input
-events and logged state; nothing has been tested on a real Quest yet.
+events and logged state. "Headset" means a Quest 3S session over Wi-Fi with
+`?debug=1`, read from its log in `logs/` (sessions since 2026-10-06).
 
 | Area | What's built | Verified |
 | --- | --- | --- |
 | Placement | Slabs rest on a detected desk (or a synthetic one with `forceSurface`), or float at desk height; natural heights, bottom edges aligned. | Emulator: placement and reach logs, screenshots, nothing cut off |
-| Reach and view | Source slabs at 0.70 m (grabbed by ray as well as by hand); the band (control, bar) at 0.50 m, within the 0.60 m reach; result about 0.72–0.78 m; card 0.75 m with 1.30° text. Whole group within an 80° window around the 4° natural gaze (was 18°, then 8°; retuned from headset logs). | Emulator, all 20 puzzles: floating, group +32.6° / -29.3° from the gaze, extent 59.5–61.8°; on a desk, +26.8° / -37.3°, extent 61.0–63.7°; card at least 1.4° from every element |
+| Reach and view | Left to right: the control column (0.50 m), the result (0.85 m, pushed back to at most 0.89 m when the group is too wide), the card (0.75 m, 16 em wide, 1.30° text); the source slabs below at 0.70 m. The group is centered on straight ahead within ±42° (`VIEW_HALF_WIDTH_DEG`), and vertically within the 80° window around the 4° natural gaze. | Emulator, all 20 puzzles: cafe ±35.6°, school ±41.2°, shop and library -42.0° to +42.1° (shop's result at 0.89 m, rows 1.10°); column 2.3–2.8° left of the result and at least 3° above the slabs |
 | Text size | Sized by angle (rows 1.15°, headers 1.3°) from planned distances; ≥ 0.9 cm. | Emulator: source rows 1.10–1.12°, result 1.08–1.11° |
 | Grab | Hand pinch grabs a source slab when the palm is within 7 cm. | Emulator: grab and "no grab" reasons logged |
 | Join | Preview within 6 cm, commit on release, dock with bottoms aligned. | Emulator: grab-and-release joins, J / Shift+J |
-| Result slab | View only; above the pair; sized to its rows, grows/shrinks downward on INNER ↔ LEFT. | Emulator: J and Shift+J, INNER and LEFT, screenshots |
-| Join-type control | Between the pair and the result slab; level with the pair (roll 0°); ≥ 10 cm from the slabs. | Emulator: pinch and ray select; clearance 10.0–10.1 cm; roll 0.0°, yaw vs pair 0.0° |
+| Result slab | View only; above the pair, its bottom 1.5° above the pair's top in view; anchored by its bottom edge, so it grows upward on INNER ↔ LEFT. | Emulator: J and Shift+J, INNER and LEFT, screenshots |
+| Control column | Left of the result: Hint, Prev \| Next, INNER \| LEFT (once joined), Recenter \| Exit; Filter, its chips (one per row) or the WHERE label and Clear grow upward above Hint. On an arc around the eyes, each button facing them with no roll. Free play shows INNER \| LEFT over Recenter \| Exit. | Emulator: every button 0.50 m from the eyes, roll 0.0°; label widths tested |
+| Presses | A hand pinch presses through the hand pointer only as a pinch motion (the tips opened past 2.2 cm within 0.4 s, and again after each press); a pinch right at a button does nothing (only a fingertip poke presses there). Exit (1 s) and Show answer (0.8 s) are holds that must start on the button, with a filling ring; Hint presses at least 0.8 s apart. | Unit tests replay the headset logs' phantom pinches (no presses) and real ones (all press); emulator: pointer pinch, Show answer tap vs hold |
+| Recenter | The button shows "Look straight ahead" for 1.5 s, then recenters on the median head yaw of the last 0.3 s (once more if the head is still turned toward the button); the automatic recenters are unchanged. | Unit test: nine presses don't drift; emulator: pressed at -30°, recentered at 0° |
+| Slab release | A slab released outside preview range glides home (0.45 s). | Emulator: logged return, home extents restored |
 | Pull apart | Dragging a docked slab > 10 cm separates. | Emulator |
 | Feel | Approach glow and hum, dock snap with overshoot, line ticks and pulses, rows flying in from their source rows (row backgrounds fade in only as the cells land), unmatched rows dropping 12% of a row within their slot, resolve; ~1.15–1.2 s. Synthesized spatial sound (`src/sound.ts`), balanced: ticks 11–14 dB and the resolve ~9 dB below the snap. | Emulator: sound order and output peaks from the log; drop offsets for J / Shift+J, INNER / LEFT and five toggles (no drift); mid-flight screenshots; frame times; no long tasks at join start. Approach glow/hum not yet tried by hand. |
 | Browser support | "Open in the Meta Quest Browser" message on non-AR browsers; dismissible note on AR browsers that aren't the Quest Browser. | Unit test for detection; production preview |
@@ -47,13 +52,18 @@ events and logged state; nothing has been tested on a real Quest yet.
 | **Pinch-to-grab on** (`useHandPinchForGrab`). | Hands have no grip button; pinch is the natural grab gesture on Quest. |
 | **Reach limit 0.60 m** (`TOUCH_REACH_MAX_METERS`) for everything you touch. | Seated use, within about 2 ft; reach wins over the view limits. |
 | **Natural gaze 4°** below horizontal (`NATURAL_GAZE_PITCH_DEG`), with an 80° group window. | A fixed gaze keeps placement independent of where the user looked at session start. It was 18° (seated desk work); on the Quest 3S, seated users held their heads 2–6° down, so 8°; at the start of a later session about level to a few degrees up, with the group felt as too low, so 4°. The debug log records head pitch every 10 s for further tuning. |
+| **A pinch is a motion.** A hand pinch presses only if the fingers opened first. | On the headset, a resting pointing hand's thumb near the index made the platform's pinch flicker on and off, pressing Hint three times and holding Exit. The opening before the pinch separates real pinches (2.6–6.2 cm) from resting ones (mostly 1.3–2.0 cm); the distance at the pinch start doesn't. |
+| **Only fingertips press up close.** | Reaching in to pinch a button, the fingertip poked it first; a pinch right at a button now does nothing, and the pointer is the pinch path. |
+| **Show answer and Exit are holds.** | Irreversible or session-ending: never from a tap or a flicker. |
+| **Recenter waits for "Look straight ahead".** | The button sits left; pressing it turned the head toward it, and each recenter moved the group further left (0° to -93° in nine presses on the headset). |
 | **Text sized by angle**, not centimeters. | Slabs at arm's length were physically oversized; angular sizing keeps text readable at any distance and the group in view. |
 | **Bottoms-aligned slabs** at their natural heights. | Both rest on a real desk (nothing hovers or sinks); rows don't need to line up, since matches are shown by color and lines. |
 
 ## Open items for headset testing
 
 - Hand-tracking feel of the grab, the preview "magnet", and release drift.
-- View constants (slabs 0.70 m, band 0.50 m, 4° gaze, 80° window) at a real desk;
+- View constants (slabs 0.70 m, column 0.50 m, result 0.85 m, 4° gaze, 80°
+  window, ±42° width) at a real desk;
   the head-pitch lines in the debug log show how people actually hold their heads.
 - Text size at the 1.15° / 1.3° targets.
 - Sound, by ear: overall level and balance (measured: snap -6.9 dBFS, ticks
@@ -67,8 +77,13 @@ events and logged state; nothing has been tested on a real Quest yet.
   3S (headset log of 2026-10-06), none during play. Check whether they
   recur and what runs then (session start: placement, reference space,
   documents).
-- Poking the control (pinch and ray are verified; poke needs a real pointing
-  hand).
+- The 2.2 cm pinch-motion threshold: look for `pinch ignored` on pinches that
+  were meant, and read the new `poke press on` lines (approach and
+  thumb-index gap) to tell deliberate pokes from reaching-to-pinch ones.
+- Show answer's 0.8 s hold and the Recenter countdown, by hand.
+- From a relaxed hand, the result's bottom row at its left and right ends is
+  partly behind the docked slabs' top edges (2 cm above its bottom edge;
+  clear at 5 cm). Raising the result's floor about 2° would clear it.
 - The approach glow and hum, by moving a slab by hand.
 
 ## In progress: challenge mode
@@ -106,6 +121,11 @@ Since phase 4:
   it shows next (Hint, Another hint, Show answer).
 - **Dataset switch:** the card, bar and outline fade out with the leaving
   tables and back in once placed for the new ones (no jump after arriving).
+- **Headset rounds (2026-10-08/09):** the controls moved from a band under
+  the result to the column on its left (the band sat in the pointer's path to
+  the result); the group fits ±42°; slabs glide home when released away from
+  the dock; the hand pointer presses only on a pinch motion; Exit and Show
+  answer are holds; Recenter waits for "Look straight ahead".
 - **Dev, for the headset:** the in-headset debug panel (`?debug=1`) mirrors
   the debug lines, warnings and errors, wrapping long ones, with frame times;
   testing on a Quest over Wi-Fi is in [`DEPLOY.md`](DEPLOY.md).
@@ -134,7 +154,13 @@ IWSDK app (Vite + TypeScript):
 | File | Role |
 | --- | --- |
 | `src/desk-placement.ts` | Places the source slabs within reach and view. |
-| `src/join-system.ts` | The join: proximity and preview, dock, result slab and control placement, animation timeline and sounds, pinch-on-control. |
+| `src/join-system.ts` | The join: proximity and preview, dock, the group layout (column, result, card), animation timeline and sounds, the hand pointer, presses and holds. |
+| `src/challenge-system.ts`, `src/challenge-view.ts` | Challenge mode: puzzles, card, the control column's buttons. |
+| `src/band-arc.ts` | The column's arc around the eyes (placement and hit tests). |
+| `src/hand-pointer-math.ts` | Hand pointer rules: freeze, pinch motion, hold select. Unit-tested. |
+| `src/contact-poke.ts` | Fingertip poke detection. Unit-tested. |
+| `src/hint-gate.ts` | Hint press spacing; Show answer's hold time. Unit-tested. |
+| `src/recenter-countdown.ts`, `src/recenter-prompt.ts` | The Recenter button's countdown and its "Look straight ahead" prompt. |
 | `src/data/` | Pure data layer: tables, joins with `RowRef` lineage, SQL text, the join state machine, key tints. Unit-tested. |
 | `src/table-slab-view.ts` | Slab and control UIs (UIKit), sized from font size; per-row animation signals. |
 | `src/view-comfort.ts` | Gaze, view window, reach and text-size constants. |

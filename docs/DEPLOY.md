@@ -168,16 +168,23 @@ Redeploy after any change by running `npx vercel deploy --prod` again.
 4. Allow the permission prompts. The browser asks to use your surroundings
    (passthrough / spatial data) and hand tracking. Choose **Allow**.
 5. You're in passthrough AR. Two table slabs appear in front of you, within
-   reach, with a puzzle card above them. If a desk is detected they rest on
-   it; otherwise they float at desk height. Put your controllers down to use
-   your hands.
+   reach. Above them, left to right: the control column, the target outline
+   (where the result will appear) and the puzzle card. If a desk is detected
+   the slabs rest on it; otherwise they float at desk height. Put your
+   controllers down to use your hands.
 6. Pinch a slab with your palm close to it to grab it. Bring one table next to
-   the other until the edges glow, and release to join. The INNER | LEFT
-   control above the pair switches the join type; pull a slab away to undo.
-   Hint and Next sit beside the control.
-7. To leave, press and hold the Exit button (the last icon on the bar) for
-   a second while its ring fills; the Quest's system menu works too. The
-   welcome screen comes back, with the progress updated.
+   the other until the edges glow, and release to join; a slab released
+   anywhere else glides back home. The join type (INNER | LEFT) appears in the
+   column once joined; pull a slab away to undo.
+7. The column, top to bottom: Hint, Prev | Next, INNER | LEFT, Recenter |
+   Exit (Filter and its chips appear above Hint when the result has NULLs).
+   Press a button by pointing at it and pinching (open your fingers, then
+   pinch), or by touching it with a fingertip. A pinch right at a button does
+   nothing: up close, touch it. **Show answer** and **Exit** must be held
+   (0.8 s and 1 s) while a ring fills. **Recenter** shows "Look straight
+   ahead" for 1.5 s, then recenters on where you look.
+8. To leave, hold Exit until its ring fills; the Quest's system menu works
+   too. The welcome screen comes back, with the progress updated.
 
 A first-time user sees the same flow, starting with practice puzzle 1. The
 daily puzzle is offered once practice 1-3 are solved. **Free play** on the
