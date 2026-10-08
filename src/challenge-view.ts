@@ -24,6 +24,7 @@ import { LocateFixed } from '@pmndrs/uikit-lucide/dist/LocateFixed.js';
 import { LogOut } from '@pmndrs/uikit-lucide/dist/LogOut.js';
 import { School } from '@pmndrs/uikit-lucide/dist/School.js';
 import { ShoppingBag } from '@pmndrs/uikit-lucide/dist/ShoppingBag.js';
+import { arcPlace, BAND_ARC_RADIUS_METERS, type ArcPlacement } from './band-arc.js';
 import { CARD_GOAL_LINES, CARD_MESSAGE_LINES, cardHeadlineFontCm, cardMetrics } from './card-metrics.js';
 import type { DatasetIcon } from './data/datasets.js';
 import {
@@ -31,8 +32,10 @@ import {
   BAR_BUTTON_PADDING_EM,
   BAR_PADDING_CM,
   barButtonWidthCm,
-  barRowWidthCm,
+  DATA_METRICS,
+  HEADER_METRICS,
   MAX_FILTER_CHIPS,
+  truncateToWidth,
 } from './slab-metrics.js';
 import {
   CONTROL_OPTION_MIN_HEIGHT_CM,
@@ -278,22 +281,29 @@ export function setCardIntro(card: PuzzleCardView, lead: string, lines: readonly
 export type BarButton = 'prev' | 'hint' | 'next' | 'recenter' | 'exit' | 'clear' | 'filter' | 'filterBack' | 'chip';
 
 /**
- * One bar button's target in the bar's frame (meters); all share
- * `buttonHeightMeters`. `chip`: which chip (its index), or -1.
+ * One bar button's target in the bar's frame (meters: its center, and its
+ * width); all share `buttonHeightMeters`. `chip`: which chip (its index), or -1.
  */
-export type BarButtonTarget = { name: BarButton; centerX: number; width: number; chip: number };
+export type BarButtonTarget = { name: BarButton; centerX: number; centerY: number; width: number; chip: number };
 
 export { MAX_FILTER_CHIPS };
 
 /**
- * What the bar shows:
- * - playing: Prev, Hint, Next, Recenter (an icon), then either the filter's label and Clear
- *   (`where` set), or Filter (`filter`: the result has NULLs), or nothing;
- * - the chips open (`chips` not null): Back, then one chip per label.
+ * What the bar shows. The bar is a compact column left of the result (two
+ * buttons wide), its items on an arc around the eyes (see band-arc.ts).
+ * Bottom-anchored, so its fixed rows never move; bottom to top:
+ * - Recenter | Exit (icons);
+ * - INNER | LEFT (the join system's own control, placed in the room left for it);
+ * - Prev | Next;
+ * - Hint (the full width);
+ * - the filter area, growing upward: Filter (`filter`: the result has
+ *   NULLs); or Clear under the filter's label (`where` set); or, with the
+ *   chips open (`chips` not null), Back under the chips, one per row (the
+ *   first on top).
  */
 export type BarContents = { where: string | null; filter: boolean; chips: readonly string[] | null };
 
-export type PuzzleBarView = {
+export type PuzzleBarView = ArcBand & {
   document: UIKitDocument;
   fade: Signal<number>;
   root: Container;
@@ -324,31 +334,38 @@ export type PuzzleBarView = {
   exit: RecenterButtonView;
   /** Opacity of the Next button (pulses once the puzzle is won). */
   nextOpacity: Signal<number>;
-  /** Current size: the bar is only as wide as its buttons (see `setBarContents`). */
+  /**
+   * Current size, flat (see `setBarContents`); the origin is the left edge's
+   * vertical middle. The width is fixed; the height grows with the filter area.
+   */
   widthMeters: number;
   heightMeters: number;
-  /** The buttons shown, left to right. Updated in place. */
+  /** The INNER | LEFT row's middle, in the bar's frame (meters; it moves only as the origin does). */
+  leadCenterYMeters: number;
+  /**
+   * The buttons shown, top to bottom, left to right. Updated in place. Each
+   * center's x is its arc length from the left edge (see band-arc.ts: hit
+   * tests unroll the arc), its y is in the bar's frame.
+   */
   buttons: BarButtonTarget[];
   buttonHeightMeters: number;
   /** Internal sizing (cm). */
   sizes: {
-    prev: number;
-    hint: number;
-    next: number;
-    recenter: number;
-    exit: number;
-    clear: number;
-    filter: number;
-    back: number;
+    /** The column's width, and a half cell's (two buttons side by side). */
+    width: number;
+    half: number;
+    buttonHeight: number;
     label: number;
     paddingX: number;
+    /** The room left for INNER | LEFT (its size). */
+    leadWidth: number;
+    leadHeight: number;
   };
 };
 
 const BAR_PADDING = BAR_PADDING_CM;
 const BAR_BORDER = BAR_BORDER_CM;
 const BAR_RADIUS = 1.4;
-const BAR_INSET = BAR_PADDING + BAR_BORDER;
 // Next while unavailable: clearly off (light fill, no accent), but readable
 // (mid-dark text, ~5:1 contrast on its fill).
 const COLOR_DISABLED_FILL = '#ece7db';
@@ -357,6 +374,94 @@ const COLOR_DISABLED_TEXT = '#655d4f';
 const COLOR_CLEAR_BORDER = '#6b6355';
 const NEXT_WAITING_OPACITY = 0.7;
 const CLEAR_BORDER_WIDTH = 0.15;
+/** Between the column's items in a row, and between its rows (cm). */
+const COLUMN_GAP_CM = 0.6;
+
+/** The band's arc radius, in UIKit units (cm). */
+const ARC_RADIUS_CM = BAND_ARC_RADIUS_METERS * 100;
+
+/**
+ * A band bar's curved items (each turned onto the arc) and the band's lean:
+ * how far it tilts back to face the eyes (the join system sets it when it
+ * places the band; the arc is a level circle around the eyes, so it decides
+ * where each item goes).
+ */
+export type ArcBand = { curved: { container: Container; sCm: number; yCm: number }[]; leanRad: number };
+
+/**
+ * Turns one band item onto the arc (band-arc.ts): its flat center sits
+ * (`sCm`, `yCm`) in the band's frame (from its left edge's middle, + up); it
+ * moves onto the level circle around the eyes and faces them, with no roll
+ * (UIKit transforms: no relayout).
+ */
+function curveOntoArc(band: ArcBand, container: Container, sCm: number, yCm: number): void {
+  band.curved.push({ container, sCm, yCm });
+  applyCurve(container, sCm, yCm, band.leanRad);
+}
+
+function applyCurve(container: Container, sCm: number, yCm: number, leanRad: number): void {
+  const place = arcPlace(sCm, yCm, ARC_RADIUS_CM, leanRad, _arcPlace);
+  const deg = 180 / Math.PI;
+  container.setProperties({
+    transformTranslateX: place.x - sCm,
+    // UIKit's translate Y points down.
+    transformTranslateY: -(place.y - yCm),
+    transformTranslateZ: place.z,
+    transformRotateX: place.rx * deg,
+    transformRotateY: place.ry * deg,
+    transformRotateZ: place.rz * deg,
+  });
+}
+const _arcPlace: ArcPlacement = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
+
+/** The band's lean (radians: the eyes' elevation seen from the band); re-levels every item when it changes. */
+export function setArcLean(band: ArcBand, leanRad: number): void {
+  if (Math.abs(leanRad - band.leanRad) < 1e-3) {
+    return;
+  }
+  band.leanRad = leanRad;
+  for (const item of band.curved) {
+    applyCurve(item.container, item.sCm, item.yCm, leanRad);
+  }
+}
+
+/**
+ * The column's width (cm): two buttons side by side, or INNER | LEFT, or the
+ * widest full-width button (Hint, Filter, Back, Clear), whichever is widest.
+ * Exported for the label tests.
+ */
+export function columnWidthCm(
+  labelFontCm: number,
+  labels: { prev: string; hint: readonly string[]; next: readonly string[]; clear: string; filter: string; filterBack: string },
+  lead: { widthCm: number },
+): number {
+  const pair = (a: number, b: number) => 2 * Math.max(a, b) + COLUMN_GAP_CM;
+  return Math.max(
+    lead.widthCm,
+    pair(barButtonWidthCm([labels.prev], labelFontCm), barButtonWidthCm(labels.next, labelFontCm)),
+    pair(CONTROL_OPTION_MIN_WIDTH_CM, CONTROL_OPTION_MIN_WIDTH_CM),
+    barButtonWidthCm(labels.hint, labelFontCm),
+    barButtonWidthCm([labels.filter], labelFontCm),
+    barButtonWidthCm([labels.filterBack], labelFontCm),
+    barButtonWidthCm([labels.clear], labelFontCm),
+  );
+}
+
+/** A half cell's width (cm) in a column `widthCm` wide (Prev | Next, Recenter | Exit). */
+export function columnHalfCm(widthCm: number): number {
+  return (widthCm - COLUMN_GAP_CM) / 2;
+}
+
+/** A full-width label's side padding, at least (label-font ems): a chip or the WHERE label may use less than a button's. */
+export const COLUMN_LABEL_MIN_PADDING_EM = 0.3;
+
+/** Puts an absolutely positioned item's center at (`sCm`, `yCm`) from the root's left edge, vertical middle (+ up). */
+function placeFlat(container: Container, sCm: number, yCm: number, widthCm: number, heightCm: number, rootHeightCm: number): void {
+  container.setProperties({
+    positionLeft: sCm - widthCm / 2,
+    positionTop: rootHeightCm / 2 - yCm - heightCm / 2,
+  });
+}
 
 /**
  * `labelFontCm`: the label size (the control's, sized by angle by the
@@ -375,48 +480,31 @@ export function buildPuzzleBar(
     filter: string;
     filterBack: string;
   },
+  /** INNER | LEFT's size (cm): the column leaves a row for it. */
+  lead: { widthCm: number; heightCm: number },
 ): PuzzleBarView {
   const paddingX = labelFontCm * BAR_BUTTON_PADDING_EM;
   const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, labelFontCm * LINE_HEIGHT_FACTOR);
-  const prevWidth = barButtonWidthCm([labels.prev], labelFontCm);
-  const hintWidth = barButtonWidthCm(labels.hint, labelFontCm);
-  const nextWidth = barButtonWidthCm(labels.next, labelFontCm);
-  const clearWidth = barButtonWidthCm([labels.clear], labelFontCm);
-  const filterWidth = barButtonWidthCm([labels.filter], labelFontCm);
-  const backWidth = barButtonWidthCm([labels.filterBack], labelFontCm);
-  const heightCm = buttonHeight + 2 * BAR_INSET;
+  const width = columnWidthCm(labelFontCm, labels, lead);
+  const half = columnHalfCm(width);
 
   const fade = signal(1);
   const nextOpacity = signal(1);
+  // No track (each button is its own pill on the arc); every item is placed
+  // absolutely (setBarContents), the origin the left edge's vertical middle.
   const root = new UIKit.Container({
-    flexDirection: 'row',
-    width: hintWidth + nextWidth + BAR_PADDING + 2 * BAR_INSET,
-    height: heightCm,
-    anchorX: 'center',
+    width,
+    anchorX: 'left',
     anchorY: 'center',
     opacity: fade,
     fontFamilies: FONT_FAMILIES,
-    backgroundColor: COLOR_BAR_TRACK,
-    borderColor: COLOR_CARD_BORDER,
-    borderTopWidth: BAR_BORDER,
-    borderLeftWidth: BAR_BORDER,
-    borderRightWidth: BAR_BORDER,
-    borderBottomWidth: BAR_BORDER,
-    borderTopLeftRadius: BAR_RADIUS,
-    borderTopRightRadius: BAR_RADIUS,
-    borderBottomLeftRadius: BAR_RADIUS,
-    borderBottomRightRadius: BAR_RADIUS,
-    paddingTop: BAR_PADDING,
-    paddingBottom: BAR_PADDING,
-    paddingLeft: BAR_PADDING,
-    paddingRight: BAR_PADDING,
-    gapColumn: BAR_PADDING,
   });
-  const button = (label: string, width: number, selected: boolean, opacity: Signal<number> | null) => {
+  const button = (label: string, buttonWidth: number, selected: boolean, opacity: Signal<number> | null) => {
     const style = controlOptionStyle(selected);
     const container = new UIKit.Container({
-      width,
-      minWidth: width,
+      positionType: 'absolute',
+      width: buttonWidth,
+      minWidth: buttonWidth,
       height: buttonHeight,
       flexShrink: 0,
       justifyContent: 'center',
@@ -434,22 +522,17 @@ export function buildPuzzleBar(
     root.add(container);
     return { container, text };
   };
-  // Prev first (left end), so the bar reads Prev, Hint, Next.
-  const prev = button(labels.prev, prevWidth, false, null);
-  const hint = button(labels.hint[0] ?? '', hintWidth, false, null);
-  const next = button(labels.next[0] ?? '', nextWidth, true, nextOpacity);
-  // Recenter: an icon at the minimum target size, its label above it on hover.
-  const recenter = recenterButton(root, labelFontCm, buttonHeight, labels.recenter, fade);
-  // Exit: the same, at the end of the buttons; held for a moment, it ends the session.
-  const exit = recenterButton(root, labelFontCm, buttonHeight, labels.exit, fade, LogOut);
-  // The filter chip: the WHERE clause as a flat label on the track (no fill,
-  // regular weight: it reads as the filter's text, not a button), then its
-  // own Clear button, a bordered pill.
+  const prev = button(labels.prev, half, false, null);
+  const next = button(labels.next[0] ?? '', half, true, nextOpacity);
+  const hint = button(labels.hint[0] ?? '', width, false, null);
+  // The filter chip: the WHERE clause as a flat label (a soft pill, regular
+  // weight: it reads as the filter's text, not a button), then its own Clear
+  // button, a bordered pill.
   const whereOpacity = signal(1);
-  const chip = button('', CONTROL_OPTION_MIN_WIDTH_CM, false, whereOpacity);
+  const chip = button('', width, false, whereOpacity);
   chip.container.setProperties({ display: 'none', backgroundColor: COLOR_BAR_TRACK, color: COLOR_TEXT_SECONDARY });
   chip.text.setProperties({ fontWeight: 'normal' });
-  const clear = button(labels.clear, clearWidth, false, null);
+  const clear = button(labels.clear, width, false, null);
   clear.container.setProperties({
     display: 'none',
     backgroundColor: COLOR_CARD,
@@ -460,18 +543,24 @@ export function buildPuzzleBar(
     borderBottomWidth: CLEAR_BORDER_WIDTH,
   });
   // Filter, then (while open) Back and the chips: plain buttons like Hint.
-  const filter = button(labels.filter, filterWidth, false, null);
+  const filter = button(labels.filter, width, false, null);
   filter.container.setProperties({ display: 'none' });
-  const back = button(labels.filterBack, backWidth, false, null);
+  const back = button(labels.filterBack, width, false, null);
   back.container.setProperties({ display: 'none' });
   const filterChips: { container: Container; text: Text }[] = [];
   for (let i = 0; i < MAX_FILTER_CHIPS; i++) {
-    const chipButton = button('', CONTROL_OPTION_MIN_WIDTH_CM, false, null);
+    const chipButton = button('', width, false, null);
     chipButton.container.setProperties({ display: 'none' });
     filterChips.push(chipButton);
   }
+  // Recenter and Exit: icons, their labels below them on hover.
+  const recenter = recenterButton(root, root, labelFontCm, buttonHeight, labels.recenter, fade, LocateFixed, half);
+  // Exit: held for a moment, it ends the session.
+  const exit = recenterButton(root, root, labelFontCm, buttonHeight, labels.exit, fade, LogOut, half);
 
   const bar: PuzzleBarView = {
+    curved: [],
+    leanRad: 0,
     document: new UIKitDocument(root),
     fade,
     root,
@@ -490,21 +579,19 @@ export function buildPuzzleBar(
     recenter,
     exit,
     nextOpacity,
-    widthMeters: 0,
-    heightMeters: heightCm / 100,
+    widthMeters: width / 100,
+    heightMeters: 0,
+    leadCenterYMeters: 0,
     buttons: [],
     buttonHeightMeters: buttonHeight / 100,
     sizes: {
-      prev: prevWidth,
-      hint: hintWidth,
-      next: nextWidth,
-      recenter: CONTROL_OPTION_MIN_WIDTH_CM,
-      exit: CONTROL_OPTION_MIN_WIDTH_CM,
-      clear: clearWidth,
-      filter: filterWidth,
-      back: backWidth,
+      width,
+      half,
+      buttonHeight,
       label: labelFontCm,
       paddingX,
+      leadWidth: lead.widthCm,
+      leadHeight: lead.heightCm,
     },
   };
   setBarContents(bar, { where: null, filter: false, chips: null });
@@ -522,13 +609,22 @@ export function setNextLabel(bar: PuzzleBarView, label: string): void {
 }
 
 /**
+ * The column's height (cm) holding the filter area's rows (`filterRows`)
+ * above its fixed rows. Exported for the label tests.
+ */
+export function columnHeightCm(buttonHeightCm: number, leadHeightCm: number, filterRows: number): number {
+  const rows = 3 + filterRows;
+  return leadHeightCm + rows * buttonHeightCm + rows * COLUMN_GAP_CM;
+}
+
+/**
  * Shows `contents` (see `BarContents`) and resizes the bar to them; updates
- * `widthMeters` and `buttons` in place. Runs only when the contents change,
- * never per frame. The caller re-places the bar afterwards (its center moves
- * with its width).
+ * `heightMeters`, `leadCenterYMeters` and `buttons` in place. Runs only when
+ * the contents change, never per frame. The caller re-places the bar
+ * afterwards (its bottom stays put; its origin moves with its height).
  */
 export function setBarContents(bar: PuzzleBarView, contents: BarContents): void {
-  const { prev, hint, next, recenter, exit, clear, filter, back, label, paddingX } = bar.sizes;
+  const { width, half, buttonHeight, label, paddingX, leadHeight } = bar.sizes;
   const open = contents.chips !== null;
   // The targets change: no hover outline survives (the pointer re-hovers next frame).
   for (const container of [bar.prev, bar.hint, bar.next, bar.recenter.container, bar.exit.container, bar.filter, bar.filterBack]) {
@@ -541,75 +637,102 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
   const where = open ? null : contents.where;
   const showFilter = !open && where === null && contents.filter;
   const chips = contents.chips ?? [];
+  const chipCount = Math.min(chips.length, bar.filterChips.length);
 
-  bar.prev.setProperties({ display: open ? 'none' : 'flex' });
-  bar.hint.setProperties({ display: open ? 'none' : 'flex' });
-  bar.next.setProperties({ display: open ? 'none' : 'flex' });
-  bar.recenter.container.setProperties({ display: open ? 'none' : 'flex' });
-  bar.exit.container.setProperties({ display: open ? 'none' : 'flex' });
-  if (open) {
-    setRecenterHover(bar.recenter, false);
-    setRecenterHover(bar.exit, false);
-  }
-  // The WHERE label needs no minimum width (it isn't a target), only its padding.
-  const labelWidth = where === null ? 0 : measureHeaderTextCm(where, label) + 2 * paddingX;
   if (where === null) {
     bar.chip.setProperties({ display: 'none' });
     bar.clear.setProperties({ display: 'none' });
   } else {
-    bar.chipText.setProperties({ text: where });
-    bar.chip.setProperties({ display: 'flex', width: labelWidth, minWidth: labelWidth });
+    // The WHERE label: its own text, cut to the column if ever too long (the label tests keep it from happening).
+    bar.chipText.setProperties({
+      text: truncateToWidth(where, DATA_METRICS, label, width - 2 * COLUMN_LABEL_MIN_PADDING_EM * label),
+    });
+    bar.chip.setProperties({ display: 'flex' });
     bar.clear.setProperties({ display: 'flex' });
   }
   bar.filter.setProperties({ display: showFilter ? 'flex' : 'none' });
   bar.filterBack.setProperties({ display: open ? 'flex' : 'none' });
 
-  // The items shown, left to right, in the children's order (hidden ones take no space or gap).
-  const items: { name: BarButton | null; width: number; chip: number }[] = [];
-  if (!open) {
-    items.push(
-      { name: 'prev', width: prev, chip: -1 },
-      { name: 'hint', width: hint, chip: -1 },
-      { name: 'next', width: next, chip: -1 },
-      { name: 'recenter', width: recenter, chip: -1 },
-      { name: 'exit', width: exit, chip: -1 },
-    );
-    if (where !== null) {
-      items.push({ name: null, width: labelWidth, chip: -1 }, { name: 'clear', width: clear, chip: -1 });
-    } else if (showFilter) {
-      items.push({ name: 'filter', width: filter, chip: -1 });
+  // Rows, bottom to top: [items, height]. Each item: its button (null: not a
+  // target), container, width and chip index; laid out left to right.
+  type Item = { name: BarButton | null; container: Container | null; width: number; chip: number };
+  const pair = (left: Item, right: Item): Item[] => [left, right];
+  const rows: [Item[], number][] = [
+    [
+      pair(
+        { name: 'recenter', container: bar.recenter.container, width: half, chip: -1 },
+        { name: 'exit', container: bar.exit.container, width: half, chip: -1 },
+      ),
+      buttonHeight,
+    ],
+    // The room for INNER | LEFT (the join system places the control there).
+    [[{ name: null, container: null, width, chip: -1 }], leadHeight],
+    [
+      pair({ name: 'prev', container: bar.prev, width: half, chip: -1 }, { name: 'next', container: bar.next, width: half, chip: -1 }),
+      buttonHeight,
+    ],
+    [[{ name: 'hint', container: bar.hint, width, chip: -1 }], buttonHeight],
+  ];
+  if (where !== null) {
+    rows.push([[{ name: 'clear', container: bar.clear, width, chip: -1 }], buttonHeight]);
+    rows.push([[{ name: null, container: bar.chip, width, chip: -1 }], buttonHeight]);
+  } else if (showFilter) {
+    rows.push([[{ name: 'filter', container: bar.filter, width, chip: -1 }], buttonHeight]);
+  } else if (open) {
+    rows.push([[{ name: 'filterBack', container: bar.filterBack, width, chip: -1 }], buttonHeight]);
+    // The chips above Back, one per row, the first on top.
+    for (let i = chipCount - 1; i >= 0; i--) {
+      rows.push([[{ name: 'chip', container: bar.filterChips[i].container, width, chip: i }], buttonHeight]);
     }
-  } else {
-    items.push({ name: 'filterBack', width: back, chip: -1 });
   }
   bar.filterChips.forEach((chipButton, i) => {
     const text = i < chips.length ? chips[i] : null;
-    if (text === null) {
-      chipButton.container.setProperties({ display: 'none' });
-      return;
+    chipButton.container.setProperties({ display: text === null ? 'none' : 'flex' });
+    if (text !== null) {
+      chipButton.text.setProperties({ text: truncateToWidth(text, HEADER_METRICS, label, width - 2 * COLUMN_LABEL_MIN_PADDING_EM * label) });
     }
-    const width = barButtonWidthCm([text], label);
-    chipButton.text.setProperties({ text });
-    chipButton.container.setProperties({ display: 'flex', width, minWidth: width });
-    items.push({ name: 'chip', width, chip: i });
   });
 
-  const widthCm = barRowWidthCm(items.map((item) => item.width));
-  bar.root.setProperties({ width: widthCm });
-  bar.widthMeters = widthCm / 100;
+  const heightCm = columnHeightCm(buttonHeight, leadHeight, rows.length - 3);
+  bar.root.setProperties({ height: heightCm });
+  bar.heightMeters = heightCm / 100;
 
-  // Target centers, left to right, in the bar's frame (origin at its center).
-  let cursor = -widthCm / 2 + BAR_INSET;
+  bar.curved.length = 0;
+  // Each item onto the arc, and the targets: x is the arc length of its
+  // center from the left edge, y its row's middle (origin: the column's middle).
+  // Listed top to bottom (reading order).
   bar.buttons.length = 0;
-  for (const item of items) {
-    if (item.name !== null) {
-      bar.buttons.push({ name: item.name, centerX: (cursor + item.width / 2) / 100, width: item.width / 100, chip: item.chip });
+  const targets: BarButtonTarget[] = [];
+  let bottom = 0;
+  for (const [items, rowHeight] of rows) {
+    const rowY = bottom + rowHeight / 2 - heightCm / 2;
+    if (items.length === 1 && items[0].container === null) {
+      bar.leadCenterYMeters = rowY / 100;
     }
-    if (item.name === 'recenter' || item.name === 'exit') {
-      // Its hover label, centered above it (offsets from the bar's padding box).
-      placeRecenterLabel(item.name === 'exit' ? bar.exit : bar.recenter, cursor + item.width / 2 + widthCm / 2 - BAR_BORDER);
-    }
-    cursor += item.width + BAR_PADDING;
+    items.forEach((item, i) => {
+      const center = i === 0 ? item.width / 2 : width - item.width / 2;
+      if (item.container) {
+        placeFlat(item.container, center, rowY, item.width, rowHeight, heightCm);
+        curveOntoArc(bar, item.container, center, rowY);
+      }
+      if (item.name !== null) {
+        targets.push({ name: item.name, centerX: center / 100, centerY: rowY / 100, width: item.width / 100, chip: item.chip });
+      }
+    });
+    bottom += rowHeight + COLUMN_GAP_CM;
+  }
+  targets.sort((p, q) => q.centerY - p.centerY || p.centerX - q.centerX);
+  bar.buttons.push(...targets);
+  // Recenter's and Exit's hover labels: just below the column, centered under it, on the arc too.
+  placeIconLabels(bar, bar.recenter, bar.exit, width, heightCm);
+}
+
+/** Recenter's and Exit's hover labels: centered just below the column (toward the slabs, never over the result). */
+function placeIconLabels(band: ArcBand, recenter: RecenterButtonView, exit: RecenterButtonView, widthCm: number, heightCm: number): void {
+  for (const view of [recenter, exit]) {
+    const y = -heightCm / 2 - COLUMN_GAP_CM - view.labelHeightCm / 2;
+    placeFlat(view.label, widthCm / 2, y, view.labelWidthCm, view.labelHeightCm, heightCm);
+    curveOntoArc(band, view.label, widthCm / 2, y);
   }
 }
 
@@ -630,21 +753,24 @@ const COLOR_RECENTER_LABEL_TEXT = '#f7f4ee';
 type IconClass = typeof LocateFixed;
 
 /**
- * Builds an icon button (Recenter, Exit) into `root` (a row) and its hover
- * label as an absolute layer of `root`.
+ * Builds an icon button (Recenter, Exit) into `parent` (a row) and its hover
+ * label as an absolute layer of `root` (placed by `placeRecenterLabel`).
  */
 function recenterButton(
+  parent: Container,
   root: Container,
   labelFontCm: number,
   buttonHeight: number,
   label: string,
   fade: Signal<number>,
   Icon: IconClass = LocateFixed,
+  width = CONTROL_OPTION_MIN_WIDTH_CM,
 ): RecenterButtonView {
   const style = controlOptionStyle(false);
   const container = new UIKit.Container({
-    width: CONTROL_OPTION_MIN_WIDTH_CM,
-    minWidth: CONTROL_OPTION_MIN_WIDTH_CM,
+    positionType: 'absolute',
+    width,
+    minWidth: width,
     height: buttonHeight,
     flexShrink: 0,
     justifyContent: 'center',
@@ -658,13 +784,13 @@ function recenterButton(
   });
   const iconSize = labelFontCm * 1.3;
   container.add(new Icon({ width: iconSize, height: iconSize, color: style.color }));
-  root.add(container);
+  parent.add(container);
 
   const labelWidthCm = measureHeaderTextCm(label, labelFontCm) + 2 * labelFontCm * BAR_BUTTON_PADDING_EM;
   const labelHeightCm = labelFontCm * LINE_HEIGHT_FACTOR + labelFontCm * 0.3;
   const tag = new UIKit.Container({
     positionType: 'absolute',
-    positionTop: -labelHeightCm - BAR_PADDING,
+    positionTop: 0,
     positionLeft: 0,
     width: labelWidthCm,
     height: labelHeightCm,
@@ -693,18 +819,17 @@ function recenterButton(
   return { container, label: tag, labelWidthCm, labelHeightCm };
 }
 
-/** Centers the hover label over the button whose center is `centerFromLeftCm` from the parent's padding box's left edge. */
-function placeRecenterLabel(view: RecenterButtonView, centerFromLeftCm: number): void {
-  view.label.setProperties({ positionLeft: centerFromLeftCm - view.labelWidthCm / 2 });
-}
-
 /** Shows or hides the Recenter label (a fingertip or a hand's ray over the button). */
 export function setRecenterHover(view: RecenterButtonView, hovered: boolean): void {
   view.label.setProperties({ display: hovered ? 'flex' : 'none' });
 }
 
-/** Free play's bar: Recenter and Exit (there's no puzzle bar). Origin at its center. */
-export type RecenterBarView = {
+/**
+ * Free play's bar: the column with only its two bottom rows (there's no
+ * puzzle bar): Recenter | Exit, and the room for INNER | LEFT above them, on
+ * the same arc. Origin: the left edge's vertical middle.
+ */
+export type RecenterBarView = ArcBand & {
   document: UIKitDocument;
   fade: Signal<number>;
   recenter: RecenterButtonView;
@@ -713,59 +838,58 @@ export type RecenterBarView = {
   heightMeters: number;
   buttonWidthMeters: number;
   buttonHeightMeters: number;
-  /** Each button's center in the bar's frame (meters): Recenter, then Exit. */
+  /** Each button's center (meters): x its arc length from the left edge, y in the bar's frame. */
   recenterCenterX: number;
   exitCenterX: number;
+  centerY: number;
+  /** The INNER | LEFT row's middle, in the bar's frame (meters). */
+  leadCenterYMeters: number;
 };
 
-export function buildRecenterBar(labelFontCm: number, label: string, exitLabel: string): RecenterBarView {
+export function buildRecenterBar(
+  labelFontCm: number,
+  label: string,
+  exitLabel: string,
+  lead: { widthCm: number; heightCm: number },
+): RecenterBarView {
   const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, labelFontCm * LINE_HEIGHT_FACTOR);
-  const widthCm = barRowWidthCm([CONTROL_OPTION_MIN_WIDTH_CM, CONTROL_OPTION_MIN_WIDTH_CM]);
-  const heightCm = buttonHeight + 2 * BAR_INSET;
+  const widthCm = Math.max(lead.widthCm, 2 * CONTROL_OPTION_MIN_WIDTH_CM + COLUMN_GAP_CM);
+  const half = columnHalfCm(widthCm);
+  const heightCm = buttonHeight + COLUMN_GAP_CM + lead.heightCm;
   const fade = signal(1);
   const root = new UIKit.Container({
-    flexDirection: 'row',
     width: widthCm,
     height: heightCm,
-    anchorX: 'center',
+    anchorX: 'left',
     anchorY: 'center',
     opacity: fade,
     fontFamilies: FONT_FAMILIES,
-    backgroundColor: COLOR_BAR_TRACK,
-    borderColor: COLOR_CARD_BORDER,
-    borderTopWidth: BAR_BORDER,
-    borderLeftWidth: BAR_BORDER,
-    borderRightWidth: BAR_BORDER,
-    borderBottomWidth: BAR_BORDER,
-    borderTopLeftRadius: BAR_RADIUS,
-    borderTopRightRadius: BAR_RADIUS,
-    borderBottomLeftRadius: BAR_RADIUS,
-    borderBottomRightRadius: BAR_RADIUS,
-    paddingTop: BAR_PADDING,
-    paddingBottom: BAR_PADDING,
-    paddingLeft: BAR_PADDING,
-    paddingRight: BAR_PADDING,
-    gapColumn: BAR_PADDING,
   });
-  const recenter = recenterButton(root, labelFontCm, buttonHeight, label, fade);
-  const exit = recenterButton(root, labelFontCm, buttonHeight, exitLabel, fade, LogOut);
-  // Centers from the padding box's left edge (labels) and from the bar's center (targets).
-  const recenterFromLeft = BAR_PADDING + CONTROL_OPTION_MIN_WIDTH_CM / 2;
-  const exitFromLeft = recenterFromLeft + CONTROL_OPTION_MIN_WIDTH_CM + BAR_PADDING;
-  placeRecenterLabel(recenter, recenterFromLeft);
-  placeRecenterLabel(exit, exitFromLeft);
-  const leftEdge = -widthCm / 2 + BAR_BORDER;
+  const recenter = recenterButton(root, root, labelFontCm, buttonHeight, label, fade, LocateFixed, half);
+  const exit = recenterButton(root, root, labelFontCm, buttonHeight, exitLabel, fade, LogOut, half);
+  const rowY = -heightCm / 2 + buttonHeight / 2;
+  const recenterCenter = half / 2;
+  const exitCenter = widthCm - half / 2;
+  const band: ArcBand = { curved: [], leanRad: 0 };
+  placeFlat(recenter.container, recenterCenter, rowY, half, buttonHeight, heightCm);
+  placeFlat(exit.container, exitCenter, rowY, half, buttonHeight, heightCm);
+  curveOntoArc(band, recenter.container, recenterCenter, rowY);
+  curveOntoArc(band, exit.container, exitCenter, rowY);
+  placeIconLabels(band, recenter, exit, widthCm, heightCm);
   return {
+    ...band,
     document: new UIKitDocument(root),
     fade,
     recenter,
     exit,
     widthMeters: widthCm / 100,
     heightMeters: heightCm / 100,
-    buttonWidthMeters: CONTROL_OPTION_MIN_WIDTH_CM / 100,
+    buttonWidthMeters: half / 100,
     buttonHeightMeters: buttonHeight / 100,
-    recenterCenterX: (leftEdge + recenterFromLeft) / 100,
-    exitCenterX: (leftEdge + exitFromLeft) / 100,
+    recenterCenterX: recenterCenter / 100,
+    exitCenterX: exitCenter / 100,
+    centerY: rowY / 100,
+    leadCenterYMeters: (heightCm / 2 - lead.heightCm / 2) / 100,
   };
 }
 

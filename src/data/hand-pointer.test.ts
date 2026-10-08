@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   angleBetweenDeg,
+  HoldSelect,
   HAND_POINTER_CLOSING_METERS,
   HAND_POINTER_FLICKER_OPEN_SECONDS,
   HAND_POINTER_FREEZE_LOOKBACK_SECONDS,
@@ -16,6 +17,9 @@ import {
   HAND_POINTER_STALE_SECONDS,
   pitchDeg,
   PinchFreeze,
+  PinchMotion,
+  PINCH_OPEN_METERS,
+  PINCH_OPENING_WINDOW_SECONDS,
   pointerRaised,
   PoseHistory,
   smoothingAlpha,
@@ -150,5 +154,154 @@ describe('the hand pointer', () => {
     expect(angleBetweenDeg(0, 0, -1, 0, 1, -1)).toBeCloseTo(45);
     expect(pitchDeg(0, 1, -1)).toBeCloseTo(45);
     expect(pitchDeg(0, -1, -Math.sqrt(3))).toBeCloseTo(-30);
+  });
+});
+
+/**
+ * A hand's pinches as join-system.ts runs them: the tips sampled every
+ * frame (90 fps) from `gapAt`, and at each platform pinch start (released
+ * 50 ms... or `releaseAfter` later) a press only if the freeze's gate and the
+ * pinch motion both allow it. Returns the press times.
+ */
+function runPinches(gapAt: (t: number) => number, starts: readonly number[], releaseAfter = 0.05): number[] {
+  const freeze = new PinchFreeze();
+  const motion = new PinchMotion();
+  const presses: number[] = [];
+  const end = starts[starts.length - 1] + 1;
+  let next = 0;
+  for (let t = starts[0] - 1; t <= end; t += 1 / 90) {
+    for (const start of starts) {
+      if (Math.abs(start + releaseAfter - t) < 0.5 / 90) {
+        freeze.released(t);
+      }
+    }
+    const gap = gapAt(t);
+    freeze.step(gap, t);
+    motion.sample(gap, t);
+    if (next < starts.length && t >= starts[next]) {
+      const block = freeze.pinchStart(true, t);
+      if (block === '' && motion.isPinchMotion(t)) {
+        presses.push(starts[next]);
+        freeze.pressed(t);
+        motion.pressed();
+      }
+      next++;
+    }
+  }
+  return presses;
+}
+
+describe('pinch motion: a resting pointing hand never presses', () => {
+  it('needs the tips open past 2.2 cm within 0.4 s before the pinch', () => {
+    expect(PINCH_OPEN_METERS).toBe(0.022);
+    expect(PINCH_OPENING_WINDOW_SECONDS).toBe(0.4);
+  });
+
+  it('regression (headset log 2026-10-09 00:33): the flickering pinch on Hint presses nothing', () => {
+    // Pointing at Hint from 08.964, the thumb resting by the index finger:
+    // the tips 0.9-1.3 cm apart throughout (each logged pinch start), the
+    // platform's pinch restarting about every 200 ms.
+    const starts = [9.416, 9.98, 10.381, 10.622, 10.74, 11.331, 11.548, 11.624, 12.626];
+    const resting = (t: number) => 0.011 + 0.002 * Math.sin(t * 17);
+    expect(runPinches(resting, starts, 0.18)).toEqual([]);
+  });
+
+  it('real pinches still press: each one opens first (the 02:07 log\'s Recenter pinches, 199 ms apart at the closest)', () => {
+    // Between pinches the fingers rest 4 cm apart (as the earlier regression models them), then close to 1 cm.
+    const starts = [43.076, 43.751, 44.273, 46.11, 47.917, 48.318, 48.596, 49.352, 49.551, 50.072];
+    const gapAt = (t: number) => {
+      for (const start of starts) {
+        if (t >= start - 0.08 && t < start + 0.05) {
+          return 0.01;
+        }
+      }
+      return 0.04;
+    };
+    expect(runPinches(gapAt, starts)).toEqual(starts);
+  });
+
+  it('a pinch from barely open fingers (2 cm) does not press; from 2.6 cm (the smallest logged real opening) it does', () => {
+    const pinchFrom = (open: number) => (t: number) => (t < 5 - 0.15 ? open : 0.01);
+    expect(runPinches(pinchFrom(0.02), [5])).toEqual([]);
+    expect(runPinches(pinchFrom(0.026), [5])).toEqual([5]);
+  });
+
+  it('after a press, it re-arms only once the fingers open again (a flicker 500 ms later stays one press)', () => {
+    const gapAt = (t: number) => (t < 4.85 ? 0.04 : 0.01);
+    expect(runPinches(gapAt, [5, 5.5])).toEqual([5]);
+  });
+
+  it('an opening longer than 0.4 s before the pinch is not part of it', () => {
+    const gapAt = (t: number) => (t < 4.5 ? 0.04 : 0.011);
+    expect(runPinches(gapAt, [5])).toEqual([]);
+  });
+
+  it('logs the widest tip distance in the window', () => {
+    const m = new PinchMotion();
+    m.sample(0.03, 1.0);
+    m.sample(0.012, 1.2);
+    expect(m.widest(1.3)).toBeCloseTo(0.03, 9);
+    expect(m.widest(1.5)).toBeCloseTo(0.012, 9);
+    expect(new PinchMotion().widest(1)).toBe(-1);
+  });
+});
+
+describe('the Exit hold: one continuous select that started on Exit', () => {
+  /** Frames of [selecting, selectStart, startOk, onExit]; returns the hold time (s) at 90 fps, reset whenever it isn't held. */
+  function holdTime(frames: [boolean, boolean, boolean, boolean][]): number {
+    const exit = new HoldSelect();
+    let held = 0;
+    let longest = 0;
+    for (const [selecting, start, ok, on] of frames) {
+      const onExit = exit.needsOnTarget(selecting, start) && on;
+      held = exit.step(selecting, start, ok, onExit) ? held + 1 / 90 : 0;
+      longest = Math.max(longest, held);
+    }
+    return longest;
+  }
+  const repeat = <T>(frame: T, seconds: number): T[] => Array.from({ length: Math.round(seconds * 90) }, () => frame);
+
+  it('regression (headset log 2026-10-09 00:33): a pinch held since 14.5 s, the pointer arriving on Exit at 28.4 s, never holds it', () => {
+    const frames: [boolean, boolean, boolean, boolean][] = [
+      // 14.506: the pinch starts on nothing (whatever its motion).
+      [true, true, true, false],
+      // Held while the pointer crosses the other buttons...
+      ...repeat<[boolean, boolean, boolean, boolean]>([true, false, true, false], 12.2),
+      // ...crosses Exit for a moment (26.70)...
+      ...repeat<[boolean, boolean, boolean, boolean]>([true, false, true, true], 0.03),
+      ...repeat<[boolean, boolean, boolean, boolean]>([true, false, true, false], 1.66),
+      // ...and rests on it from 28.396.
+      ...repeat<[boolean, boolean, boolean, boolean]>([true, false, true, true], 2),
+    ];
+    expect(holdTime(frames)).toBe(0);
+  });
+
+  it('hover alone (no select), or a no-motion pinch on Exit, never moves the ring', () => {
+    expect(holdTime(repeat([false, false, true, true], 2))).toBe(0);
+    expect(holdTime([[true, true, false, true], ...repeat<[boolean, boolean, boolean, boolean]>([true, false, false, true], 2)])).toBe(0);
+  });
+
+  it('a pinch motion that starts on Exit holds it; a one-frame flicker resets it to zero for good', () => {
+    const held: [boolean, boolean, boolean, boolean][] = [[true, true, true, true], ...repeat<[boolean, boolean, boolean, boolean]>([true, false, true, true], 1.2)];
+    expect(holdTime(held)).toBeGreaterThan(1.1);
+    const flicker: [boolean, boolean, boolean, boolean][] = [
+      [true, true, true, true],
+      ...repeat<[boolean, boolean, boolean, boolean]>([true, false, true, true], 0.6),
+      [false, false, true, true],
+      // The platform's pinch restarts at once, the fingers never opened: not a pinch motion.
+      [true, true, false, true],
+      ...repeat<[boolean, boolean, boolean, boolean]>([true, false, false, true], 1.5),
+    ];
+    expect(holdTime(flicker)).toBeLessThan(0.62);
+  });
+
+  it('leaving Exit ends the hold; coming back with the same select does not resume it', () => {
+    const frames: [boolean, boolean, boolean, boolean][] = [
+      [true, true, true, true],
+      ...repeat<[boolean, boolean, boolean, boolean]>([true, false, true, true], 0.5),
+      [true, false, true, false],
+      ...repeat<[boolean, boolean, boolean, boolean]>([true, false, true, true], 1.5),
+    ];
+    expect(holdTime(frames)).toBeLessThan(0.52);
   });
 });

@@ -25,11 +25,13 @@ export interface DeskControls {
    */
   readonly surfaceTooFar: boolean;
   /**
-   * The Recenter button: re-places the whole group in front of the player
-   * (as when the headset comes back on, or after a recenter), once no slab
-   * is held.
+   * The Recenter button: after a short "Look straight ahead" countdown
+   * (recenter-countdown.ts), re-places the whole group in front of where the
+   * player then looks (as when the headset comes back on, or after a
+   * recenter), once no slab is held. `button`: where the pressed button is
+   * (world), so a head still turned toward it gets more time.
    */
-  requestRecenter(): void;
+  requestRecenter(button?: Vector3): void;
   /** Whether a recenter glide is moving the slabs (the join system re-places what follows them). */
   readonly recenterGliding: boolean;
   /** Counts re-placements; the join system takes the slabs' new home poses when it changes. */

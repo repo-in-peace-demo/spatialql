@@ -36,6 +36,7 @@ import {
   DoubleSide,
   Euler,
   Grabbed,
+  GrabSystem,
   Group,
   MathUtils,
   Mesh,
@@ -69,7 +70,7 @@ import { filterForColumn, nullFilterColumns, nullFilterMask, nullPokeEvent, same
 import { DATASETS, datasetOfTable, tableById } from './data/datasets.js';
 import type { QuerySpec } from './data/query.js';
 import type { CellValue, JoinType, NullFilter, Table } from './data/types.js';
-import { buildRecenterBar, setRecenterHover, type RecenterBarView } from './challenge-view.js';
+import { buildRecenterBar, setArcLean, setRecenterHover, type RecenterBarView } from './challenge-view.js';
 import { BAR } from './data/copy.js';
 import { deskBridge, deskReady } from './desk-bridge.js';
 import { devFlag } from './dev-flags.js';
@@ -96,6 +97,10 @@ import {
   HAND_POINTER_PITCH_OFFSET_DEG,
   pitchDeg,
   PinchFreeze,
+  HoldSelect,
+  PinchMotion,
+  PINCH_OPEN_METERS,
+  PINCH_OPENING_WINDOW_SECONDS,
   pointerRaised,
   PoseHistory,
   smoothingAlpha,
@@ -110,10 +115,12 @@ import {
   POKE_TARGET_TOLERANCE_METERS,
   type PokeVerdict,
 } from './contact-poke.js';
-import { indexStraightness, readJointsPoint, readPinchPoint, readTargetRay, readWristPoint } from './pinch.js';
+import { indexStraightness, readJointsPoint, readTargetRay, readWristPoint } from './pinch.js';
+import { arcAngle, arcPlace, BAND_ARC_RADIUS_METERS, rayCircleDistance, unrollArc, type ArcPlacement } from './band-arc.js';
 import { JoinDocked, JoinResultSlab, TableSlab, TableSlabRuntime } from './table-slab-component.js';
 import {
   buildJoinTypeControl,
+  joinTypeControlSizeCm,
   buildTableSlabDocument,
   captionColor,
   controlOptionStyle,
@@ -183,6 +190,9 @@ const PREVIEW_ENTER_VERTICAL_METERS = 0.12;
 const PREVIEW_EXIT_VERTICAL_METERS = 0.16;
 const PREVIEW_EXIT_GRACE_SECONDS = 0.15;
 const PREVIEW_HINT_COUNT = 3;
+/** A slab released this close to its home (and this little turned) stays put rather than gliding. */
+const HOME_RETURN_MIN_METERS = 0.01;
+const HOME_RETURN_MIN_RAD = MathUtils.degToRad(1);
 /**
  * The "magnet": from this edge gap in, a held slab's approach shows as a
  * facing-edge glow (and hum) that strengthens until the preview gap.
@@ -249,14 +259,18 @@ const LINE_PULSE_OPACITY = 0.9;
 const LINE_PULSE_FRACTION = 0.18;
 
 // --- Result slab placement ----------------------------------------------------
-// Bottom edge just above and slightly behind the docked pair's top edge,
-// leaning back only as far as needed to face the eyes.
-// Leaves room for the join-type control in the band below the result slab,
-// and keeps a pinch at the result's bottom edge out of the pair's grab range.
-const RESULT_GAP_ABOVE_METERS = 0.08;
+// Behind the docked pair (at its planned text distance), its bottom edge just
+// above the pair's top edge in view, leaning back only as far as needed to
+// face the eyes. (The controls are in the side column, not in a band here.)
+/** The result's bottom edge sits this far (in view) above the pair's top edge. */
+const RESULT_FLOOR_GAP_DEG = 1.5;
+/** The result's center sits this far from the eyes (behind the pair, at its planned text distance). */
+const RESULT_TARGET_DISTANCE_METERS = PLANNED_RESULT_DISTANCE_METERS;
 const RESULT_BEHIND_METERS = 0.02;
 /** Legibility cap: the result slab's center is never farther than this from the eyes. */
-const RESULT_MAX_DISTANCE_METERS = 0.85;
+const RESULT_MAX_DISTANCE_METERS = 1.0;
+/** The widest results move back at most this far to fit VIEW_HALF_WIDTH_DEG (rows stay at least ~1.15°). */
+const RESULT_MAX_FIT_DISTANCE_METERS = 0.89;
 /**
  * A result slab placed beyond RESULT_MAX_PUSHED_DISTANCE_METERS (a pair
  * pushed far away) is pulled toward the viewer by at most this much, so its
@@ -288,10 +302,14 @@ const PARKED_Y = -100;
  */
 const CONTROL_SLAB_CLEARANCE_METERS = 0.1;
 /**
- * In view, the control's bottom edge sits this far above the pair's top
- * edge, and the result slab's bottom edge this far above the control.
+ * Every element's outer edge stays within this many degrees of straight
+ * ahead (the pair's forward from the eyes), with the head facing forward:
+ * the column, result and card are laid out centered on it, the widest
+ * results pushed back (up to RESULT_MAX_FIT_DISTANCE_METERS) to fit.
  */
-const CONTROL_VIEW_GAP_DEG = 1;
+const VIEW_HALF_WIDTH_DEG = 42;
+/** In view, the control column's right edge sits this far left of the result's left edge. */
+const COLUMN_RESULT_GAP_DEG = 2;
 /** A pinch selects an option when its pinch point is this close to it, in plane... */
 const CONTROL_PINCH_MARGIN_METERS = 0.015;
 /** ...and at most this far in front of / behind the control's surface. */
@@ -301,18 +319,15 @@ const CONTROL_PINCH_DEPTH_METERS = 0.03;
 const GRAB_SPHERE_RADIUS_METERS = 0.07;
 
 // --- Challenge mode ------------------------------------------------------------------
-/** Clear gap between the join-type control and the puzzle bar, side by side in the band (never less). */
-const BAR_CONTROL_GAP_METERS = 0.015;
 /** Gap (in view) between the result slot's side edge and the puzzle card beside it. */
-const CARD_SIDE_GAP_DEG = 2;
+const CARD_SIDE_GAP_DEG = 1.5;
 /** The card's bottom edge stays at least this far (in view) above the band and the slabs below it. */
 const CARD_CLEARANCE_DEG = 1.5;
 /** The card clearance readout warns below this. */
 const CARD_MIN_CLEARANCE_WARN_DEG = 1;
 /**
  * Which side of the result the card goes: +1 = the viewer's right. The
- * band's INNER | LEFT control sits left of center (the puzzle bar is on its
- * right), so the card goes right, away from it.
+ * control column sits on the left, so the card balances it on the right.
  */
 const CARD_SIDE = 1;
 /** A filter change: leaving rows fade out, then the rest slide to their new slots. */
@@ -341,6 +356,13 @@ const POINTER_SLAB_GLOW = 0.3;
 const POINTER_HOVER_LOG_SECONDS = 0.25;
 /** Exit: held this long, it ends the session (a ring fills meanwhile). */
 const EXIT_HOLD_SECONDS = 1.0;
+/**
+ * A hold button wider than this has a label: its ring, smaller, sits at its
+ * right end (centered this far in from the edge), clear of the centered text.
+ */
+const HOLD_RING_ICON_MAX_WIDTH_METERS = 0.06;
+const HOLD_RING_END_INSET_METERS = 0.0085;
+const HOLD_RING_LABEL_SCALE = 0.6;
 /** The ring around Exit's icon: its radii, smoothness, and lift off the bar's face (it fits the 2.5 cm button). */
 const EXIT_RING_INNER_METERS = 0.0095;
 const EXIT_RING_OUTER_METERS = 0.0115;
@@ -579,6 +601,22 @@ function dockAnimation(duration: number): DockAnimation {
 /** Where a slab sat before this puzzle's first grab or join (challenge mode's home glide). */
 type HomePose = { pos: Vector3; quat: Quaternion; set: boolean };
 
+/** One of a placed bar's buttons. */
+type BarButtonRect = PlacedBar['buttons'][number];
+
+/** The group's layout (JoinSystem.planGroup); angles in degrees, yaws + right of straight ahead. */
+type GroupPlan = {
+  /** The pair's top edge in view, and the result's floor (from the natural gaze). */
+  pairTopDeg: number;
+  floorDeg: number;
+  /** The result width it's laid out for (meters), and the result's distance from the eyes. */
+  resultWidth: number;
+  resultDistance: number;
+  /** The result's center, and the column's left edge. */
+  resultYawDeg: number;
+  columnLeftYawDeg: number;
+};
+
 export class JoinSystem
   extends createSystem({
     sources: { required: [TableSlab, TableSlabRuntime], excluded: [JoinResultSlab] },
@@ -677,7 +715,7 @@ export class JoinSystem
     slab: null as SourceSlab | null,
   };
   /** The control's two options as targets (centers and widths, in its frame). */
-  private controlTargets: { centerX: number; width: number }[] = [];
+  private controlTargets: ButtonRect[] = [];
   private readonly _pointerHead = new Vector3();
   private readonly _pointerFwd = new Vector3();
   private readonly _pointerWrist = new Vector3();
@@ -706,17 +744,31 @@ export class JoinSystem
   private recenterWasGliding = false;
   private lastRecenterPress = -Infinity;
   private recenterHovered = false;
-  // Exit (see updateExitHold).
+  // The hold buttons: Exit, Show answer (see updateHolds).
   private exitHovered = false;
-  /** How long Exit has been held (seconds; 0 when not). */
-  private exitHeld = 0;
+  /** How long the hold button `holdName` has been held (seconds; 0 when not). */
+  private holdHeld = 0;
+  private holdName = '';
   /** The session is ending (Exit completed); nothing more until a new one. */
   private exitEnded = false;
-  /** Dev log: how Exit is being held. */
-  private exitHoldPath = '';
-  /** Per hand: a pinch or trigger started in this session (see handHoldsExit). */
-  private readonly exitSelectStarted = { left: false, right: false };
-  private exitRing!: Mesh<RingGeometry, MeshBasicMaterial>;
+  /** Dev log: how the hold button is being held. */
+  private holdPath = '';
+  /**
+   * Per hand: its current pinch or trigger started on a hold button (with a
+   * pinch motion, for a hand): only such a select can hold it (see updateHolds).
+   */
+  private readonly holdSelect = { left: new HoldSelect(), right: new HoldSelect() };
+  /** Per hand: the hold button its current select started on ('' if none). */
+  private readonly holdTarget = { left: '', right: '' };
+  /** Per hand: its pinch motion (hand-pointer-math.ts), sampled every frame. */
+  private readonly pinchMotion = { left: new PinchMotion(), right: new PinchMotion() };
+  /** Per hand: whether this frame's select start may press (a controller's trigger, or a hand's pinch motion). */
+  private readonly pinchStartOk = { left: false, right: false };
+  /** Dev log: the widest tip distance before this frame's pinch start (meters). */
+  private readonly pinchStartWidest = { left: -1, right: -1 };
+  private readonly _motionThumb = new Vector3();
+  private readonly _motionIndex = new Vector3();
+  private holdRing!: Mesh<RingGeometry, MeshBasicMaterial>;
   /** Free play's one-button bar (Recenter), and it as a placed bar; null in challenge mode (the puzzle bar has it). */
   private freeBar: RecenterBarView | null = null;
   private freeBarPlaced: PlacedBar | null = null;
@@ -730,10 +782,10 @@ export class JoinSystem
   private stationaryGlow!: EdgeGlow;
   private movingGlow!: EdgeGlow;
   private control!: JoinTypeControlView;
-  /** The control as a placed element (for the card's clearance from the band). */
-  private controlPlaced!: PlacedElement;
   private controlEntity!: Entity;
   private debug: JoinDebug | null = null;
+  /** Which hand holds a slab (a hand holding one doesn't poke or pinch the side column). */
+  private grabSystem: GrabSystem | undefined;
 
   // Scratch -- allocated once, never in update().
   private readonly _a = new Vector3();
@@ -743,8 +795,6 @@ export class JoinSystem
   private readonly _e = new Vector3();
   private readonly _f = new Vector3();
   private readonly _g = new Vector3();
-  private readonly _viewUp = new Vector3();
-  private readonly _pinchA = new Vector3();
   private readonly _pinchB = new Vector3();
   private readonly _up = new Vector3();
   private readonly _normal = new Vector3();
@@ -755,6 +805,21 @@ export class JoinSystem
   private readonly _head = new Vector3();
   /** Where placeAboveBand put a slab's bottom edge, and its up axis. */
   private readonly _placedBottom = new Vector3();
+  /** Band-arc scratch (arcWorld). */
+  private readonly _arcPlace: ArcPlacement = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
+  private readonly _arcLift = new Vector3();
+  /** Where the eyes were when the band was placed: its arc is a level circle around them. */
+  private readonly _bandEyes = new Vector3();
+  private readonly _arcQ = new Quaternion();
+  private readonly _arcEuler = new Euler();
+  /** The band's lean as last placed (radians; see placeBand). */
+  private bandLean = 0;
+  /** Band scratch (placeBand must leave `_c` and `_q1` alone). */
+  private readonly _colA = new Vector3();
+  private readonly _colB = new Vector3();
+  private readonly _colFwd = new Vector3();
+  private readonly _colRight = new Vector3();
+  private readonly _colQ = new Quaternion();
   private readonly _placedUp = new Vector3();
   /** The result slab's placed bottom edge and up axis (followResultHeight keeps it there). */
   private readonly _resultBottom = new Vector3();
@@ -781,17 +846,17 @@ export class JoinSystem
     this.pointerGlowB = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_POINTER);
     // Exit's hold ring: built whole once; its draw range shows how far it has filled.
     // Mirrored in x, so it fills clockwise from the top.
-    this.exitRing = new Mesh(
+    this.holdRing = new Mesh(
       new RingGeometry(EXIT_RING_INNER_METERS, EXIT_RING_OUTER_METERS, EXIT_RING_SEGMENTS, 1, Math.PI / 2, Math.PI * 2),
       // Double-sided: the mirroring turns its faces around.
       new MeshBasicMaterial({ color: new Color(COLOR_EXIT_RING), transparent: true, depthWrite: false, side: DoubleSide }),
     );
-    this.exitRing.scale.x = -1;
-    this.exitRing.raycast = () => {};
-    this.exitRing.frustumCulled = false;
-    this.exitRing.renderOrder = 4;
-    this.exitRing.visible = false;
-    this.visualsRoot.add(this.exitRing);
+    this.holdRing.scale.x = -1;
+    this.holdRing.raycast = () => {};
+    this.holdRing.frustumCulled = false;
+    this.holdRing.renderOrder = 4;
+    this.holdRing.visible = false;
+    this.visualsRoot.add(this.holdRing);
     this.visualsRoot.add(
       this.lines.mesh,
       this.pulses.mesh,
@@ -817,11 +882,6 @@ export class JoinSystem
     this.control.fade.value = 0;
     this.control.document.visible = false;
     this.control.document.position.set(0, PARKED_Y, 0);
-    this.controlPlaced = {
-      object: this.control.document,
-      widthMeters: this.control.widthMeters,
-      heightMeters: this.control.heightMeters,
-    };
     this.controlTargets = [
       { centerX: this.control.innerCenterX, width: this.control.optionWidthMeters },
       { centerX: this.control.leftCenterX, width: this.control.optionWidthMeters },
@@ -830,18 +890,21 @@ export class JoinSystem
 
     // Free play: a bar with Recenter and Exit (challenge mode's puzzle bar has its own).
     if (!CHALLENGE_MODE) {
-      const freeBar = buildRecenterBar(slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm, BAR.recenter, BAR.exit);
+      const labelFontCm = slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm;
+      const freeBar = buildRecenterBar(labelFontCm, BAR.recenter, BAR.exit, joinTypeControlSizeCm(labelFontCm));
       this.freeBar = freeBar;
       this.freeBarPlaced = {
+        onArcLean: (leanRad) => setArcLean(freeBar, leanRad),
         object: freeBar.document,
         widthMeters: freeBar.widthMeters,
         heightMeters: freeBar.heightMeters,
         buttons: [
-          { name: 'recenter', centerX: freeBar.recenterCenterX, width: freeBar.buttonWidthMeters },
-          { name: 'exit', centerX: freeBar.exitCenterX, width: freeBar.buttonWidthMeters },
+          { name: 'recenter', centerX: freeBar.recenterCenterX, centerY: freeBar.centerY, width: freeBar.buttonWidthMeters },
+          { name: 'exit', centerX: freeBar.exitCenterX, centerY: freeBar.centerY, width: freeBar.buttonWidthMeters },
         ],
         buttonHeightMeters: freeBar.buttonHeightMeters,
-        baseWidthMeters: freeBar.widthMeters,
+        leadCenterYMeters: freeBar.leadCenterYMeters,
+        holdButton: null,
       };
       const freeBarEntity = this.world.createTransformEntity(freeBar.document);
       freeBarEntity.addComponent(PokeInteractable, {});
@@ -859,6 +922,7 @@ export class JoinSystem
       );
     }
     this.debug = import.meta.env.DEV && devFlag('debug') ? new JoinDebug(this) : null;
+    this.grabSystem = this.world.getSystem(GrabSystem);
 
     // Poke and ray select both arrive as UIKit clicks.
     // Rays (and controllers) only: a fingertip presses through the contact poke.
@@ -915,8 +979,8 @@ export class JoinSystem
         this.pointerDots.right.dispose();
         this.pointerGlowA.dispose();
         this.pointerGlowB.dispose();
-        this.exitRing.geometry.dispose();
-        this.exitRing.material.dispose();
+        this.holdRing.geometry.dispose();
+        this.holdRing.material.dispose();
         visualsEntity.dispose();
         this.debug?.dispose();
         for (const view of this.results.values()) {
@@ -950,12 +1014,20 @@ export class JoinSystem
         this.homeAfterSeparate = false;
         // A new session: Exit can end it again.
         this.exitEnded = false;
-        this.exitHeld = 0;
-        this.exitSelectStarted.left = false;
-        this.exitSelectStarted.right = false;
+        this.holdHeld = 0;
+        this.holdSelect.left.reset();
+        this.holdSelect.right.reset();
+        this.pinchMotion.left.reset();
+        this.pinchMotion.right.reset();
         this.layoutDirty = true;
       }),
     );
+    if (import.meta.env.DEV) {
+      touchProbe.tipGap = (hand) => (hand === 'left' || hand === 'right' ? this.pinchMotion[hand].latest : null);
+      this.cleanupFuncs.push(() => {
+        touchProbe.tipGap = null;
+      });
+    }
     if (CHALLENGE_MODE) {
       joinBridge.join = this;
       this.cleanupFuncs.push(() => {
@@ -970,10 +1042,13 @@ export class JoinSystem
     this.updateGlides(delta);
     sounds.update();
     this.unlockSoundOnPinch();
+    this.samplePinchMotion();
     // Result slabs for newly arrived tables: one document per frame.
     const pending = this.pendingResults.shift();
     if (pending) {
       this.resultViewFor(pending[0], pending[1]);
+      // The group is laid out for the pair's result width.
+      this.layoutDirty = true;
     }
     this.followRecenter();
     this.followResultHeight();
@@ -1014,7 +1089,7 @@ export class JoinSystem
     } else {
       this.updateFreeBarPoke();
     }
-    this.updateExitHold(delta);
+    this.updateHolds(delta);
     this.updateRecenterHover();
   }
 
@@ -1073,7 +1148,7 @@ export class JoinSystem
       this._a.setFromMatrixPosition(bar.document.matrixWorld);
       sounds.playClick(this._a);
     }
-    deskBridge.desk?.requestRecenter();
+    deskBridge.desk?.requestRecenter(bar ? this._a : undefined);
   }
 
   /** Free play: the one-button bar above the pair before a join (beside the control once joined). */
@@ -1097,17 +1172,12 @@ export class JoinSystem
     this._layoutB.copy(b.object.position);
     this.layoutDirty = false;
     this.readHead();
-    a.object.updateWorldMatrix(true, false);
-    b.object.updateWorldMatrix(true, false);
-    this._a.setFromMatrixPosition(b.object.matrixWorld);
-    a.object.worldToLocal(this._a);
-    const topY = Math.max(
-      a.doc.heightMeters / 2 + a.doc.tabHeightMeters,
-      this._a.y + b.doc.heightMeters / 2 + b.doc.tabHeightMeters,
-    );
-    this._d.set(this._a.x / 2, topY, 0);
-    a.object.localToWorld(this._d);
-    this.placeInBand(bar.object, bar.widthMeters, bar.heightMeters, this._d, a.object);
+    // The column where it will be beside the result (the control joins it once joined).
+    this.planGroup(a, b, false, 0);
+    this.placeColumn(false);
+    if (import.meta.env.DEV && this.debug) {
+      this.noteBand(a, b, false, null);
+    }
   }
 
   /** Free play: contact pokes on the Recenter button (the bar's only target). */
@@ -1119,13 +1189,14 @@ export class JoinSystem
     bar.object.updateWorldMatrix(true, false);
     for (const hand of HANDS) {
       const source = this.input.xr.getPrimaryInputSource(hand);
-      if (!source?.hand || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
+      if (!source?.hand || this.handHoldsSlab(hand) || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
         this.recenterPoke.reset(hand);
         continue;
       }
       this._pokeSource = source;
       this._pokeLocal.copy(this._pokeTip);
       bar.object.worldToLocal(this._pokeLocal);
+      unrollArc(this._pokeLocal, BAND_ARC_RADIUS_METERS, this.bandLean);
       if (this.recenterPoke.update(hand, this._pokeLocal, this.pokeOnFreeBar, this.pokeStraightness) === 'press') {
         this.pressRecenter('poke');
       }
@@ -1138,11 +1209,7 @@ export class JoinSystem
     if (!bar) {
       return Infinity;
     }
-    const button = bar.buttons[index];
-    return Math.hypot(
-      Math.max(0, Math.abs(local.x - button.centerX) - button.width / 2),
-      Math.max(0, Math.abs(local.y) - bar.buttonHeightMeters / 2),
-    );
+    return buttonDistance(local, bar.buttons[index], bar.buttonHeightMeters);
   }
 
   /**
@@ -1152,6 +1219,10 @@ export class JoinSystem
    * play's bar otherwise. Writes only on a change.
    */
   private updateRecenterHover(): void {
+    // Exit just ended the session: its frame is gone (no joint reads).
+    if (this.exitEnded) {
+      return;
+    }
     const recenter = this.iconHovered('recenter');
     if (recenter !== this.recenterHovered) {
       this.recenterHovered = recenter;
@@ -1161,7 +1232,7 @@ export class JoinSystem
         this.challengeLayout?.bar.onRecenterHover?.(recenter);
       }
     }
-    const exit = this.exitHeld > 0 || this.iconHovered('exit');
+    const exit = (this.holdHeld > 0 && this.holdName === 'exit') || this.iconHovered('exit');
     if (exit !== this.exitHovered) {
       this.exitHovered = exit;
       if (this.freeBar) {
@@ -1178,7 +1249,7 @@ export class JoinSystem
     if (!bar || !bar.object.visible) {
       return false;
     }
-    let button: { centerX: number; width: number } | null = null;
+    let button: ButtonRect | null = null;
     for (const candidate of bar.buttons) {
       if (candidate.name === name) {
         button = candidate;
@@ -1193,6 +1264,7 @@ export class JoinSystem
       if (source?.hand && readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
         this._rayLocal.copy(this._pokeTip);
         bar.object.worldToLocal(this._rayLocal);
+        unrollArc(this._rayLocal, BAND_ARC_RADIUS_METERS, this.bandLean);
         if (
           this._rayLocal.z >= -CONTACT_HOVER_BEHIND_METERS &&
           this._rayLocal.z <= NULL_HOVER_DEPTH_METERS &&
@@ -1213,136 +1285,181 @@ export class JoinSystem
     return false;
   }
 
-  // --- Exit: hold to end the session --------------------------------------------------
+  // --- Holds: Exit (ends the session) and Show answer -----------------------------------
+
+  /** How long `name` must be held, or 0 if it isn't a hold button now (Exit always; challenge mode's `holdButton`). */
+  private holdSeconds(bar: PlacedBar, name: string): number {
+    if (name === 'exit') {
+      return EXIT_HOLD_SECONDS;
+    }
+    return bar.holdButton?.name === name ? bar.holdButton.seconds : 0;
+  }
 
   /**
-   * Exit ends the XR session (back to the welcome screen) only when held for
-   * EXIT_HOLD_SECONDS, with a ring filling around its icon; letting go, or
-   * moving off it, cancels. Held means: a fingertip pressed onto it (in
-   * contact, from the front), or a pinch held on it (near, or through the
-   * hand pointer), or a controller's trigger held with its ray on it. A
-   * press alone does nothing.
+   * The hold buttons -- Exit, and (challenge mode) the bar's `holdButton`,
+   * Show answer before the answer -- act only when held, with a ring filling
+   * on the button; letting go, or moving off it, resets it to zero. Held
+   * means: a fingertip pressed onto it (in contact, from the front), or one
+   * continuous pinch through the hand pointer (a pinch motion) or trigger
+   * that started on it (see handHolds). Hover alone, or a select already
+   * held when the pointer arrived, never moves the ring. A press alone does
+   * nothing (a released hold tells challenge mode, which says to hold).
    */
-  private updateExitHold(delta: number): void {
+  private updateHolds(delta: number): void {
     const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
-    let button: { centerX: number; width: number } | null = null;
-    if (bar && bar.object.visible && !this.exitEnded) {
-      for (const candidate of bar.buttons) {
-        if (candidate.name === 'exit') {
-          button = candidate;
-        }
-      }
-    }
+    const live = !!bar && bar.object.visible && !this.exitEnded;
+    let name = '';
+    let button: BarButtonRect | null = null;
     for (const hand of HANDS) {
-      if (this.input.xr.gamepads[hand]?.getSelectStart()) {
-        this.exitSelectStarted[hand] = true;
+      const held = live && bar ? this.handHolds(hand, bar) : null;
+      if (held && !button) {
+        name = held.name;
+        button = held;
       }
     }
-    let holding = false;
-    if (bar && button) {
-      bar.object.updateWorldMatrix(true, false);
-      for (const hand of HANDS) {
-        if (this.handHoldsExit(hand, bar, button)) {
-          holding = true;
-          break;
+    if (!bar || !button || name !== this.holdName) {
+      if (this.holdHeld > 0) {
+        if (import.meta.env.DEV && this.debug) {
+          this.debug.note(`${this.holdName} hold cancelled after ${this.holdHeld.toFixed(2)} s`);
+        }
+        if (this.holdName !== 'exit') {
+          joinBridge.challenge?.onHoldCancelled(this.holdName);
         }
       }
-    }
-    if (!holding || !bar || !button) {
-      if (this.exitHeld > 0 && import.meta.env.DEV && this.debug) {
-        this.debug.note(`Exit hold cancelled after ${this.exitHeld.toFixed(2)} s (needs ${EXIT_HOLD_SECONDS} s)`);
+      this.holdHeld = 0;
+      this.holdName = name;
+      this.holdRing.visible = false;
+      if (!bar || !button) {
+        return;
       }
-      this.exitHeld = 0;
-      this.exitRing.visible = false;
+    }
+    const seconds = this.holdSeconds(bar, name);
+    if (this.holdHeld === 0 && import.meta.env.DEV && this.debug) {
+      this.debug.note(`${name} hold started (${this.holdPath}; needs ${seconds} s)`);
+    }
+    this.holdHeld += delta;
+    const progress = Math.min(1, this.holdHeld / seconds);
+    // The ring: on the button (an icon: around it; a label: at its right end),
+    // just in front of the bar, filling clockwise from the top.
+    const label = button.width > HOLD_RING_ICON_MAX_WIDTH_METERS;
+    const ringX = label ? button.centerX + button.width / 2 - HOLD_RING_END_INSET_METERS : button.centerX;
+    const scale = label ? HOLD_RING_LABEL_SCALE : 1;
+    // Mirrored in x, so it fills clockwise from the top.
+    this.holdRing.scale.set(-scale, scale, scale);
+    this.arcWorld(bar.object, ringX, button.centerY ?? 0, EXIT_RING_LIFT_METERS, this._a, this.holdRing.quaternion);
+    this.holdRing.position.copy(this._a);
+    this.holdRing.geometry.setDrawRange(0, 6 * Math.max(1, Math.ceil(EXIT_RING_SEGMENTS * progress)));
+    this.holdRing.visible = true;
+    if (progress < 1) {
       return;
     }
-    if (this.exitHeld === 0 && import.meta.env.DEV && this.debug) {
-      this.debug.note(`Exit hold started (${this.exitHoldPath})`);
+    this.holdRing.visible = false;
+    this.holdHeld = 0;
+    // Done: every hand's select must start again to hold anything.
+    for (const hand of HANDS) {
+      this.holdSelect[hand].reset();
     }
-    this.exitHeld += delta;
-    const progress = Math.min(1, this.exitHeld / EXIT_HOLD_SECONDS);
-    // The ring: on the button, just in front of the bar, filling clockwise from the top.
-    this._a.set(button.centerX, 0, EXIT_RING_LIFT_METERS);
-    bar.object.localToWorld(this._a);
-    this.exitRing.position.copy(this._a);
-    bar.object.getWorldQuaternion(this.exitRing.quaternion);
-    this.exitRing.geometry.setDrawRange(0, 6 * Math.max(1, Math.ceil(EXIT_RING_SEGMENTS * progress)));
-    this.exitRing.visible = true;
-    if (progress >= 1) {
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`${name} held ${seconds} s (${this.holdPath})${name === 'exit' ? ': ending the XR session' : ''}`);
+    }
+    if (name === 'exit') {
       this.exitEnded = true;
-      this.exitRing.visible = false;
-      if (import.meta.env.DEV && this.debug) {
-        this.debug.note(`Exit held ${EXIT_HOLD_SECONDS} s (${this.exitHoldPath}): ending the XR session`);
-      }
       sounds.playClick(this._a);
       void this.xrManager.getSession()?.end();
+    } else {
+      joinBridge.challenge?.onHoldComplete(name);
     }
   }
 
-  /** Whether `hand` holds the Exit button now (see updateExitHold); sets `exitHoldPath`. */
-  private handHoldsExit(
-    hand: (typeof HANDS)[number],
-    bar: PlacedBar,
-    button: { centerX: number; width: number },
-  ): boolean {
+  /**
+   * The hold button `hand` holds this frame, or null (see updateHolds); sets
+   * `holdPath`. A fingertip pressed onto it; or one continuous pinch or
+   * trigger that started on it (a hand's as a pinch motion) and is still on
+   * it. Any end of that select -- even a one-frame flicker -- or moving off
+   * the button ends it for good: a select already held when the pointer
+   * arrives never holds it.
+   */
+  private handHolds(hand: (typeof HANDS)[number], bar: PlacedBar): BarButtonRect | null {
     const source = this.input.xr.getPrimaryInputSource(hand);
-    if (!source) {
-      return false;
+    const hold = this.holdSelect[hand];
+    // A hand holding a slab never holds a button (its pinch is the grab).
+    if (!source || this.handHoldsSlab(hand)) {
+      hold.reset();
+      return null;
     }
-    // A pinch or trigger counts only if it started in this session (one held through the session start isn't a hold).
-    const selecting = this.exitSelectStarted[hand] && !!this.input.xr.gamepads[hand]?.getSelecting();
+    bar.object.updateWorldMatrix(true, false);
+    const gamepad = this.input.xr.gamepads[hand];
+    const selecting = !!gamepad?.getSelecting();
+    const selectStart = !!gamepad?.getSelectStart();
+    let on: BarButtonRect | null = null;
+    if (hold.needsOnTarget(selecting, selectStart)) {
+      on = this.selectOn(hand, source, bar);
+      if (selectStart) {
+        this.holdTarget[hand] = on?.name ?? '';
+      } else if (on && on.name !== this.holdTarget[hand]) {
+        on = null;
+      }
+    }
+    if (hold.step(selecting, selectStart, this.pinchStartOk[hand], on !== null)) {
+      return on;
+    }
+    return source.hand ? this.fingertipOn(source, bar) : null;
+  }
+
+  /** The hold button a fingertip is pressed onto: from just in front of its face to a little behind. */
+  private fingertipOn(source: XRInputSource, bar: PlacedBar): BarButtonRect | null {
+    if (!readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
+      return null;
+    }
+    this._pokeLocal.copy(this._pokeTip);
+    bar.object.worldToLocal(this._pokeLocal);
+    unrollArc(this._pokeLocal, BAND_ARC_RADIUS_METERS, this.bandLean);
+    if (this._pokeLocal.z > EXIT_TOUCH_FRONT_METERS || this._pokeLocal.z < -BUTTON_PINCH_BACK_DEPTH_METERS) {
+      return null;
+    }
+    for (const button of bar.buttons) {
+      if (this.holdSeconds(bar, button.name) > 0 && onButton(this._pokeLocal, button, bar.buttonHeightMeters)) {
+        if (import.meta.env.DEV) {
+          this.holdPath = 'fingertip';
+        }
+        return button;
+      }
+    }
+    return null;
+  }
+
+  /** The hold button `hand`'s select is on now: its pointer (a hand), or its ray (a controller); or null. */
+  private selectOn(hand: (typeof HANDS)[number], source: XRInputSource, bar: PlacedBar): BarButtonRect | null {
+    let button: BarButtonRect | undefined;
     if (source.hand) {
-      // A fingertip pressed onto it: from just in front of its face to a little behind.
-      if (readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
-        this._pokeLocal.copy(this._pokeTip);
-        bar.object.worldToLocal(this._pokeLocal);
-        if (
-          this._pokeLocal.z <= EXIT_TOUCH_FRONT_METERS &&
-          this._pokeLocal.z >= -BUTTON_PINCH_BACK_DEPTH_METERS &&
-          onButton(this._pokeLocal, button, bar.buttonHeightMeters)
-        ) {
-          this.exitHoldPath = 'fingertip';
-          return true;
-        }
-      }
-      if (!selecting) {
-        return false;
-      }
-      // A pinch held on it.
-      if (readPinchPoint(this.world, this.player, source, this._pinchA)) {
-        this._pinchB.copy(this._pinchA);
-        bar.object.worldToLocal(this._pinchB);
-        if (
-          this._pinchB.z <= BUTTON_PINCH_FRONT_DEPTH_METERS &&
-          this._pinchB.z >= -BUTTON_PINCH_BACK_DEPTH_METERS &&
-          onButton(this._pinchB, button, bar.buttonHeightMeters)
-        ) {
-          this.exitHoldPath = 'pinch';
-          return true;
-        }
-      }
-      // A pinch held through the hand pointer.
+      // A pinch through the hand pointer (a pinch right at a button does nothing: only a fingertip presses there).
       const pointer = this.pointers[hand];
-      if (
-        pointer.active &&
-        (pointer.hit.target === 'exit' || (pointer.hit.target === 'bar' && bar.buttons[pointer.barIndex]?.name === 'exit'))
-      ) {
-        this.exitHoldPath = 'pointer pinch';
-        return true;
+      if (pointer.active) {
+        button =
+          pointer.hit.target === 'exit'
+            ? bar.buttons.find((candidate) => candidate.name === 'exit')
+            : pointer.hit.target === 'bar'
+              ? bar.buttons[pointer.barIndex]
+              : undefined;
       }
-      return false;
+    } else if (this.readRay(hand)) {
+      // A controller: its ray on it.
+      this.castRay(false, HAND_POINTER_MAX_METERS);
+      const hit = this._rayHit;
+      button =
+        hit.target === 'exit'
+          ? bar.buttons.find((candidate) => candidate.name === 'exit')
+          : hit.target === 'bar'
+            ? bar.buttons[this.barButtonIndexAt(hit.point)]
+            : undefined;
     }
-    // A controller: the trigger held, its ray on it.
-    if (!selecting || !this.readRay(hand)) {
-      return false;
+    if (!button || this.holdSeconds(bar, button.name) === 0) {
+      return null;
     }
-    this.castRay(false, HAND_POINTER_MAX_METERS);
-    const hit = this._rayHit;
-    if (hit.target === 'exit' || (hit.target === 'bar' && bar.buttons[this.barButtonIndexAt(hit.point)]?.name === 'exit')) {
-      this.exitHoldPath = 'controller trigger';
-      return true;
+    if (import.meta.env.DEV) {
+      this.holdPath = `${hand} ${source.hand ? 'pointer pinch' : 'controller trigger'}`;
     }
-    return false;
+    return button;
   }
 
   /**
@@ -1502,7 +1619,8 @@ export class JoinSystem
     control.document.updateWorldMatrix(true, false);
     for (const hand of HANDS) {
       const source = this.input.xr.getPrimaryInputSource(hand);
-      if (!source?.hand || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
+      // A hand holding a slab doesn't poke the side column (the arm passes it on the way to the right slab).
+      if (!source?.hand || this.handHoldsSlab(hand) || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._pokeTip)) {
         this.controlPoke.reset(hand);
         continue;
       }
@@ -1621,6 +1739,29 @@ export class JoinSystem
         return count;
       },
     });
+  }
+
+  /**
+   * Each frame, before anything reads this frame's select starts: every
+   * tracked hand's thumb-index tip distance into its pinch motion, and for
+   * each select start whether it may press -- a controller's trigger always;
+   * a hand's pinch only as a pinch motion (the tips opened just before; see
+   * PinchMotion). Nothing once Exit has ended the session (the frame is gone).
+   */
+  private samplePinchMotion(): void {
+    const now = this.tweens.now;
+    for (const hand of HANDS) {
+      const source = this.exitEnded ? undefined : this.input.xr.getPrimaryInputSource(hand);
+      const tracked =
+        !!source?.hand &&
+        readJointsPoint(this.world, this.player, source, THUMB_TIP, this._motionThumb) &&
+        readJointsPoint(this.world, this.player, source, INDEX_TIP, this._motionIndex);
+      this.pinchMotion[hand].sample(tracked ? this._motionThumb.distanceTo(this._motionIndex) : null, now);
+      if (this.input.xr.gamepads[hand]?.getSelectStart()) {
+        this.pinchStartOk[hand] = !source?.hand || this.pinchMotion[hand].isPinchMotion(now);
+        this.pinchStartWidest[hand] = source?.hand ? this.pinchMotion[hand].widest(now) : -1;
+      }
+    }
   }
 
   /** A pinch is a WebXR user gesture: try to start audio until it runs. */
@@ -1752,6 +1893,15 @@ export class JoinSystem
 
   isGliding(): boolean {
     return this.gliding();
+  }
+
+  handHoldsSlab(hand: 'left' | 'right'): boolean {
+    for (const entity of this.queries.held.entities) {
+      if (this.grabSystem?.getHolderHand(entity) === hand) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Dev: slide the RIGHT slab away and separate. */
@@ -2087,8 +2237,8 @@ export class JoinSystem
 
   requestLayout(): void {
     this.layoutDirty = true;
-    // Joined: the band (control + bar) and the card are placed with the
-    // result; re-place now (e.g. the bar just resized for the filter chip).
+    // Joined: the column (control + bar) and the card are placed with the
+    // result; re-place now (e.g. the column just grew for the filter area).
     const view = this.active;
     if (this.state.phase === 'joined' && view) {
       const left = this.sources.get(view.leftId);
@@ -2108,13 +2258,12 @@ export class JoinSystem
     }
     bar.object.updateWorldMatrix(true, false);
     const buttons = bar.buttons.map((button) => {
-      this._d.set(button.centerX, 0, 0);
-      bar.object.localToWorld(this._d);
+      this.arcWorld(bar.object, button.centerX, button.centerY, 0, this._d);
       return `${button.name} ${cm(button.width)} wide, ${this._d.distanceTo(this._head).toFixed(2)} m`;
     });
     const control = this.control.document.position;
     this.debug.note(
-      `puzzle bar re-placed: ${cm(bar.widthMeters)} wide (base ${cm(bar.baseWidthMeters)}); ${buttons.join('; ')}; ` +
+      `puzzle bar re-placed: ${cm(bar.widthMeters)} x ${cm(bar.heightMeters)}; ${buttons.join('; ')}; ` +
         `control center (${control.x.toFixed(3)}, ${control.y.toFixed(3)}, ${control.z.toFixed(3)})`,
     );
   }
@@ -2753,6 +2902,36 @@ export class JoinSystem
         this.computeDockPose(partner, source, source.id === this.state.right, this._a, this._q1);
         this.startDock(source, this._a, this._q1, REDOCK_DURATION_SECONDS);
       }
+      return;
+    }
+    if (this.state.phase === 'idle' && !this.homeAfterSeparate) {
+      // Moved without docking: no use leaving it wherever it was dropped (possibly out of view).
+      this.glideSlabHome(source);
+    }
+  }
+
+  /** Eases one released slab back to its home pose (HOME_GLIDE_SECONDS), if it's away from it. */
+  private glideSlabHome(source: SourceSlab): void {
+    const home = this.homes.get(source.id);
+    const glide = this.glides.get(source.id);
+    if (!home?.set || !glide) {
+      return;
+    }
+    const away = source.object.position.distanceTo(home.pos);
+    if (away < HOME_RETURN_MIN_METERS && source.object.quaternion.angleTo(home.quat) < HOME_RETURN_MIN_RAD) {
+      return;
+    }
+    glide.active = true;
+    glide.slab = source;
+    glide.fromPos.copy(source.object.position);
+    glide.fromQuat.copy(source.object.quaternion);
+    glide.toPos.copy(home.pos);
+    glide.toQuat.copy(home.quat);
+    glide.elapsed = 0;
+    glide.duration = HOME_GLIDE_SECONDS;
+    this.layoutDirty = true;
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`slab returned home: ${source.id}, ${away.toFixed(2)} m (released outside preview range)`);
     }
   }
 
@@ -3430,99 +3609,82 @@ export class JoinSystem
 
     // Bottom-edge midpoint of the result slab: centered between the two
     // slabs (the RIGHT one at its dock pose), above the pair's higher top
-    // edge -- tops differ, since docked slabs align their bottoms.
+    // edge -- tops differ, since docked slabs align their bottoms. planGroup
+    // then turns it to its place in the group.
     const rightX = this.dockSide * (left.doc.widthMeters / 2 + DOCK_GAP_METERS + right.doc.widthMeters / 2);
     this._c.set(rightX / 2, pairTopLocalY(left, right), 0);
     left.object.localToWorld(this._c);
 
-    // The control sits in the band between the pair's top edge and this
-    // slab's bottom edge (next to the SQL caption it switches). Place it
-    // first (and the puzzle bar beside it), then keep this slab's bottom
-    // edge above the control in view.
-    this.placeControl(left, right);
-    if (this.challengeLayout) {
-      this.placeBarBesideControl(this.challengeLayout.bar);
-    } else if (this.freeBarPlaced) {
-      this.placeBarBesideControl(this.freeBarPlaced);
-    }
-    // In challenge mode the card sits beside the result slab (not on top of
-    // it), so nothing stacks above the result.
-    const card = this.challengeLayout?.card;
+    // Left to right: the control column, the result, the card; the result
+    // stands above the pair, the column level with its bottom.
     // Its status badge (challenge mode) rises above its top edge. Fitted for
     // its tallest state, anchored by its bottom edge at its height now.
     const shown = shownHeightMeters(view.doc);
-    this.placeAboveBand(
-      view.object,
-      view.doc.heightMeters,
-      this.control.document,
-      this.control.heightMeters,
-      view.doc.tabHeightMeters,
-      shown,
-    );
+    const plan = this.placeInGroup(left, right, true, view.object, view.doc.widthMeters, view.doc.heightMeters, view.doc.tabHeightMeters, shown);
+    this.placeColumn(true);
+    const card = this.challengeLayout?.card;
     this._resultBottom.copy(this._placedBottom);
     this._resultUp.copy(this._placedUp);
     this.resultPlaced = view;
     this.resultPlacedHeight = shown;
     if (card) {
-      // Clear of the band (control and bar) and the pair's top edge (the
-      // RIGHT slab may still be docking: measured in the LEFT slab's frame).
-      const bar = this.challengeLayout?.bar;
-      let below = this.topEdgeDeg(bar ? [this.controlPlaced, bar] : [this.controlPlaced], []);
-      this._g.set(0, pairTopLocalY(left, right), 0);
-      left.object.localToWorld(this._g);
-      below = Math.max(below, degreesFromForward(this._head, this.headPitchDown, this._g));
-      this.placeCard(view.object, view.doc.widthMeters, shown, card, below);
+      // On the right, clear of the pair's top edge (the RIGHT slab may still
+      // be docking: measured at its dock pose); beside the width it's planned for.
+      this.placeCard(view.object, plan.resultWidth, shown, card, plan.pairTopDeg);
     }
   }
 
   /**
    * Places a top-anchored slab (`object`) whose bottom-edge midpoint starts
-   * at `_c` (on the pair's top-edge line, in the frame of `_q1`): lifted
-   * above that line, kept above `band`'s top edge in view, leaning to face
-   * the eyes, pushed back if its top would leave the view. Fitted for its
-   * tallest state (`height` m: the result's 12-row reserve), but anchored by
-   * its bottom edge: positioned for `shownHeight` (its height now), so a
-   * short result sits low and only grows upward. Leaves that bottom edge in
+   * at `_c` (on the pair's top-edge line, in the frame of `_q1`): moved back
+   * to RESULT_TARGET_DISTANCE_METERS from the eyes (behind the pair), its
+   * bottom edge on the line `floorDeg` (degrees from the natural gaze: just
+   * above the pair's top edge in view), leaning to face the eyes, pushed
+   * back if its top would leave the view. Fitted for its tallest state
+   * (`height` m: the result's 12-row reserve), but anchored by its bottom
+   * edge: positioned for `shownHeight` (its height now), so a short result
+   * sits low and only grows upward. Leaves that bottom edge in
    * `_placedBottom` and the slab's up axis in `_placedUp`. Overwrites `_c`.
    */
   private placeAboveBand(
     object: Object3D,
     height: number,
-    band: Object3D,
-    bandHeight: number,
+    floorDeg: number,
     above = 0,
     shownHeight = height,
+    yawDeg = 0,
+    distance = RESULT_TARGET_DISTANCE_METERS,
   ): void {
     this._up.copy(UP).applyQuaternion(this._q1);
     this._normal.set(0, 0, 1).applyQuaternion(this._q1);
-    this._c.addScaledVector(this._up, RESULT_GAP_ABOVE_METERS).addScaledVector(this._normal, -RESULT_BEHIND_METERS);
+    this._c.addScaledVector(this._normal, -RESULT_BEHIND_METERS);
+    const minBottomRad = MathUtils.degToRad(floorDeg) - this.headPitchDown;
+    // The bottom edge on the floor line, at its horizontal distance.
+    const toFloor = () => {
+      this._f.subVectors(this._c, this._head);
+      this._c.y = this._head.y + Math.hypot(this._f.x, this._f.z) * Math.tan(minBottomRad);
+    };
+    toFloor();
 
-    band.updateWorldMatrix(true, false);
-    this._f.set(0, bandHeight / 2, 0);
-    band.localToWorld(this._f);
-    const minBottomRad =
-      MathUtils.degToRad(degreesFromForward(this._head, this.headPitchDown, this._f) + CONTROL_VIEW_GAP_DEG) -
-      this.headPitchDown;
-    this._f.subVectors(this._c, this._head);
-    const minBottomY = this._head.y + Math.hypot(this._f.x, this._f.z) * Math.tan(minBottomRad);
-    if (this._c.y < minBottomY) {
-      this._c.y = minBottomY;
-    }
-
-    // Shared yaw, and the horizontal "away from the viewer" axis it implies.
+    // Its bearing from the eyes: `yawDeg` right of the pair's forward (it
+    // faces the eyes), and the horizontal "away from the viewer" axis it implies.
     this._euler.setFromQuaternion(this._q1, 'YXZ');
-    const yaw = this._euler.y;
+    const yaw = this._euler.y - MathUtils.degToRad(yawDeg);
     this._b.set(0, 0, -1).applyAxisAngle(UP, yaw);
+    this._f.subVectors(this._c, this._head);
+    const startHorizontal = Math.hypot(this._f.x, this._f.z);
+    this._c.x = this._head.x + this._b.x * startHorizontal;
+    this._c.z = this._head.z + this._b.z * startHorizontal;
 
-    // Lean to face the eyes from the slab's own center. If that center is
-    // farther than its rows stay legible at (RESULT_MAX_PUSHED_DISTANCE_METERS:
-    // row text at least RESULT_MIN_PUSHED_ROW_TEXT_DEG), pull the slab toward
-    // the viewer, by up to RESULT_MAX_PULL_METERS; nearer, the same height
-    // sits lower in view, so its bottom edge is raised again to stay above
-    // the band (it never hangs in front of the control or the pair's rows).
-    // Never shrunk.
+    // Lean to face the eyes from the slab's own center, and move it (along
+    // the away axis) until that center is RESULT_TARGET_DISTANCE_METERS from
+    // the eyes: farther than the pair, so it reads as behind it. Never past
+    // RESULT_MAX_PUSHED_DISTANCE_METERS (row text at least
+    // RESULT_MIN_PUSHED_ROW_TEXT_DEG); a pair pushed far away pulls it in by
+    // at most RESULT_MAX_PULL_METERS. Its bottom stays on the floor line.
     let lean = 0;
     let pulled = 0;
+    const target = Math.min(distance, RESULT_MAX_PUSHED_DISTANCE_METERS);
     for (let i = 0; i < RESULT_FIT_ITERATIONS; i++) {
       this._a.subVectors(this._c, this._head);
       lean = eyeFacingLeanFromBottom(this._head.y - this._c.y, this._a.dot(this._b), height);
@@ -3530,18 +3692,16 @@ export class JoinSystem
         .copy(this._c)
         .addScaledVector(this._b, (height / 2) * Math.sin(lean))
         .addScaledVector(UP, (height / 2) * Math.cos(lean));
-      const excess = this._a.distanceTo(this._head) - RESULT_MAX_PUSHED_DISTANCE_METERS;
-      const pull = Math.min(Math.max(0, excess), RESULT_MAX_PULL_METERS - pulled);
-      if (pull <= 1e-4) {
+      let move = target - this._a.distanceTo(this._head);
+      if (move < 0) {
+        move = -Math.min(-move, RESULT_MAX_PULL_METERS - pulled);
+        pulled -= move;
+      }
+      if (Math.abs(move) <= 1e-4) {
         break;
       }
-      this._c.addScaledVector(this._b, -pull);
-      pulled += pull;
-      this._f.subVectors(this._c, this._head);
-      const raisedBottomY = this._head.y + Math.hypot(this._f.x, this._f.z) * Math.tan(minBottomRad);
-      if (this._c.y < raisedBottomY) {
-        this._c.y = raisedBottomY;
-      }
+      this._c.addScaledVector(this._b, move);
+      toFloor();
     }
 
     // With the pair close to the eyes, the slab's top edge -- or the top of
@@ -3605,101 +3765,278 @@ export class JoinSystem
   }
 
   /**
-   * The join-type control: centered on the seam at the pair's (higher) top
-   * edge, lifted CONTROL_SLAB_CLEARANCE_METERS off it toward the eyes, then
-   * raised in view so its bottom edge sits just above that edge -- in the
-   * band below the result slab. Oriented from the pair alone: the pair's
-   * yaw, a lean that faces the eyes, zero roll. (Turning it to face the eye
-   * point instead twisted it against the slabs whenever the seam sat off to
-   * one side, e.g. after Shift+J.) Leaves `_c` and `_q1` untouched for
-   * `placeResult`.
+   * Plans the group, left to right: the control column, the result (or its
+   * slot before the join), the card. Centered on straight ahead (the pair's
+   * forward from the eyes) so every outer edge stays within
+   * VIEW_HALF_WIDTH_DEG; if the result is too wide for that, it moves back
+   * (up to RESULT_MAX_FIT_DISTANCE_METERS). The result's floor (and the
+   * column's bottom edge) is RESULT_FLOOR_GAP_DEG above the pair's top edge
+   * in view. Laid out for the pair's result in either order (the wider):
+   * nothing moves at the join. `joined`: the RIGHT slab may still be
+   * docking, so it's measured at its dock pose. Sets the pair's frame
+   * (`_colFwd` / `_colRight`).
    */
-  private placeControl(left: SourceSlab, right: SourceSlab): void {
-    left.object.updateWorldMatrix(true, false);
-    const seamX = this.dockSide * (left.doc.widthMeters / 2 + DOCK_GAP_METERS / 2);
-    this._d.set(seamX, pairTopLocalY(left, right), 0);
-    left.object.localToWorld(this._d);
-    this.placeInBand(this.control.document, this.control.widthMeters, this.control.heightMeters, this._d, left.object);
+  private planGroup(a: SourceSlab, b: SourceSlab, joined: boolean, slotWidth: number, nearFactor = 1): GroupPlan {
+    const plan = this.plan;
+    plan.pairTopDeg = this.pairTopDeg(a, b, joined);
+    plan.floorDeg = plan.pairTopDeg + RESULT_FLOOR_GAP_DEG;
+    let width = slotWidth;
+    for (const key of [resultKey(a.id, b.id), resultKey(b.id, a.id)]) {
+      width = Math.max(width, this.results.get(key)?.doc.widthMeters ?? 0);
+    }
+    plan.resultWidth = width;
+    const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
+    const r = BAND_ARC_RADIUS_METERS;
+    // The column's angular width on its arc (at its bottom edge's height: fixed as its filter area grows).
+    const bottomElevation = MathUtils.degToRad(plan.floorDeg) - this.headPitchDown;
+    const columnDeg = bar ? MathUtils.radToDeg(arcAngle(bar.widthMeters, r, bottomElevation)) : 0;
+    const columnGap = bar ? COLUMN_RESULT_GAP_DEG : 0;
+    const card = this.challengeLayout?.card;
+    const cardDeg = card
+      ? MathUtils.radToDeg(2 * Math.atan(card.widthMeters / 2 / PLANNED_CARD_DISTANCE_METERS)) + CARD_SIDE_GAP_DEG
+      : 0;
+    // Its width in view at its bottom edge (the nearest, horizontally: it leans back): `nearFactor` of its distance.
+    const resultDeg = (distance: number) => MathUtils.radToDeg(2 * Math.atan(width / 2 / (distance * nearFactor)));
+    const rest = columnDeg + columnGap + cardDeg;
+    let distance = RESULT_TARGET_DISTANCE_METERS;
+    if (rest + resultDeg(distance) > 2 * VIEW_HALF_WIDTH_DEG) {
+      const room = Math.max(1, 2 * VIEW_HALF_WIDTH_DEG - rest);
+      distance = Math.min(RESULT_MAX_FIT_DISTANCE_METERS, width / 2 / Math.tan(MathUtils.degToRad(room / 2)) / nearFactor);
+    }
+    plan.resultDistance = distance;
+    const left = -(rest + resultDeg(distance)) / 2;
+    plan.columnLeftYawDeg = left;
+    plan.resultYawDeg = left + columnDeg + columnGap + resultDeg(distance) / 2;
+    return plan;
   }
 
   /**
-   * Challenge mode: control + gap + bar as one group, centered where the
-   * control alone would sit (on the seam), for the bar at its base width;
-   * a wider bar extends to the right. Both share the control's
-   * orientation and depth, and the bar is laid out along the control's own
-   * horizontal axis, so the gap between them is exact (never an overlap)
-   * and the bar keeps the control's clearance from the slabs (that axis
-   * lies in the slabs' plane). Run after placeControl.
+   * Places a top-anchored slot (the result, or its outline) in the planned
+   * group (placeAboveBand from `_c`, as there). Twice: the first pass
+   * measures how much nearer (horizontally) its bottom edge is than its
+   * center -- it leans back -- which sets its width in view for the second.
    */
-  private placeBarBesideControl(bar: PlacedBar): void {
-    const control = this.control.document;
-    this._e.set(1, 0, 0).applyQuaternion(control.quaternion);
-    // Centered for the bar's base width (Hint and Next), so the control
-    // never moves when the bar grows (Filter, its chips): it grows right.
-    const groupWidth = this.control.widthMeters + BAR_CONTROL_GAP_METERS + bar.baseWidthMeters;
-    // Shift the control left so the group is centered on its old center...
-    control.position.addScaledVector(this._e, this.control.widthMeters / 2 - groupWidth / 2);
-    // ...and put the bar to its right, one gap away.
-    bar.object.quaternion.copy(control.quaternion);
-    bar.object.position
-      .copy(control.position)
-      .addScaledVector(this._e, this.control.widthMeters / 2 + BAR_CONTROL_GAP_METERS + bar.widthMeters / 2);
+  private placeInGroup(
+    a: SourceSlab,
+    b: SourceSlab,
+    joined: boolean,
+    object: Object3D,
+    slotWidth: number,
+    height: number,
+    above: number,
+    shownHeight: number,
+  ): GroupPlan {
+    this._slotStart.copy(this._c);
+    let nearFactor = 1;
+    for (let pass = 0; pass < 2; pass++) {
+      this._c.copy(this._slotStart);
+      const plan = this.planGroup(a, b, joined, slotWidth, nearFactor);
+      this.placeAboveBand(object, height, plan.floorDeg, above, shownHeight, plan.resultYawDeg, plan.resultDistance);
+      this._f.subVectors(this._placedBottom, this._head);
+      nearFactor = Math.hypot(this._f.x, this._f.z) / plan.resultDistance;
+    }
+    return this.plan;
   }
+  private readonly _slotStart = new Vector3();
+
+  /** The group's plan (planGroup), reused in place. */
+  private readonly plan: GroupPlan = {
+    pairTopDeg: 0,
+    floorDeg: 0,
+    resultWidth: 0,
+    resultDistance: RESULT_TARGET_DISTANCE_METERS,
+    resultYawDeg: 0,
+    columnLeftYawDeg: 0,
+  };
 
   /**
-   * Places a touchable element (`width` x `height` m, origin at its center)
-   * in the band above the slabs' top edge at world point `anchor`: brought
-   * toward the eyes along the sight line to BAND_DISTANCE_METERS from them
-   * (at least CONTROL_SLAB_CLEARANCE_METERS), raised in view so its
-   * bottom edge clears that edge, oriented from `frame` (a slab: its yaw, a
-   * lean that faces the eyes, zero roll), and pushed out until every corner
-   * is that clearance off the slabs' plane. Leaves `_c`, `_d` and `_q1`
-   * untouched (it reads `anchor` first).
+   * The pair's top edge in view (degrees from the natural gaze: its highest
+   * top corner, name tabs included), and its frame (`_colFwd` / `_colRight`:
+   * its yaw, no lean or roll). `joined`: the docking slab at its dock pose.
    */
-  private placeInBand(target: Object3D, width: number, height: number, anchor: Vector3, frame: Object3D): void {
-    frame.updateWorldMatrix(true, false);
-    // Toward the eyes along the sight line, to BAND_DISTANCE_METERS from them
-    // (within near reach, the pair sits farther back), and at least the
-    // clearance off the slabs.
-    const pull = Math.max(CONTROL_SLAB_CLEARANCE_METERS, anchor.distanceTo(this._head) - BAND_DISTANCE_METERS);
-    this._e.subVectors(this._head, anchor).normalize();
-    target.position.copy(anchor).addScaledVector(this._e, pull);
-    this._viewUp.copy(UP).addScaledVector(this._e, -UP.dot(this._e)).normalize();
-    const lift = height / 2 + target.position.distanceTo(this._head) * Math.tan(MathUtils.degToRad(CONTROL_VIEW_GAP_DEG));
-    target.position.addScaledVector(this._viewUp, lift);
-
-    // The pair's yaw; lean back by the eye line's elevation in the pair's
-    // vertical plane; no roll.
-    frame.getWorldQuaternion(this._q2);
-    this._euler.setFromQuaternion(this._q2, 'YXZ');
-    const yaw = this._euler.y;
-    this._g.set(0, 0, -1).applyAxisAngle(UP, yaw);
-    this._f.subVectors(target.position, this._head);
-    const lean = Math.atan2(this._head.y - target.position.y, Math.max(this._f.dot(this._g), 1e-3));
-    this._euler.set(-lean, yaw, 0, 'YXZ');
-    target.quaternion.setFromEuler(this._euler);
-
-    // It faces the eyes, so it's tilted against the slabs' plane (both
-    // slabs share it) and the sight line isn't the plane's normal: push it
-    // along the sight line until every corner is at least
-    // CONTROL_SLAB_CLEARANCE_METERS off that plane.
-    target.updateWorldMatrix(true, false);
-    let minOffPlane = Infinity;
-    for (let sx = -1; sx <= 1; sx += 2) {
-      for (let sy = -1; sy <= 1; sy += 2) {
-        this._f.set((sx * width) / 2, (sy * height) / 2, 0);
-        target.localToWorld(this._f);
-        frame.worldToLocal(this._f);
-        minOffPlane = Math.min(minOffPlane, this._f.z);
+  private pairTopDeg(a: SourceSlab, b: SourceSlab, joined: boolean): number {
+    a.object.updateWorldMatrix(true, false);
+    a.object.getWorldQuaternion(this._colQ);
+    this._euler.setFromQuaternion(this._colQ, 'YXZ');
+    this._colFwd.set(0, 0, -1).applyAxisAngle(UP, this._euler.y);
+    this._colRight.set(1, 0, 0).applyAxisAngle(UP, this._euler.y);
+    let topDeg = -Infinity;
+    for (const slab of [a, b]) {
+      const docking = joined && this.dock.active && this.dock.slab === slab;
+      slab.object.updateWorldMatrix(true, false);
+      for (const sx of [-1, 1]) {
+        this._colA.set((sx * slab.doc.widthMeters) / 2, slabVisualTopLocalY(slab.doc), 0);
+        if (docking) {
+          this._colA.applyQuaternion(this.dock.toQuat).add(this.dock.toPos);
+        } else {
+          slab.object.localToWorld(this._colA);
+        }
+        topDeg = Math.max(topDeg, degreesFromForward(this._head, this.headPitchDown, this._colA));
       }
     }
-    if (minOffPlane < CONTROL_SLAB_CLEARANCE_METERS) {
-      frame.getWorldQuaternion(this._q2);
-      this._normal.set(0, 0, 1).applyQuaternion(this._q2);
-      const alongNormal = Math.max(0.2, this._e.dot(this._normal));
-      target.position.addScaledVector(this._e, (CONTROL_SLAB_CLEARANCE_METERS - minOffPlane) / alongNormal);
+    return topDeg;
+  }
+
+  /**
+   * The control column (the puzzle bar, or free play's bar), as planned
+   * (planGroup): left of the result, its bottom edge level with the
+   * result's, BAND_ARC_RADIUS_METERS from the eyes, its items on an arc
+   * around them (band-arc.ts), each facing them with no roll. Bottom-
+   * anchored: its filter area grows upward. Once joined, INNER | LEFT sits
+   * in its row (it never moves).
+   */
+  private placeColumn(joined: boolean): void {
+    const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
+    if (!bar) {
+      return;
+    }
+    const r = BAND_ARC_RADIUS_METERS;
+    // The bar's origin (its left edge's middle) on the arc, facing the eyes.
+    const elevation = MathUtils.degToRad(this.plan.floorDeg) - this.headPitchDown + bar.heightMeters / 2 / r;
+    const yaw = MathUtils.degToRad(this.plan.columnLeftYawDeg);
+    this._colA
+      .copy(this._colFwd)
+      .multiplyScalar(Math.cos(yaw))
+      .addScaledVector(this._colRight, Math.sin(yaw))
+      .multiplyScalar(Math.cos(elevation))
+      .addScaledVector(UP, Math.sin(elevation));
+    bar.object.position.copy(this._head).addScaledVector(this._colA, r);
+    bar.object.lookAt(this._head);
+    bar.object.updateWorldMatrix(true, false);
+    // It leans back to face the eyes by their elevation seen from it: its curved buttons correct for that, staying level.
+    this.bandLean = -elevation;
+    this._bandEyes.copy(this._head);
+    bar.onArcLean?.(this.bandLean);
+    if (joined) {
+      const control = this.control;
+      this.arcWorld(bar.object, bar.widthMeters / 2, bar.leadCenterYMeters, 0, control.document.position);
+      // Facing the eyes, level (no roll).
+      control.document.lookAt(this._head);
+      control.document.updateWorldMatrix(true, false);
     }
   }
+
+  /** A world point's yaw from the eyes in the pair's frame (degrees, + right): `_colFwd` / `_colRight` from placeBand. */
+  private yawInPair(point: Vector3): number {
+    this._colB.subVectors(point, this._head);
+    return MathUtils.radToDeg(Math.atan2(this._colB.dot(this._colRight), this._colB.dot(this._colFwd)));
+  }
+
+  /**
+   * Dev: the column and the group: every button's distance from the eyes and
+   * from each shoulder (assumed 0.18 m to the side of and 0.25 m below the
+   * eyes), and every element's extent in view -- yaw from straight ahead
+   * (+ right), pitch from the natural gaze -- and distance; warns past
+   * VIEW_HALF_WIDTH_DEG. Only a changed layout is logged. Allocates (dev only, per layout).
+   */
+  private noteBand(
+    a: SourceSlab,
+    b: SourceSlab,
+    joined: boolean,
+    slot: { object: Object3D; width: number; top: number; bottom: number } | null,
+  ): void {
+    const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
+    if (!import.meta.env.DEV || !this.debug || !bar || this.world.visibilityState.peek() === VisibilityState.NonImmersive) {
+      return;
+    }
+    const shoulder = (side: number) =>
+      new Vector3().copy(this._head).addScaledVector(this._colRight, side * 0.18).addScaledVector(UP, -0.25);
+    const leftShoulder = shoulder(-1);
+    const rightShoulder = shoulder(1);
+    const p = new Vector3();
+    const reach: string[] = [];
+    const note = (name: string, point: Vector3) => {
+      reach.push(
+        `${name} ${point.distanceTo(this._head).toFixed(3)}/${point.distanceTo(leftShoulder).toFixed(2)}/` +
+          `${point.distanceTo(rightShoulder).toFixed(2)}`,
+      );
+    };
+    if (joined) {
+      for (const [name, x] of [['INNER', this.control.innerCenterX], ['LEFT', this.control.leftCenterX]] as const) {
+        note(name, this.control.document.localToWorld(p.set(x, 0, 0)));
+      }
+    }
+    let worstRoll = 0;
+    const q = new Quaternion();
+    const euler = new Euler();
+    for (const button of bar.buttons) {
+      note(button.name, this.arcWorld(bar.object, button.centerX, button.centerY, 0, p, q));
+      worstRoll = Math.max(worstRoll, Math.abs(MathUtils.radToDeg(euler.setFromQuaternion(q, 'YXZ').z)));
+    }
+    reach.push(`(column buttons roll at most ${worstRoll.toFixed(1)}°)`);
+    // Each element's extent in view: yaw (+ right), pitch from the gaze, and its center's distance.
+    type Part = { name: string; yaw0: number; yaw1: number; pitch0: number; pitch1: number; distance: number };
+    const parts: Part[] = [];
+    const span = (name: string, points: Vector3[], center: Vector3) => {
+      const yaws = points.map((point) => this.yawInPair(point));
+      const pitches = points.map((point) => degreesFromForward(this._head, this.headPitchDown, point));
+      parts.push({
+        name,
+        yaw0: Math.min(...yaws),
+        yaw1: Math.max(...yaws),
+        pitch0: Math.min(...pitches),
+        pitch1: Math.max(...pitches),
+        distance: center.distanceTo(this._head),
+      });
+    };
+    const corners = (object: Object3D, x0: number, x1: number, y0: number, y1: number) =>
+      [x0, x1].flatMap((x) => [y0, y1].map((y) => object.localToWorld(new Vector3(x, y, 0))));
+    for (const slab of [a, b]) {
+      const w = slab.doc.widthMeters / 2;
+      span(
+        `${slab.id} slab`,
+        corners(slab.object, -w, w, slabBottomLocalY(slab.doc), slabVisualTopLocalY(slab.doc)),
+        slab.object.getWorldPosition(new Vector3()),
+      );
+    }
+    const h = bar.heightMeters / 2;
+    span(
+      'column',
+      [0, bar.widthMeters].flatMap((x) => [-h, h].map((y) => this.arcWorld(bar.object, x, y, 0, new Vector3()))),
+      this.arcWorld(bar.object, bar.widthMeters / 2, 0, 0, new Vector3()),
+    );
+    if (slot) {
+      const w = slot.width / 2;
+      span(
+        joined ? 'result' : 'outline',
+        corners(slot.object, -w, w, slot.bottom, slot.top),
+        slot.object.localToWorld(new Vector3(0, (slot.top + slot.bottom) / 2, 0)),
+      );
+    }
+    const card = this.challengeLayout?.card;
+    if (card) {
+      const w = card.widthMeters / 2;
+      const ch = card.heightMeters / 2;
+      span('card', corners(card.object, -w, w, -ch, ch), card.object.getWorldPosition(new Vector3()));
+    }
+    const left = parts.reduce((m, part) => (part.yaw0 < m.yaw0 ? part : m));
+    const right = parts.reduce((m, part) => (part.yaw1 > m.yaw1 ? part : m));
+    const line =
+      `layout (${joined ? 'joined' : 'before the join'}): column buttons from the eyes / left / right shoulder (m): ` +
+      `${reach.join(', ')}; extents (yaw, pitch from the gaze, distance): ` +
+      parts
+        .map(
+          (part) =>
+            `${part.name} ${part.yaw0.toFixed(1)}° to ${part.yaw1.toFixed(1)}°, ${part.pitch0.toFixed(1)}° to ` +
+            `${part.pitch1.toFixed(1)}°, ${part.distance.toFixed(2)} m`,
+        )
+        .join('; ') +
+      `; group ${left.yaw0.toFixed(1)}° (${left.name}) to ${right.yaw1.toFixed(1)}° (${right.name}), ` +
+      `${(right.yaw1 - left.yaw0).toFixed(1)}° wide (limit +/-${VIEW_HALF_WIDTH_DEG}°)`;
+    if (line !== this.lastBandNote) {
+      this.lastBandNote = line;
+      this.debug.note(line);
+      if (left.yaw0 < -VIEW_HALF_WIDTH_DEG - 0.5 || right.yaw1 > VIEW_HALF_WIDTH_DEG + 0.5) {
+        this.debug.warn(
+          `the group reaches ${left.yaw0.toFixed(1)}° (${left.name}) to ${right.yaw1.toFixed(1)}° (${right.name}), ` +
+            `past +/-${VIEW_HALF_WIDTH_DEG}°`,
+        );
+      }
+    }
+  }
+
+  /** Dev: the last band readout (only changes are logged). */
+  private lastBandNote = '';
 
   /**
    * Challenge mode: the puzzle card beside a top-anchored slot (the result
@@ -3786,12 +4123,11 @@ export class JoinSystem
       this._a.y + b.doc.heightMeters / 2 + b.doc.tabHeightMeters,
     );
 
-    this._d.set(midX, topY, 0);
-    a.object.localToWorld(this._d);
-    this.placeInBand(layout.bar.object, layout.bar.widthMeters, layout.bar.heightMeters, this._d, a.object);
-
+    // The group as it will be once joined: the column, the slot, the card.
     const slot = this.silhouette;
     if (!slot) {
+      this.planGroup(a, b, false, 0);
+      this.placeColumn(false);
       return;
     }
     a.object.getWorldQuaternion(this._q1);
@@ -3803,11 +4139,15 @@ export class JoinSystem
     for (const key of [resultKey(a.id, b.id), resultKey(b.id, a.id)]) {
       fitHeight = Math.max(fitHeight, this.results.get(key)?.doc.heightMeters ?? 0);
     }
-    this.placeAboveBand(slot.object, fitHeight, layout.bar.object, layout.bar.heightMeters, 0, slot.heightMeters);
-    // Beside the silhouette, where it will be beside the result, and clear of
-    // the bar and both slabs (a short target's silhouette once let the card
-    // hang down onto the right-hand slab).
-    this.placeCard(slot.object, slot.widthMeters, slot.heightMeters, layout.card, this.topEdgeDeg([layout.bar], [a, b]));
+    const plan = this.placeInGroup(a, b, false, slot.object, slot.widthMeters, fitHeight, 0, slot.heightMeters);
+    this.placeColumn(false);
+    // Beside the slot (right), where it will be beside the result, and clear
+    // of both slabs, measured at their highest top corners (a short target's
+    // silhouette once let the card hang down onto a slab).
+    this.placeCard(slot.object, plan.resultWidth, slot.heightMeters, layout.card, Math.max(plan.pairTopDeg, this.topEdgeDeg([], [a, b])));
+    if (import.meta.env.DEV && this.debug) {
+      this.noteBand(a, b, false, { object: slot.object, width: slot.widthMeters, top: 0, bottom: -slot.heightMeters });
+    }
     if (import.meta.env.DEV && this.debug && this.world.visibilityState.peek() !== VisibilityState.NonImmersive) {
       // The result will share this bottom edge (compare its "edges ... bottom" line once joined).
       slot.object.updateWorldMatrix(true, false);
@@ -3822,7 +4162,7 @@ export class JoinSystem
       this.noteCardClearance('before the join', [
         { name: `${a.id} slab`, object: a.object, width: a.doc.widthMeters, top: slabVisualTopLocalY(a.doc), bottom: slabBottomLocalY(a.doc) },
         { name: `${b.id} slab`, object: b.object, width: b.doc.widthMeters, top: slabVisualTopLocalY(b.doc), bottom: slabBottomLocalY(b.doc) },
-        { name: 'bar', object: layout.bar.object, width: layout.bar.widthMeters, top: layout.bar.heightMeters / 2, bottom: -layout.bar.heightMeters / 2 },
+        { name: 'column', object: layout.bar.object, width: layout.bar.widthMeters, top: layout.bar.heightMeters / 2, bottom: -layout.bar.heightMeters / 2, left: 0 },
         { name: 'silhouette', object: slot.object, width: slot.widthMeters, top: 0, bottom: -slot.heightMeters },
       ]);
     }
@@ -3836,17 +4176,18 @@ export class JoinSystem
    */
   private noteCardClearance(
     when: string,
-    elements: { name: string; object: Object3D; width: number; top: number; bottom: number }[],
+    /** `left`: the element's left edge in its frame (default: centered). */
+    elements: { name: string; object: Object3D; width: number; top: number; bottom: number; left?: number }[],
   ): void {
     const card = this.challengeLayout?.card;
     // Not before a session: the cold-start layout uses a default head pose.
     if (!import.meta.env.DEV || !this.debug || !card || this.world.visibilityState.peek() === VisibilityState.NonImmersive) {
       return;
     }
-    const rect = (object: Object3D, width: number, top: number, bottom: number) => {
+    const rect = (object: Object3D, width: number, top: number, bottom: number, left = -width / 2) => {
       object.updateWorldMatrix(true, false);
       const r = { yaw0: Infinity, yaw1: -Infinity, pitch0: Infinity, pitch1: -Infinity };
-      for (const x of [-width / 2, width / 2]) {
+      for (const x of [left, left + width]) {
         for (const y of [bottom, top]) {
           this._g.set(x, y, 0);
           object.localToWorld(this._g);
@@ -3864,7 +4205,7 @@ export class JoinSystem
     const parts: string[] = [];
     let worst = Infinity;
     for (const element of elements) {
-      const e = rect(element.object, element.width, element.top, element.bottom);
+      const e = rect(element.object, element.width, element.top, element.bottom, element.left);
       const gapYaw = Math.max(e.yaw0 - c.yaw1, c.yaw0 - e.yaw1);
       const gapPitch = Math.max(e.pitch0 - c.pitch1, c.pitch0 - e.pitch1);
       const clearance = Math.max(gapYaw, gapPitch);
@@ -3884,19 +4225,18 @@ export class JoinSystem
     }
   }
 
-  // --- Pinch near the control ---------------------------------------------------------
+  // --- Pinch and trigger presses -------------------------------------------------------
 
   /**
-   * Every select start (a hand's pinch, a controller's trigger), in order:
-   * 1. A hand's pinch point on the control or the puzzle bar presses it; on
-   *    a NULL cell in the result, filters; on a NULL in a source table (while
-   *    joined), the card says to use the result's.
-   * 2. Otherwise, unless the hand is at a slab (a near grab), its target ray
-   *    -- point and pinch, the standard way to press far things -- presses
-   *    the first thing it hits: a control option, a bar button (Filter and
-   *    its chips included) or a result NULL cell. A slab in front blocks it.
-   * The UIKit click a ray may also send counts once (each target's debounce).
-   * Every ray select is logged with what it hit (`debug`).
+   * Every select start (a hand's pinch, a controller's trigger): a hand's
+   * pinch presses only through its pointer, and only as a pinch motion
+   * (PinchMotion); its pointer presses the first thing it hits: a control
+   * option, a bar button (Filter and its chips included) or a result NULL
+   * cell. A slab in front blocks it. Close to a button (the pointer hides) a
+   * pinch does nothing -- only a fingertip poke presses there -- and at a
+   * slab the pinch grabs (GrabSystem). A controller's trigger presses
+   * through its ray the same way. The UIKit click a ray may also send counts
+   * once (each target's debounce). Every select is logged (`debug`).
    */
   private updateSelect(): void {
     const controlLive =
@@ -3911,9 +4251,19 @@ export class JoinSystem
       }
       const source = this.input.xr.getPrimaryInputSource(hand);
       if (source?.hand) {
-        // Near wins: a pinch on a button (or a NULL) right there.
-        if (readPinchPoint(this.world, this.player, source, this._pinchA) && this.pinchSelect(hand, source, controlLive)) {
+        // Only a pinch motion presses: a resting hand's flickering pinch never does (PinchMotion).
+        if (!this.pinchStartOk[hand]) {
+          if (import.meta.env.DEV && this.debug) {
+            this.notePointerPinch(hand, this.pointers[hand], controlLive);
+            this.debug.note(
+              `${hand} pinch ignored: no opening motion (widest ${this.widestNote(hand)} in the last ` +
+                `${PINCH_OPENING_WINDOW_SECONDS} s; needs ${cm(PINCH_OPEN_METERS)}, opened again after a press)`,
+            );
+          }
           continue;
+        }
+        if (import.meta.env.DEV && this.debug) {
+          this.debug.note(`${hand} pinch motion: tips opened to ${this.widestNote(hand)} in the last ${PINCH_OPENING_WINDOW_SECONDS} s`);
         }
         // Otherwise the hand pointer presses what it's on (its ray froze as the fingers closed).
         const pointer = this.pointers[hand];
@@ -3928,6 +4278,7 @@ export class JoinSystem
           if (block === '') {
             if (presses) {
               pointer.freeze.pressed(now);
+              this.pinchMotion[hand].pressed();
             }
             this.pressHit(hand, pointer.hit, 'ray');
           } else if (import.meta.env.DEV && this.debug) {
@@ -3951,6 +4302,12 @@ export class JoinSystem
       }
       this.pressHit(hand, hit, 'ray');
     }
+  }
+
+  /** Dev log: the widest tip distance before this frame's pinch start. */
+  private widestNote(hand: (typeof HANDS)[number]): string {
+    const widest = this.pinchStartWidest[hand];
+    return widest < 0 ? 'untracked' : cm(widest);
   }
 
   /** Presses what a ray hit (a control option, a bar button, a result NULL cell, Recenter); nothing for a slab or the result. */
@@ -4155,14 +4512,21 @@ export class JoinSystem
       return true;
     }
     const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
-    return !!bar && bar.object.visible && this.nearButtons(bar.object, bar.buttons, bar.buttonHeightMeters);
+    return !!bar && bar.object.visible && this.nearButtons(bar.object, bar.buttons, bar.buttonHeightMeters, true);
   }
 
-  /** `_pointerIndex` (a fingertip) just in front of one of `buttons` on `object` (within a poke's margin). */
-  private nearButtons(object: Object3D, buttons: readonly { centerX: number; width: number }[], height: number): boolean {
+  /**
+   * `_pointerIndex` (a fingertip) just in front of one of `buttons` on
+   * `object` (within a poke's margin). `curved`: the band's bars, whose
+   * buttons sit on its arc (unrolled first).
+   */
+  private nearButtons(object: Object3D, buttons: readonly ButtonRect[], height: number, curved = false): boolean {
     object.updateWorldMatrix(true, false);
     this._pointerLocal.copy(this._pointerIndex);
     object.worldToLocal(this._pointerLocal);
+    if (curved) {
+      unrollArc(this._pointerLocal, BAND_ARC_RADIUS_METERS, this.bandLean);
+    }
     const z = this._pointerLocal.z;
     if (z > HAND_POINTER_NEAR_BUTTON_METERS || z < -CONTACT_HOVER_BEHIND_METERS * 3) {
       return false;
@@ -4170,7 +4534,7 @@ export class JoinSystem
     for (const button of buttons) {
       if (
         Math.abs(this._pointerLocal.x - button.centerX) <= button.width / 2 + CONTROL_PINCH_MARGIN_METERS &&
-        Math.abs(this._pointerLocal.y) <= height / 2 + CONTROL_PINCH_MARGIN_METERS
+        Math.abs(this._pointerLocal.y - (button.centerY ?? 0)) <= height / 2 + CONTROL_PINCH_MARGIN_METERS
       ) {
         return true;
       }
@@ -4187,13 +4551,12 @@ export class JoinSystem
     bar.object.updateWorldMatrix(true, false);
     this._pointerLocal.copy(point);
     bar.object.worldToLocal(this._pointerLocal);
+    unrollArc(this._pointerLocal, BAND_ARC_RADIUS_METERS, this.bandLean);
     // The nearest button within the bar's press margin (as a press there would choose).
-    const dy = Math.max(0, Math.abs(this._pointerLocal.y) - bar.buttonHeightMeters / 2);
     let best = -1;
     let bestDistance = CONTROL_PINCH_MARGIN_METERS;
     for (let i = 0; i < bar.buttons.length; i++) {
-      const button = bar.buttons[i];
-      const distance = Math.hypot(Math.max(0, Math.abs(this._pointerLocal.x - button.centerX) - button.width / 2), dy);
+      const distance = buttonDistance(this._pointerLocal, bar.buttons[i], bar.buttonHeightMeters);
       if (distance <= bestDistance) {
         bestDistance = distance;
         best = i;
@@ -4320,9 +4683,10 @@ export class JoinSystem
       candidates.push({ name: hit.name, center: at(this.control.document, hit.option === 'inner' ? this.control.innerCenterX : this.control.leftCenterX, 0) });
     } else if (hit.target === 'bar' && this.challengeLayout && p.barIndex >= 0) {
       const button = this.challengeLayout.bar.buttons[p.barIndex];
-      candidates.push({ name: `bar button "${button.name}"`, center: at(this.challengeLayout.bar.object, button.centerX, 0) });
+      candidates.push({ name: `bar button "${button.name}"`, center: this.arcWorld(this.challengeLayout.bar.object, button.centerX, button.centerY, 0, new Vector3()) });
     } else if (hit.target === 'recenter' && this.freeBarPlaced) {
-      candidates.push({ name: hit.name, center: at(this.freeBarPlaced.object, 0, 0) });
+      const recenter = this.freeBarPlaced.buttons[0];
+      candidates.push({ name: hit.name, center: this.arcWorld(this.freeBarPlaced.object, recenter.centerX, recenter.centerY, 0, new Vector3()) });
     } else if (hit.target === 'null' && view) {
       const span = view.doc.columnSpans[hit.column];
       candidates.push({ name: hit.name, center: at(view.object, (span.x0 + span.x1) / 2, rowCenterLocalY(view.doc, view.rowSlot[hit.row])) });
@@ -4336,7 +4700,7 @@ export class JoinSystem
       const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
       if (bar && bar.object.visible) {
         for (const button of bar.buttons) {
-          candidates.push({ name: `bar button "${button.name}"`, center: at(bar.object, button.centerX, 0) });
+          candidates.push({ name: `bar button "${button.name}"`, center: this.arcWorld(bar.object, button.centerX, button.centerY, 0, new Vector3()) });
         }
       }
     }
@@ -4362,44 +4726,6 @@ export class JoinSystem
     );
   }
 
-  /**
-   * A hand's pinch at `_pinchA` on a near target: the control and the puzzle
-   * bar sit side by side, and the nearer one within its margin wins (a pinch
-   * in the gap goes to whichever is closer); then the result's NULL cells;
-   * then (only feedback) a source table's NULLs. True if it landed on one.
-   */
-  private pinchSelect(hand: (typeof HANDS)[number], source: XRInputSource, controlLive: boolean): boolean {
-    const controlDistance = controlLive ? this.evaluatePinch(hand, this._pinchA) : Infinity;
-    const barDistance = joinBridge.challenge?.barDistance(this._pinchA) ?? Infinity;
-    if (barDistance < Infinity && barDistance < controlDistance) {
-      joinBridge.challenge?.pressBarAt(this._pinchA, hand, 'pinch');
-      return true;
-    }
-    if (controlDistance < Infinity) {
-      this.pressControl(this.pinchNearest, 'pinch');
-      return true;
-    }
-    if (controlLive && this.challengeLayout && this.evaluateNullPinch(hand, source, this._pinchA)) {
-      return true;
-    }
-    // Free play's Recenter button: like a bar button (in plane, a little in front or behind).
-    const freeBar = this.freeBarPlaced;
-    if (freeBar && freeBar.object.visible) {
-      freeBar.object.updateWorldMatrix(true, false);
-      this._pinchB.copy(this._pinchA);
-      freeBar.object.worldToLocal(this._pinchB);
-      if (
-        this._pinchB.z <= BUTTON_PINCH_FRONT_DEPTH_METERS &&
-        this._pinchB.z >= -BUTTON_PINCH_BACK_DEPTH_METERS &&
-        this.freeBarDistance(this._pinchB) <= CONTROL_PINCH_MARGIN_METERS
-      ) {
-        this.pressRecenter('pinch');
-        return true;
-      }
-    }
-    return !!this.challengeLayout && this.sourceNullPinch(hand, this._pinchA);
-  }
-
   /** Whether `hand`'s grip is at a source slab's grab surface (its pinch grabs; it presses nothing far away). */
   private nearGrab(hand: (typeof HANDS)[number]): boolean {
     const grip = this.player.gripSpaces[hand];
@@ -4407,26 +4733,6 @@ export class JoinSystem
     this._g.setFromMatrixPosition(grip.matrixWorld);
     for (const slab of this.sources.values()) {
       if (distanceToSlab(this._g, slab, this._e) <= GRAB_SPHERE_RADIUS_METERS + NEAR_GRAB_MARGIN_METERS) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** While joined, a pinch point on a NULL in a source table: feedback only (it may grab the slab, too). */
-  private sourceNullPinch(hand: (typeof HANDS)[number], point: Vector3): boolean {
-    if (this.state.phase !== 'joined') {
-      return false;
-    }
-    for (const slab of this.sources.values()) {
-      if (slab.nullCells.length === 0) {
-        continue;
-      }
-      slab.object.updateWorldMatrix(true, false);
-      this._f.copy(point);
-      slab.object.worldToLocal(this._f);
-      if (Math.abs(this._f.z) <= CONTROL_PINCH_DEPTH_METERS && nearestSourceNull(slab, this._f) <= NULL_PINCH_MARGIN_METERS) {
-        this.wrongNull(slab, hand, 'pinch');
         return true;
       }
     }
@@ -4451,6 +4757,51 @@ export class JoinSystem
    * local z = 0, hit from the front) into `outLocal`; returns the distance
    * along the ray (meters), or Infinity. Objects aren't scaled.
    */
+  /**
+   * Intersects the ray in `_rayOrigin` / `_rayDir` with a band bar's arc
+   * (band-arc.ts) into `outLocal`, unrolled (x its arc length, y its height,
+   * z 0); returns the distance along the ray (meters), or Infinity.
+   */
+  private rayArc(object: Object3D, outLocal: Vector3): number {
+    // The band's arc: a level circle around the eyes it was placed for.
+    const t = rayCircleDistance(
+      this._rayOrigin.x - this._bandEyes.x,
+      this._rayOrigin.z - this._bandEyes.z,
+      this._rayDir.x,
+      this._rayDir.z,
+      BAND_ARC_RADIUS_METERS * Math.cos(this.bandLean),
+    );
+    if (!Number.isFinite(t)) {
+      return Infinity;
+    }
+    object.updateWorldMatrix(true, false);
+    outLocal.copy(this._rayOrigin).addScaledVector(this._rayDir, t);
+    object.worldToLocal(outLocal);
+    unrollArc(outLocal, BAND_ARC_RADIUS_METERS, this.bandLean);
+    return t;
+  }
+
+  /**
+   * A point on a band bar's arc, in world space, into `out`: arc length `s`
+   * from its left edge, height `y`, `lift` off the face toward the eyes. With
+   * `outQuat`: the orientation facing the eyes there (no roll).
+   */
+  private arcWorld(object: Object3D, s: number, y: number, lift: number, out: Vector3, outQuat?: Quaternion): Vector3 {
+    const place = arcPlace(s, y, BAND_ARC_RADIUS_METERS, this.bandLean, this._arcPlace);
+    out.set(place.x, place.y, place.z);
+    // Lifted toward the eyes, which sit at (0, 0, radius) in the bar's frame.
+    this._arcLift.set(-place.x, -place.y, BAND_ARC_RADIUS_METERS - place.z).normalize();
+    out.addScaledVector(this._arcLift, lift);
+    object.updateWorldMatrix(true, false);
+    object.localToWorld(out);
+    if (outQuat) {
+      // As the view turns it (challenge-view.ts): Euler XYZ, facing the eyes, level.
+      object.getWorldQuaternion(outQuat);
+      outQuat.multiply(this._arcQ.setFromEuler(this._arcEuler.set(place.rx, place.ry, place.rz, 'XYZ')));
+    }
+    return out;
+  }
+
   private rayPlane(object: Object3D, outLocal: Vector3): number {
     object.updateWorldMatrix(true, false);
     this._rayLocalO.copy(this._rayOrigin);
@@ -4500,10 +4851,10 @@ export class JoinSystem
 
     const bar = this.challengeLayout?.bar;
     if (bar && bar.object.visible) {
-      const t = this.rayPlane(bar.object, local);
+      // Its buttons sit on the band's arc: the ray meets that.
+      const t = this.rayArc(bar.object, local);
       if (t < hit.distance) {
-        this._rayWorld.copy(local);
-        bar.object.localToWorld(this._rayWorld);
+        this._rayWorld.copy(this._rayOrigin).addScaledVector(this._rayDir, t);
         if ((joinBridge.challenge?.barDistance(this._rayWorld) ?? Infinity) < Infinity) {
           hit.target = 'bar';
           hit.distance = t;
@@ -4515,7 +4866,7 @@ export class JoinSystem
 
     const freeBar = this.freeBarPlaced;
     if (freeBar && freeBar.object.visible) {
-      const t = this.rayPlane(freeBar.object, local);
+      const t = this.rayArc(freeBar.object, local);
       if (t < hit.distance && this.freeBarDistance(local) <= RAY_BUTTON_TOLERANCE_METERS) {
         hit.target = 'recenter';
         hit.distance = t;
@@ -4574,94 +4925,6 @@ export class JoinSystem
     } else if (hit.target !== 'none') {
       hit.point.copy(this._rayOrigin).addScaledVector(this._rayDir, hit.distance);
     }
-  }
-
-  /** The join type nearest the last pinch evaluated against the control. */
-  private pinchNearest: JoinType = 'inner';
-
-  /**
-   * Measures a pinch against the control's options (logged with `debug`);
-   * returns its in-plane distance to the nearest option if it would select
-   * it (within the margin and near the surface), else Infinity. The caller
-   * decides, since the puzzle bar may be nearer.
-   */
-  private evaluatePinch(hand: (typeof HANDS)[number], point: Vector3): number {
-    const control = this.control;
-    control.document.updateWorldMatrix(true, false);
-    this._pinchB.copy(point);
-    control.document.worldToLocal(this._pinchB);
-    // Signed: in front of the face (toward the eyes) is positive.
-    const front = this._pinchB.z;
-    const depth = Math.abs(front);
-    const planar = (centerX: number) =>
-      Math.hypot(
-        Math.max(0, Math.abs(this._pinchB.x - centerX) - control.optionWidthMeters / 2),
-        Math.max(0, Math.abs(this._pinchB.y) - control.optionHeightMeters / 2),
-      );
-    const innerDistance = planar(control.innerCenterX);
-    const leftDistance = planar(control.leftCenterX);
-    const nearest: JoinType = innerDistance <= leftDistance ? 'inner' : 'left';
-    const distance = Math.min(innerDistance, leftDistance);
-    const selected =
-      distance <= CONTROL_PINCH_MARGIN_METERS &&
-      front <= BUTTON_PINCH_FRONT_DEPTH_METERS &&
-      front >= -BUTTON_PINCH_BACK_DEPTH_METERS;
-
-    if (import.meta.env.DEV && this.debug) {
-      const name = nearest.toUpperCase();
-      const already = this.state.phase === 'joined' && this.state.joinType === nearest;
-      this.debug.note(
-        `${hand} pinch evaluated against the control: pinch point ${cm(distance)} from ${name} in plane, ` +
-          `${cm(depth)} ${front >= 0 ? 'in front of' : 'behind'} its surface -> ` +
-          (selected
-            ? `selected ${name}${already ? ' (already selected)' : ''}`
-            : `not selected (needs <= ${cm(CONTROL_PINCH_MARGIN_METERS)} in plane, <= ` +
-              `${cm(BUTTON_PINCH_FRONT_DEPTH_METERS)} in front and <= ${cm(BUTTON_PINCH_BACK_DEPTH_METERS)} behind)`),
-      );
-    }
-    this.pinchNearest = nearest;
-    return selected ? distance : Infinity;
-  }
-
-  /**
-   * Challenge mode: a pinch whose pinch point lands on a shown NULL cell (in
-   * plane within NULL_PINCH_MARGIN_METERS, and near the surface) pokes it
-   * (returns whether it did).
-   * Dev readout: how far the pinch point and the wrist were from the nearest
-   * source slab's grab surface, since a pinch that near a slab could grab it.
-   */
-  private evaluateNullPinch(hand: (typeof HANDS)[number], source: XRInputSource, point: Vector3): boolean {
-    const view = this.active;
-    if (!view || !this.nearestNullCell(view, point)) {
-      return false;
-    }
-    const { row: bestRow, column: bestColumn, distance: best, depth } = this._nullHit;
-    const selected = best <= NULL_PINCH_MARGIN_METERS && depth <= CONTROL_PINCH_DEPTH_METERS;
-
-    if (import.meta.env.DEV && this.debug) {
-      let tipToSlab = Infinity;
-      let wristToSlab = Infinity;
-      const hasWrist = readWristPoint(this.world, this.player, source, this._pinchB);
-      for (const slab of this.sources.values()) {
-        tipToSlab = Math.min(tipToSlab, distanceToSlab(point, slab, this._g));
-        if (hasWrist) {
-          wristToSlab = Math.min(wristToSlab, distanceToSlab(this._pinchB, slab, this._g));
-        }
-      }
-      this.debug.note(
-        `${hand} pinch evaluated against NULL cells: ${cm(best)} from row ${bestRow} column ${bestColumn} in plane, ` +
-          `${cm(depth)} off the surface -> ${selected ? 'poked' : 'not poked'}; pinch point ${cm(tipToSlab)} and ` +
-          `wrist ${hasWrist ? cm(wristToSlab) : 'untracked'} from the nearest source slab (grab sphere ` +
-          `${cm(GRAB_SPHERE_RADIUS_METERS)} around the palm)`,
-      );
-      if (tipToSlab < GRAB_SPHERE_RADIUS_METERS + 0.03 || wristToSlab < GRAB_SPHERE_RADIUS_METERS + 0.03) {
-        this.debug.warn(`a pinch on a NULL cell came within grab range of a source slab (see the note above)`);
-      }
-    }
-    if (selected) {
-      this.activateNullCell(view.key, bestRow, bestColumn, 'pinch');
-    }
-    return selected;
   }
 
   /**
@@ -4748,8 +5011,7 @@ export class JoinSystem
       );
     }
 
-    // The pair's top edge where the control sits: at the seam (the same
-    // point placeControl works from), not at the slabs' centers.
+    // The pair's top edge at the seam (where the result's floor is measured), not at the slabs' centers.
     this._d.set(this.dockSide * (left.doc.widthMeters / 2 + DOCK_GAP_METERS / 2), pairTopLocalY(left, right), 0);
     left.object.localToWorld(this._d);
     const pairTopDeg = degreesFromForward(this._head, this.headPitchDown, this._d);
@@ -4790,8 +5052,9 @@ export class JoinSystem
         `${cm(control.labelFontMeters)} = ${textAngleDeg(control.labelFontMeters, controlDistance).toFixed(2)}°; ` +
         `roll ${controlRollDeg.toFixed(1)}°, yaw vs pair ${relativeYawDeg.toFixed(1)}°`,
     );
-    if (Math.abs(controlRollDeg) > 0.5 || Math.abs(relativeYawDeg) > 0.5) {
-      debug.warn(`join-type control isn't parallel to the pair (roll ${controlRollDeg.toFixed(1)}°, yaw vs pair ${relativeYawDeg.toFixed(1)}°)`);
+    // On the band's arc it turns to face the eyes (a yaw against the pair is expected); it never rolls.
+    if (Math.abs(controlRollDeg) > 0.5) {
+      debug.warn(`join-type control rolls ${controlRollDeg.toFixed(1)}° (it should face the eyes level)`);
     }
     if (controlDistance > TOUCH_REACH_MAX_METERS + 0.005) {
       debug.warn(`join-type control is ${controlDistance.toFixed(2)} m from the eyes, beyond the reach limit`);
@@ -4800,73 +5063,33 @@ export class JoinSystem
       debug.warn(`join-type control is only ${cm(clearance)} from a source slab (target ${cm(CONTROL_SLAB_CLEARANCE_METERS)})`);
     }
 
-    // Challenge mode's puzzle bar: touched, like the control.
+    // Challenge mode's puzzle bar (the column): touched, like the control. Its
+    // buttons sit on an arc (band-arc.ts): measured where they really are.
     const bar = this.challengeLayout?.bar;
     if (bar) {
-      bar.object.updateWorldMatrix(true, false);
-      this._a.setFromMatrixPosition(bar.object.matrixWorld);
-      const barDistance = this._a.distanceTo(this._head);
-      let barClearance = Infinity;
-      for (const sx of [-1, 0, 1]) {
-        for (const sy of [-1, 0, 1]) {
-          this._d.set((sx * bar.widthMeters) / 2, (sy * bar.heightMeters) / 2, 0);
-          bar.object.localToWorld(this._d);
-          barClearance = Math.min(barClearance, distanceToSlab(this._d, left, this._e), distanceToSlab(this._d, right, this._e));
-        }
-      }
-      this._d.set(0, bar.heightMeters / 2, 0);
-      bar.object.localToWorld(this._d);
-      this._e.set(0, -bar.heightMeters / 2, 0);
-      bar.object.localToWorld(this._e);
-      const barEdges = edgeNote(
-        'puzzle bar',
-        degreesFromForward(this._head, this.headPitchDown, this._d),
-        degreesFromForward(this._head, this.headPitchDown, this._e),
-      );
-      // The gap between the control's right edge and the bar's left edge, in the control's frame.
-      this._d.set(-bar.widthMeters / 2, 0, 0);
-      bar.object.localToWorld(this._d);
-      control.document.worldToLocal(this._d);
-      const gap = this._d.x - control.widthMeters / 2;
-      debug.note(
-        `puzzle bar (touch): center ${barDistance.toFixed(2)} m from the eyes (${reachNote(barDistance)}); ${barEdges}; ` +
-          `clearance to the nearest source slab ${cm(barClearance)} (target >= ${cm(CONTROL_SLAB_CLEARANCE_METERS)}); ` +
-          `${cm(bar.widthMeters)} x ${cm(bar.heightMeters)}; gap from the control ${cm(gap)} ` +
-          `(target >= ${cm(BAR_CONTROL_GAP_METERS)})`,
-      );
-      if (gap < 0) {
-        debug.warn(`puzzle bar OVERLAPS the join-type control by ${cm(-gap)}`);
-      } else if (gap < BAR_CONTROL_GAP_METERS - 0.001) {
-        debug.warn(`puzzle bar is only ${cm(gap)} from the join-type control (target ${cm(BAR_CONTROL_GAP_METERS)})`);
-      }
-      if (barDistance > TOUCH_REACH_MAX_METERS + 0.005) {
-        debug.warn(`puzzle bar is ${barDistance.toFixed(2)} m from the eyes, beyond the reach limit`);
-      }
-      if (barClearance < CONTROL_SLAB_CLEARANCE_METERS - 0.005) {
-        debug.warn(`puzzle bar is only ${cm(barClearance)} from a source slab (target ${cm(CONTROL_SLAB_CLEARANCE_METERS)})`);
-      }
-
-      // Every touch target in the band: size, distance from the eyes, and
+      // Every touch target in the column: size, distance from the eyes, and
       // clearance to the slabs (its four corners and center).
-      const targets: { name: string; object: Object3D; centerX: number; width: number; height: number }[] = [
-        { name: 'INNER', object: control.document, centerX: control.innerCenterX, width: control.optionWidthMeters, height: control.optionHeightMeters },
-        { name: 'LEFT', object: control.document, centerX: control.leftCenterX, width: control.optionWidthMeters, height: control.optionHeightMeters },
+      type Target = { name: string; at: (x: number, y: number, out: Vector3) => Vector3; centerX: number; centerY: number; width: number; height: number };
+      const onControl = (x: number, y: number, out: Vector3) => control.document.localToWorld(out.set(x, y, 0));
+      const onArc = (x: number, y: number, out: Vector3) => this.arcWorld(bar.object, x, y, 0, out);
+      const targets: Target[] = [
+        { name: 'INNER', at: onControl, centerX: control.innerCenterX, centerY: 0, width: control.optionWidthMeters, height: control.optionHeightMeters },
+        { name: 'LEFT', at: onControl, centerX: control.leftCenterX, centerY: 0, width: control.optionWidthMeters, height: control.optionHeightMeters },
         ...bar.buttons.map((button) => ({
           name: button.name,
-          object: bar.object,
+          at: onArc,
           centerX: button.centerX,
+          centerY: button.centerY,
           width: button.width,
           height: bar.buttonHeightMeters,
         })),
       ];
       const lines = targets.map((target) => {
-        this._d.set(target.centerX, 0, 0);
-        target.object.localToWorld(this._d);
+        target.at(target.centerX, target.centerY, this._d);
         const distance = this._d.distanceTo(this._head);
         let targetClearance = Infinity;
         for (const [sx, sy] of [[0, 0], [-1, -1], [-1, 1], [1, -1], [1, 1]]) {
-          this._d.set(target.centerX + (sx * target.width) / 2, (sy * target.height) / 2, 0);
-          target.object.localToWorld(this._d);
+          target.at(target.centerX + (sx * target.width) / 2, target.centerY + (sy * target.height) / 2, this._d);
           targetClearance = Math.min(targetClearance, distanceToSlab(this._d, left, this._e), distanceToSlab(this._d, right, this._e));
         }
         if (distance > TOUCH_REACH_MAX_METERS + 0.005 || targetClearance < CONTROL_SLAB_CLEARANCE_METERS - 0.005) {
@@ -4874,7 +5097,7 @@ export class JoinSystem
         }
         return `${target.name} ${cm(target.width)} x ${cm(target.height)}, ${distance.toFixed(2)} m, clearance ${cm(targetClearance)}`;
       });
-      debug.note(`band touch targets (size, distance from the eyes, clearance to the slabs): ${lines.join('; ')}`);
+      debug.note(`column touch targets (size, distance from the eyes, clearance to the slabs): ${lines.join('; ')}`);
     }
 
     // The card against every element (the RIGHT slab still at its dock pose).
@@ -4883,10 +5106,40 @@ export class JoinSystem
       { name: `${right.id} slab`, object: right.object, width: right.doc.widthMeters, top: slabVisualTopLocalY(right.doc), bottom: slabBottomLocalY(right.doc) },
       { name: 'control', object: control.document, width: control.widthMeters, top: control.heightMeters / 2, bottom: -control.heightMeters / 2 },
       ...(bar
-        ? [{ name: 'bar', object: bar.object, width: bar.widthMeters, top: bar.heightMeters / 2, bottom: -bar.heightMeters / 2 }]
+        ? [{ name: 'column', object: bar.object, width: bar.widthMeters, top: bar.heightMeters / 2, bottom: -bar.heightMeters / 2, left: 0 }]
         : []),
       { name: 'result', object: view.object, width: view.doc.widthMeters, top: slabVisualTopLocalY(view.doc), bottom: -shownHeight },
     ]);
+
+    // The column's buttons (reach) and the group's extent, the RIGHT slab at its dock pose.
+    this.noteBand(left, right, true, { object: view.object, width: view.doc.widthMeters, top: slabVisualTopLocalY(view.doc), bottom: -shownHeight });
+    // The column against the result (left of it, by COLUMN_RESULT_GAP_DEG) and the slabs (above them, never over one).
+    const column = this.challengeLayout?.bar ?? this.freeBarPlaced;
+    let columnNote = '';
+    if (column) {
+      this._d.set(-view.doc.widthMeters / 2, -shownHeight, 0);
+      view.object.localToWorld(this._d);
+      const resultLeftDeg = this.yawInPair(this._d);
+      this.arcWorld(column.object, column.widthMeters, -column.heightMeters / 2, 0, this._e);
+      const columnRightDeg = this.yawInPair(this._e);
+      const columnBottomDeg = degreesFromForward(this._head, this.headPitchDown, this._e);
+      let slabTopDeg = -Infinity;
+      for (const slab of [left, right]) {
+        this._d.set(0, slabVisualTopLocalY(slab.doc), 0);
+        slab.object.localToWorld(this._d);
+        slabTopDeg = Math.max(slabTopDeg, degreesFromForward(this._head, this.headPitchDown, this._d));
+      }
+      columnNote =
+        `; column right edge ${columnRightDeg.toFixed(1)}° -> result left edge ${resultLeftDeg.toFixed(1)}° ` +
+        `(gap ${(resultLeftDeg - columnRightDeg).toFixed(1)}°, target ${COLUMN_RESULT_GAP_DEG}°); column bottom ` +
+        `${columnBottomDeg.toFixed(1)}° from the gaze, the slabs' highest top ${slabTopDeg.toFixed(1)}°`;
+      if (resultLeftDeg - columnRightDeg < COLUMN_RESULT_GAP_DEG - 0.5) {
+        debug.warn(`the column is only ${(resultLeftDeg - columnRightDeg).toFixed(1)}° left of the result in view`);
+      }
+      if (columnBottomDeg < slabTopDeg) {
+        debug.warn(`the column's bottom edge (${columnBottomDeg.toFixed(1)}°) is below a slab's top (${slabTopDeg.toFixed(1)}°) in view`);
+      }
+    }
 
     right.object.position.copy(restore);
     right.object.quaternion.copy(this._q2);
@@ -4985,19 +5238,13 @@ export class JoinSystem
       }
     }
     debug.note(
-      `layout gaps in view: pair top -> control bottom ${(controlBottomDeg - pairTopDeg).toFixed(1)}°, ` +
-        `control top -> result bottom ${(resultBottomDeg - controlTopDeg).toFixed(1)}° (its bottom edge stays put; it grows upward)`,
+      `layout gaps in view: pair top -> result bottom ${(resultBottomDeg - pairTopDeg).toFixed(1)}° (its bottom edge ` +
+        `stays put; it grows upward)${columnNote}`,
     );
-    if (controlBottomDeg < pairTopDeg) {
+    if (resultBottomDeg < pairTopDeg) {
       debug.warn(
-        `join-type control's bottom edge (${controlBottomDeg.toFixed(1)}°) is below the pair's top edge ` +
+        `result slab's bottom edge (${resultBottomDeg.toFixed(1)}°) is below the pair's top edge ` +
           `(${pairTopDeg.toFixed(1)}°) in view: they overlap`,
-      );
-    }
-    if (resultBottomDeg < controlTopDeg) {
-      debug.warn(
-        `result slab's bottom edge (${resultBottomDeg.toFixed(1)}°) is below the control's top edge ` +
-          `(${controlTopDeg.toFixed(1)}°) in view: they overlap`,
       );
     }
 
@@ -5202,10 +5449,21 @@ function cm(meters: number): string {
 }
 
 /** Whether `local` (a bar's frame, on or near its face) is on `button` (within a ray's tolerance). */
-function onButton(local: Vector3, button: { centerX: number; width: number }, height: number): boolean {
+function onButton(local: Vector3, button: ButtonRect, height: number): boolean {
   return (
     Math.abs(local.x - button.centerX) <= button.width / 2 + RAY_BUTTON_TOLERANCE_METERS &&
-    Math.abs(local.y) <= height / 2 + RAY_BUTTON_TOLERANCE_METERS
+    Math.abs(local.y - (button.centerY ?? 0)) <= height / 2 + RAY_BUTTON_TOLERANCE_METERS
+  );
+}
+
+/** A button's rectangle in its document's frame: its center (y 0 when omitted: a one-row, centered document) and width. */
+type ButtonRect = { centerX: number; centerY?: number; width: number };
+
+/** In-plane distance from `local` to `button`'s rectangle (0 on it). */
+function buttonDistance(local: Vector3, button: ButtonRect, height: number): number {
+  return Math.hypot(
+    Math.max(0, Math.abs(local.x - button.centerX) - button.width / 2),
+    Math.max(0, Math.abs(local.y - (button.centerY ?? 0)) - height / 2),
   );
 }
 

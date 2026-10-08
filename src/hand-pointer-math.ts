@@ -72,8 +72,101 @@ export function smoothingAlpha(deltaSeconds: number): number {
 /** What a frame of `PinchFreeze.step` did: nothing new, the freeze started, or it ran out. */
 export type FreezeEvent = 'none' | 'started' | 'expired';
 
-/** Why a pointer press was refused (see `PinchFreeze.pinchStart`), or '' when it may press. */
-export type PressBlock = '' | 'stale' | 'flicker' | 'repeat';
+/** Why a pointer press was refused (see `PinchFreeze.pinchStart`, `PinchMotion`), or '' when it may press. */
+export type PressBlock = '' | 'stale' | 'flicker' | 'repeat' | 'no-opening';
+
+/**
+ * A real pinch is a motion: the thumb and index tips open past this, then
+ * close. A relaxed pointing hand rests its thumb near the index finger, and
+ * the platform's pinch flickers on and off there (a headset log: restarts
+ * every ~200 ms with the tips 0.9-1.3 cm apart, pressing Hint three times).
+ * The tips' distance at the platform's pinch start can't tell them apart
+ * (0.3-1.9 cm for both); the widest opening in the window before it can.
+ * Three headset logs (2026-10-09 00:52-02:26): every press that looked
+ * intentional opened 2.6-6.2 cm first; ignored, resting pinches mostly
+ * 1.3-2.0 cm. 2.2 cm keeps a 0.4 cm margin under the real ones.
+ */
+export const PINCH_OPEN_METERS = 0.022;
+/** The opening must come within this long before the platform's pinch starts. */
+export const PINCH_OPENING_WINDOW_SECONDS = 0.4;
+/** Tip-distance samples kept per hand (at 90 fps, ~0.7 s: more than the window). */
+export const PINCH_MOTION_HISTORY = 64;
+
+/**
+ * One hand's pinch motion, from its thumb-index tip distance sampled every
+ * frame: a platform pinch (select start) counts as a press only if the tips
+ * were at least PINCH_OPEN_METERS apart within PINCH_OPENING_WINDOW_SECONDS
+ * before it, and -- after a press -- only once they've opened past that
+ * again (a re-arm: closed, then open). Pure state, no allocation.
+ */
+export class PinchMotion {
+  private readonly times = new Float64Array(PINCH_MOTION_HISTORY);
+  private readonly gaps = new Float64Array(PINCH_MOTION_HISTORY);
+  private count = 0;
+  private head = 0;
+  /** When the tips were last at least PINCH_OPEN_METERS apart (while armed). */
+  private openAt = -Infinity;
+  /** A press may come from the next opening (false after a press until the tips close, then open). */
+  private armed = true;
+  private closedSincePress = false;
+  /** The latest tip distance sampled (meters), or null before any (for the poke log). */
+  latest: number | null = null;
+
+  reset(): void {
+    this.latest = null;
+    this.count = 0;
+    this.head = 0;
+    this.openAt = -Infinity;
+    this.armed = true;
+    this.closedSincePress = false;
+  }
+
+  /** One frame's tip distance (null: the tips aren't tracked; nothing is recorded). */
+  sample(tipDistanceMeters: number | null, now: number): void {
+    if (tipDistanceMeters === null) {
+      this.latest = null;
+      return;
+    }
+    this.latest = tipDistanceMeters;
+    this.times[this.head] = now;
+    this.gaps[this.head] = tipDistanceMeters;
+    this.head = (this.head + 1) % PINCH_MOTION_HISTORY;
+    this.count = Math.min(this.count + 1, PINCH_MOTION_HISTORY);
+    if (tipDistanceMeters < PINCH_OPEN_METERS) {
+      this.closedSincePress = true;
+      return;
+    }
+    if (!this.armed && this.closedSincePress) {
+      this.armed = true;
+    }
+    if (this.armed) {
+      this.openAt = now;
+    }
+  }
+
+  /** At a platform pinch start: whether it's a pinch motion (an opening, since the last press, just before it). */
+  isPinchMotion(now: number): boolean {
+    return this.armed && now - this.openAt <= PINCH_OPENING_WINDOW_SECONDS;
+  }
+
+  /** A press came from this pinch: the next needs the tips to close and open again. */
+  pressed(): void {
+    this.armed = false;
+    this.closedSincePress = false;
+    this.openAt = -Infinity;
+  }
+
+  /** The widest tip distance (meters) sampled within the window before `now`, or -1 if none (for the log). */
+  widest(now: number): number {
+    let widest = -1;
+    for (let i = 0; i < this.count; i++) {
+      if (now - this.times[i] <= PINCH_OPENING_WINDOW_SECONDS) {
+        widest = Math.max(widest, this.gaps[i]);
+      }
+    }
+    return widest;
+  }
+}
 
 /**
  * One hand's pinch, as the pointer sees it: the pre-pinch freeze (closing
@@ -185,6 +278,44 @@ export class PinchFreeze {
   /** Seconds the fingers were apart before this pinch (since the platform's pinch last ended). */
   openFor(now: number): number {
     return now - this.releasedAt;
+  }
+}
+
+/**
+ * One hand's select (pinch or trigger) as a button hold (Exit, Show
+ * answer): it holds the button only if it started on it (`startOk`: a
+ * controller's trigger, or a hand's pinch motion) and has stayed on it,
+ * selecting, every frame since. Any end of the select -- a one-frame flicker
+ * too -- or leaving the button ends it for good: a select already held when
+ * the pointer arrives never holds it. Pure state.
+ */
+export class HoldSelect {
+  /** This hand's current select started on the button and is still on it. */
+  startedOn = false;
+
+  reset(): void {
+    this.startedOn = false;
+  }
+
+  /**
+   * One frame. `onTarget`: the select is on the button now (the caller may
+   * skip measuring it, passing false, when neither `selectStart` nor
+   * `startedOn`). Returns whether this select holds the button this frame.
+   */
+  step(selecting: boolean, selectStart: boolean, startOk: boolean, onTarget: boolean): boolean {
+    if (!selecting) {
+      this.startedOn = false;
+    } else if (selectStart) {
+      this.startedOn = startOk && onTarget;
+    } else if (this.startedOn) {
+      this.startedOn = onTarget;
+    }
+    return this.startedOn;
+  }
+
+  /** Whether the caller needs `onTarget` this frame. */
+  needsOnTarget(selecting: boolean, selectStart: boolean): boolean {
+    return selecting && (selectStart || this.startedOn);
   }
 }
 

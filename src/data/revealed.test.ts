@@ -142,8 +142,8 @@ describe('Skip (Next after "Show answer", before the moves)', () => {
     expect(isRevealed(recordSkip(solved, 'shop-match', D, 3, false), 'shop-match')).toBe(false);
   });
 
-  it('the instruction under the answer fits one card line (the answer and it together: card-fit.test.ts)', () => {
-    expect(cardMessageLines(CARD.answerNext)).toBe(1);
+  it('the instruction under the answer fits two card lines (the answer and it together: card-fit.test.ts)', () => {
+    expect(cardMessageLines(CARD.answerNext)).toBeLessThanOrEqual(2);
   });
 });
 

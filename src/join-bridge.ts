@@ -21,18 +21,30 @@ export type PlacedElement = {
   textFontMeters?: number;
 };
 
-/** The bar also lists its buttons (in its own frame), for the readout. Its width changes with the chip. */
+/**
+ * The bar (the control column) also lists its buttons. Its origin is its
+ * left edge's vertical middle; its buttons are turned onto an arc around the
+ * eyes (band-arc.ts), so each center's x is its arc length from the left edge
+ * and its y is in the bar's frame (hit tests unroll the arc first). Its
+ * height changes with the filter area (it grows upward: the join system keeps
+ * its bottom edge put).
+ */
 export type PlacedBar = PlacedElement & {
-  buttons: readonly { name: string; centerX: number; width: number }[];
+  buttons: readonly { name: string; centerX: number; centerY: number; width: number }[];
   buttonHeightMeters: number;
+  /** The INNER | LEFT row's middle, in the bar's frame (meters): the join system places the control there. */
+  leadCenterYMeters: number;
   /**
-   * Its width with only Hint and Next: the control and bar are centered for
-   * this width, so when the bar grows (Filter, its chips, the WHERE label)
-   * it grows to the right and the control never moves.
+   * A button that acts only when held (besides Exit, always held), and for
+   * how long: challenge mode's Show answer, before the answer is shown. The
+   * join system times the hold and draws its ring (onHoldComplete,
+   * onHoldCancelled). Null: none.
    */
-  baseWidthMeters: number;
+  holdButton: { name: string; seconds: number } | null;
   /** Shows or hides its Recenter button's hover label (the join system tracks fingertips and rays over it). */
   onRecenterHover?: (hovered: boolean) => void;
+  /** The band's lean as placed (radians: the eyes' elevation seen from the bar), so its curved buttons stay level. */
+  onArcLean?: (leanRad: number) => void;
   /** Shows or hides its Exit button's "Hold to exit" label (hovered or held). */
   onExitHover?: (hovered: boolean) => void;
   /** The hand pointer is on `buttons[index]` (-1: none); `previous` was hovered before. Outlines it. */
@@ -65,6 +77,10 @@ export interface ChallengeHooks {
    * filter): the card says where to poke instead.
    */
   onWrongNull(tableId: string, path: PressPath): void;
+  /** The bar's `holdButton` was held its full time: it acts now. */
+  onHoldComplete(name: string): void;
+  /** The bar's `holdButton` was let go (or left) before its time: nothing happened (challenge mode says to hold). */
+  onHoldCancelled(name: string): void;
   /** A press on a NULL in the column already filtered (no change): the bar's WHERE label pulses. */
   onNullFilterRepeat(): void;
 }
@@ -106,6 +122,8 @@ export interface JoinControls {
   debugApply(spec: QuerySpec): void;
   /** Whether a slab is still gliding home (a switch waits for it). */
   isGliding(): boolean;
+  /** Whether `hand` is holding a source slab (its pokes and pinches on the side column are ignored). */
+  handHoldsSlab(hand: 'left' | 'right'): boolean;
 }
 
 export const joinBridge: { join: JoinControls | null; challenge: ChallengeHooks | null } = {

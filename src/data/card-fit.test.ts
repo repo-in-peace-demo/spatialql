@@ -41,8 +41,11 @@ describe('the puzzle card fits its text', () => {
 
   it('every status fits its line', () => {
     const statuses = [
-      `${CARD.missingRows(12)}, ${CARD.extraRows(12)}`,
+      CARD.diffStatus(12, 12),
+      CARD.diffStatus(12, 0),
+      CARD.diffStatus(0, 12),
       CARD.emptyResult,
+      CARD.holdForAnswer,
       CARD.solvedWithHints(3),
       CARD.usedAllHints,
       CARD.solveFirst,

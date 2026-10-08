@@ -18,10 +18,10 @@ import {
   PLANNED_CARD_DISTANCE_METERS,
 } from './text-angles.js';
 
-/** Card width, in goal-font ems (~38 cm at the planned distance, ~29° wide). */
-export const CARD_WIDTH_EM = 20;
+/** Card width, in goal-font ems (~30 cm at the planned distance, ~23° wide: the group fits ±42°). */
+export const CARD_WIDTH_EM = 16;
 export const CARD_GOAL_LINES = 3;
-export const CARD_MESSAGE_LINES = 5;
+export const CARD_MESSAGE_LINES = 7;
 /** The card border's width (cm): thicker than a slab's, so the dataset accent reads. */
 export const CARD_BORDER_CM = 0.3;
 const PHASE2_CARD_BORDER_CM = 0.15;

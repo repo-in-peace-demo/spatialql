@@ -32,6 +32,13 @@ import { tableLabel } from './data/join-result.js';
 import { DESK_EDGE_BEYOND_REACH_MAX_METERS, surfacePlacementCase, type SurfacePlacementCase } from './surface-placement.js';
 import type { Table } from './data/types.js';
 import { deskBridge, type DeskControls } from './desk-bridge.js';
+import {
+  RECENTER_COUNTDOWN_SECONDS,
+  RECENTER_TURNED_MAX_DEG,
+  RECENTER_YAW_WINDOW_SECONDS,
+  RecenterCountdown,
+} from './recenter-countdown.js';
+import { RecenterPrompt } from './recenter-prompt.js';
 import { devFlag } from './dev-flags.js';
 import { PlacementDebug, type PlacementKind, type SlabReport } from './placement-debug.js';
 import { sounds } from './sound.js';
@@ -124,6 +131,11 @@ const SWITCH_ARRIVE_STAGGER_SECONDS = 0.08;
 /** Recenter: the group glides to its re-placed pose over this long. */
 const RECENTER_GLIDE_SECONDS = 0.4;
 /** The log's words for each recenter trigger. */
+/** A three.js yaw (radians, + left) as signed degrees, + right (the readouts' convention). */
+function yawRightDeg(yaw: number): string {
+  return `${(-MathUtils.radToDeg(yaw)).toFixed(1)}°`;
+}
+
 const RECENTER_REASONS: Readonly<Record<RecenterReason, string>> = {
   'headset-on': 'headset back on',
   reset: 'recenter (reference space reset)',
@@ -232,6 +244,10 @@ export class DeskPlacementSystem
   /** While true, placement records each slab's target (into its glide) instead of moving it, and overrides never-yank's "moved by hand". */
   private collectingTargets = false;
   private recenterClock = 0;
+  /** The Recenter button's countdown, its prompt, and the yaw its recenter faces (null: the head's own). */
+  private readonly countdown = new RecenterCountdown();
+  private prompt!: RecenterPrompt;
+  private recenterYaw: number | null = null;
   /** See DeskControls. */
   recenterGliding = false;
   placementEpoch = 0;
@@ -274,6 +290,7 @@ export class DeskPlacementSystem
   private _center = new Vector3();
 
   init(): void {
+    this.prompt = new RecenterPrompt(this.world);
     // Each slab keeps its natural height; their bottom edges share one line
     // (on a desk, both rest on it), like two sheets of different lengths.
     // Text is sized by angle for the planned seated distance, once per slab:
@@ -387,10 +404,89 @@ export class DeskPlacementSystem
     return true;
   }
 
-  requestRecenter(): void {
-    if (this.recenter.request('button', performance.now()) && import.meta.env.DEV && this.debug) {
-      console.log(`[DeskPlacement debug] recenter requested (Recenter button)${this.anySlabHeld() ? '; waiting for the held slab' : ''}`);
+  /**
+   * The Recenter button: starts the "Look straight ahead" countdown
+   * (recenter-countdown.ts); the recenter itself runs at its end, facing
+   * where the head then looks (the median yaw of its last moments). A press
+   * during a countdown is ignored.
+   */
+  requestRecenter(button?: Vector3): void {
+    if (!this.sessionActive) {
+      return;
     }
+    if (this.countdown.active) {
+      if (import.meta.env.DEV && this.debug) {
+        console.log('[DeskPlacement debug] Recenter pressed during its countdown: ignored');
+      }
+      return;
+    }
+    this.readHeadPose();
+    const groupYaw = this.groupYaw() ?? this._headYaw;
+    const buttonYaw = button ? this.yawFromHead(button) : this._headYaw;
+    this.countdown.start(this._headYaw, groupYaw, buttonYaw);
+    this.prompt.show(this.player.head, 0);
+    if (import.meta.env.DEV && this.debug) {
+      console.log(
+        `[DeskPlacement debug] recenter requested (Recenter button): "look straight ahead" for ` +
+          `${RECENTER_COUNTDOWN_SECONDS} s; at the press the head faces ${yawRightDeg(this._headYaw)}, the group ` +
+          `${yawRightDeg(groupYaw)}, the button ${yawRightDeg(buttonYaw)} (degrees, + right)`,
+      );
+    }
+  }
+
+  /** The pair's middle's yaw from the eyes (three.js yaw: + left), or null without two slabs. */
+  private groupYaw(): number | null {
+    if (this.slabs.length !== 2) {
+      return null;
+    }
+    const [a, b] = this.slabs;
+    const pa = a.entity.object3D?.position;
+    const pb = b.entity.object3D?.position;
+    if (!pa || !pb) {
+      return null;
+    }
+    this._p.copy(pa).add(pb).multiplyScalar(0.5);
+    return this.yawFromHead(this._p);
+  }
+
+  /** A world point's yaw from the eyes (three.js yaw: + left; `_headPos` read first). */
+  private yawFromHead(point: Vector3): number {
+    return Math.atan2(-(point.x - this._headPos.x), -(point.z - this._headPos.z));
+  }
+
+  /** Each frame while counting down: the prompt, and at its end the recenter request (with the yaw to face). */
+  private updateCountdown(delta: number): void {
+    if (!this.countdown.active) {
+      return;
+    }
+    if (!this.sessionActive) {
+      this.countdown.cancel();
+      this.prompt.hide();
+      return;
+    }
+    this.readHeadPose();
+    const step = this.countdown.step(delta, this._headYaw);
+    if (step === 'extended') {
+      if (import.meta.env.DEV && this.debug) {
+        console.log(
+          `[DeskPlacement debug] recenter countdown: the head still faces ${yawRightDeg(this.countdown.yaw())}, more than ` +
+            `${RECENTER_TURNED_MAX_DEG} degrees toward the button: counting once more`,
+        );
+      }
+    } else if (step === 'done') {
+      this.prompt.hide();
+      this.recenterYaw = this.countdown.yaw();
+      this.recenter.request('button', performance.now());
+      if (import.meta.env.DEV && this.debug) {
+        console.log(
+          `[DeskPlacement debug] recenter countdown done: the head faces ${yawRightDeg(this.recenterYaw)} (median of the last ` +
+            `${RECENTER_YAW_WINDOW_SECONDS} s; ${yawRightDeg(this.countdown.pressYaw)} at the press)` +
+            `${this.anySlabHeld() ? '; waiting for the held slab' : ''}`,
+        );
+      }
+      return;
+    }
+    this.prompt.show(this.player.head, this.countdown.progress());
   }
 
   /**
@@ -453,6 +549,7 @@ export class DeskPlacementSystem
       this.anySlabHeld() ||
       this.deskStateValue.phase !== 'ready' ||
       this.slabs.length !== 2;
+    this.updateCountdown(delta);
     const reason = this.recenter.poll(blocked);
     if (reason) {
       this.runRecenter(reason);
@@ -495,6 +592,12 @@ export class DeskPlacementSystem
    */
   private runRecenter(reason: RecenterReason): void {
     this.readHeadPose();
+    // The button's recenter faces where the head looked at the end of its countdown.
+    const groupYawBefore = this.groupYaw();
+    if (reason === 'button' && this.recenterYaw !== null) {
+      this._headYaw = this.recenterYaw;
+    }
+    this.recenterYaw = null;
     for (const slab of this.slabs) {
       const object = slab.entity.object3D;
       slab.glide.fromPos.copy(object?.position ?? slab.glide.fromPos);
@@ -564,7 +667,9 @@ export class DeskPlacementSystem
           `${first.entity.hasComponent(JoinDocked) ? ', joined pair moved as one' : ''}; the pair's middle from ` +
           `(${this._p.x.toFixed(2)}, ${this._p.y.toFixed(2)}, ${this._p.z.toFixed(2)}) to ` +
           `(${this._center.x.toFixed(2)}, ${this._center.y.toFixed(2)}, ${this._center.z.toFixed(2)}), ` +
-          `${this._p.distanceTo(this._center).toFixed(2)} m, over ${RECENTER_GLIDE_SECONDS} s`,
+          `${this._p.distanceTo(this._center).toFixed(2)} m, over ${RECENTER_GLIDE_SECONDS} s; the group's yaw from ` +
+          `${groupYawBefore === null ? 'n/a' : yawRightDeg(groupYawBefore)} to ${yawRightDeg(this.yawFromHead(this._center))} ` +
+          `(the pair's middle, degrees, + right; it faces ${yawRightDeg(this._headYaw)})`,
       );
     }
   }

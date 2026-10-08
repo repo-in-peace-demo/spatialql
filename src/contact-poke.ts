@@ -49,8 +49,26 @@ export const BUTTON_PINCH_BACK_DEPTH_METERS = 0.03;
 
 export type PokeVerdict = 'none' | 'press' | 'rejected-direction' | 'rejected-finger';
 
+/**
+ * Dev log: the last poke press (by any ContactPoke) -- which hand, its
+ * approach (travel toward the face and sideways, meters; speed, m/s), the
+ * fingertip's depth at contact, and the index's straightness. The touch
+ * probe prints it with the press (touch-probe.ts).
+ */
+export const lastPokePress = {
+  hand: '',
+  toward: 0,
+  sideways: 0,
+  speed: 0,
+  depth: 0,
+  straightness: null as number | null,
+  atMs: -Infinity,
+};
+
 type HandState = {
   depth: number;
+  /** When the approach started (ms; performance.now()). */
+  startMs: number;
   armed: boolean;
   approaching: boolean;
   startX: number;
@@ -59,7 +77,7 @@ type HandState = {
 };
 
 function handState(): HandState {
-  return { depth: Infinity, armed: true, approaching: false, startX: 0, startY: 0, startZ: 0 };
+  return { depth: Infinity, startMs: 0, armed: true, approaching: false, startX: 0, startY: 0, startZ: 0 };
 }
 
 export class ContactPoke {
@@ -102,6 +120,7 @@ export class ContactPoke {
       state.startX = local.x;
       state.startY = local.y;
       state.startZ = z;
+      state.startMs = performance.now();
     }
     // A finite previous depth: a hand that starts tracking already at the surface isn't a contact.
     const contact =
@@ -127,6 +146,14 @@ export class ContactPoke {
       return 'rejected-finger';
     }
     state.armed = false;
+    const now = performance.now();
+    lastPokePress.hand = hand;
+    lastPokePress.toward = toward;
+    lastPokePress.sideways = sideways;
+    lastPokePress.speed = state.approaching || startZ !== before ? toward / Math.max((now - state.startMs) / 1000, 1 / 90) : toward * 90;
+    lastPokePress.depth = z;
+    lastPokePress.straightness = straight;
+    lastPokePress.atMs = now;
     return 'press';
   }
 }

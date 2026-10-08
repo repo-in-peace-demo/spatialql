@@ -237,11 +237,11 @@ describe('a daily ahead of practice', () => {
     expect(aheadConcepts(progress, getPuzzle('school-no-club'))).toEqual([]);
   });
 
-  it('the lead-in fits one card line, and every intro two (so the lead-in and two intros fit the message area)', () => {
-    expect(cardMessageLines(CARD.dailyAhead)).toBe(1);
-    for (const line of Object.values(CONCEPT_INTROS)) {
-      expect(cardMessageLines(line), line).toBeLessThanOrEqual(2);
-    }
+  it('the lead-in and the two longest intros fit the message area together', () => {
+    const intros = Object.values(CONCEPT_INTROS)
+      .map((line) => cardMessageLines(line))
+      .sort((a, b) => b - a);
+    expect(cardMessageLines(CARD.dailyAhead) + intros[0] + intros[1]).toBeLessThanOrEqual(CARD_MESSAGE_LINES);
   });
 });
 

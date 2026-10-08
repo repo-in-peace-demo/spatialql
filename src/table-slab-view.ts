@@ -926,10 +926,15 @@ export function controlOptionStyle(selected: boolean): { backgroundColor: string
 }
 
 /** `labelFontCm`: the label's physical font size (sized by angle by the caller). */
-export function buildJoinTypeControl(labelFontCm = BASE_CONTROL_FONT_CM): JoinTypeControlView {
-  const fade = signal(1);
+/** The join-type control's size (cm) at `labelFontCm`: the band's bars leave this much room for it at the top left. */
+export function joinTypeControlSizeCm(labelFontCm = BASE_CONTROL_FONT_CM): {
+  optionWidthCm: number;
+  optionHeightCm: number;
+  widthCm: number;
+  heightCm: number;
+} {
   const paddingX = BASE_CONTROL_OPTION_PADDING_X * (labelFontCm / BASE_CONTROL_FONT_CM);
-  // Both options share one width, so the control is symmetric about the seam.
+  // Both options share one width, so the control is symmetric.
   const optionWidthCm = Math.max(
     CONTROL_OPTION_MIN_WIDTH_CM,
     measureTextCm('INNER', HEADER_METRICS, labelFontCm) + 2 * paddingX,
@@ -937,8 +942,17 @@ export function buildJoinTypeControl(labelFontCm = BASE_CONTROL_FONT_CM): JoinTy
   );
   const optionHeightCm = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, labelFontCm * LINE_HEIGHT_FACTOR);
   const inset = CONTROL_TRACK_PADDING + PANEL_BORDER_WIDTH;
-  const widthCm = 2 * optionWidthCm + CONTROL_TRACK_PADDING + 2 * inset;
-  const heightCm = optionHeightCm + 2 * inset;
+  return {
+    optionWidthCm,
+    optionHeightCm,
+    widthCm: 2 * optionWidthCm + CONTROL_TRACK_PADDING + 2 * inset,
+    heightCm: optionHeightCm + 2 * inset,
+  };
+}
+
+export function buildJoinTypeControl(labelFontCm = BASE_CONTROL_FONT_CM): JoinTypeControlView {
+  const fade = signal(1);
+  const { optionWidthCm, optionHeightCm, widthCm, heightCm } = joinTypeControlSizeCm(labelFontCm);
 
   const root = new UIKit.Container({
     flexDirection: 'row',

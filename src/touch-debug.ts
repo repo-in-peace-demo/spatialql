@@ -19,6 +19,7 @@
  */
 
 import { createSystem, Vector3, VisibilityState, type Object3D } from '@iwsdk/core';
+import { unrollArc } from './band-arc.js';
 import { readJointsPoint, readPinchPoint } from './pinch.js';
 import { touchProbe, type PressNote, type TouchRect } from './touch-probe.js';
 
@@ -93,7 +94,7 @@ export class TouchDebugSystem extends createSystem({}) {
           this.depth[hand][i] = Infinity;
           continue;
         }
-        const z = this.localPoint(object, this._tip);
+        const z = this.localPoint(object, this._tip, surfaces[i].arc?.());
         const before = this.depth[hand][i];
         this.depth[hand][i] = z;
         if (before > POKE_DEPTH_METERS && z <= POKE_DEPTH_METERS && z > -0.03) {
@@ -115,7 +116,7 @@ export class TouchDebugSystem extends createSystem({}) {
         if (!object) {
           continue;
         }
-        this.localPoint(object, this._tip);
+        this.localPoint(object, this._tip, surfaces[i].arc?.());
         if (this.nearestOn(i) && this.hit.inPlane < best.inPlane) {
           best = { ...this.hit };
         }
@@ -131,11 +132,18 @@ export class TouchDebugSystem extends createSystem({}) {
     }
   }
 
-  /** `point` in `object`'s frame into `_local`; returns its distance in front of the surface (z). */
-  private localPoint(object: Object3D, point: Vector3): number {
+  /**
+   * `point` in `object`'s frame into `_local` (unrolled onto the band's arc
+   * when `arc` is given: its buttons are curved); returns its distance
+   * in front of the surface (z).
+   */
+  private localPoint(object: Object3D, point: Vector3, arc?: { radius: number; lean: number }): number {
     object.updateWorldMatrix(true, false);
     this._local.copy(point);
     object.worldToLocal(this._local);
+    if (arc) {
+      unrollArc(this._local, arc.radius, arc.lean);
+    }
     return this._local.z;
   }
 

@@ -11,6 +11,7 @@
  */
 
 import type { Object3D } from '@iwsdk/core';
+import { lastPokePress } from './contact-poke.js';
 
 /** One touch target on a surface, in the surface object's frame (meters, center and size). */
 export type TouchRect = { name: string; x: number; y: number; width: number; height: number };
@@ -21,6 +22,13 @@ export type TouchSurface = {
   object(): Object3D | null;
   /** Writes the live targets into `out` (preallocated) and returns how many. */
   rects(out: TouchRect[]): number;
+  /**
+   * The band's bars: their buttons sit on an arc around the eyes
+   * (band-arc.ts: its radius, and the band's lean as placed), so points are
+   * unrolled onto it and the rects' x is an arc length from the bar's left
+   * edge. Omitted: a flat surface.
+   */
+  arc?: () => { radius: number; lean: number };
 };
 
 /**
@@ -56,9 +64,23 @@ export const touchProbe = {
   addSurface(surface: TouchSurface): void {
     this.surfaces.push(surface);
   },
+  /** The thumb-index tip distance of `hand` now (meters; null: untracked), for the poke log (the join system sets it). */
+  tipGap: null as ((hand: string) => number | null) | null,
   pressed(target: string, path: PressPath): void {
     if (this.enabled && this.presses.length < 64) {
       this.presses.push({ target, path, atMs: performance.now() });
+    }
+    // Every poke press: how the fingertip came in, and the hand's shape (was it closing for a pinch?).
+    if (import.meta.env.DEV && this.enabled && path === 'poke' && performance.now() - lastPokePress.atMs < 200) {
+      const p = lastPokePress;
+      const gap = this.tipGap?.(p.hand) ?? null;
+      const cmText = (m: number) => `${(m * 100).toFixed(1)} cm`;
+      console.info(
+        `[Touch debug] poke press on ${target} (${p.hand} hand): approached ${cmText(p.toward)} toward the face at ` +
+          `${cmText(p.speed)}/s, ${cmText(p.sideways)} sideways; contact ${cmText(p.depth)} in front of it; index ` +
+          `straightness ${p.straightness === null ? 'untracked' : p.straightness.toFixed(2)}; thumb-index tips ` +
+          `${gap === null ? 'untracked' : cmText(gap)} apart`,
+      );
     }
   },
 };

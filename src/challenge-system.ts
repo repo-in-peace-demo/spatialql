@@ -42,6 +42,7 @@ import {
   setNextAvailable,
   setNextWaiting,
   setPrevAvailable,
+  setArcLean,
   setBarHover,
   setRecenterHover,
   type BarButton,
@@ -123,7 +124,9 @@ import {
   POKE_TARGET_TOLERANCE_METERS,
 } from './contact-poke.js';
 import { indexStraightness, readJointsPoint } from './pinch.js';
-import { buildTableSlabDocument, MAX_RESULT_ROWS, type TableSlabDocument } from './table-slab-view.js';
+import { HINT_PRESS_GAP_SECONDS, HintGate, SHOW_ANSWER_HOLD_SECONDS } from './hint-gate.js';
+import { buildTableSlabDocument, joinTypeControlSizeCm, MAX_RESULT_ROWS, type TableSlabDocument } from './table-slab-view.js';
+import { BAND_ARC_RADIUS_METERS, unrollArc } from './band-arc.js';
 import { cardMetrics } from './card-metrics.js';
 import { PLANNED_CONTROL_DISTANCE_METERS, PLANNED_RESULT_DISTANCE_METERS, slabTextSizeAt } from './view-comfort.js';
 
@@ -189,6 +192,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private lastComparison: { output: QueryOutput; comparison: Comparison } | null = null;
   private lastState: JoinState | null = null;
   private lastPress = -Infinity;
+  /** Hint's press gate: presses spaced out (hint-gate.ts); the answer itself needs a hold (`holdButton`). */
+  private readonly hintGate = new HintGate();
+  /** Recenter was pressed: "Recentered" shows once its glide starts (after the countdown). */
+  private awaitingRecenter = false;
   private clock = 0;
   /** The card's message text and puzzle, as last set. */
   private messageText = '';
@@ -229,10 +236,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   /** Contact-poke hit test on the bar's shown buttons (the poke asks only at a contact). */
   private readonly pokeOnBar = (): boolean => {
     const bar = this.bar;
-    const dy = Math.max(0, Math.abs(this._local.y) - bar.buttonHeightMeters / 2);
     let best = Infinity;
     this.pokedTarget = null;
     for (const button of bar.buttons) {
+      const dy = Math.max(0, Math.abs(this._local.y - button.centerY) - bar.buttonHeightMeters / 2);
       const distance = Math.hypot(Math.max(0, Math.abs(this._local.x - button.centerX) - button.width / 2), dy);
       if (distance < best) {
         best = distance;
@@ -264,7 +271,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     // The card and bar, each on its own non-grabbable entity.
     this.card = buildPuzzleCard();
     this.cardEntity = this.world.createTransformEntity(this.card.document);
-    this.bar = buildPuzzleBar(slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm, {
+    const labelFontCm = slabTextSizeAt(PLANNED_CONTROL_DISTANCE_METERS).headerFontCm;
+    this.bar = buildPuzzleBar(labelFontCm, {
       prev: BAR.prev,
       hint: BAR.hintLabels,
       // Every label Next shows (it's sized for the widest, so relabeling never resizes the bar).
@@ -274,7 +282,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       clear: BAR.clearFilter,
       filter: BAR.filter,
       filterBack: BAR.filterBack,
-    });
+    }, joinTypeControlSizeCm(labelFontCm));
     this.barEntity = this.world.createTransformEntity(this.bar.document);
     // Poke and ray select arrive as UIKit clicks; pinches and hand rays come
     // from the join system (barDistance / pressBarAt), which also weighs the control.
@@ -320,9 +328,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         buttons: this.bar.buttons,
         buttonHeightMeters: this.bar.buttonHeightMeters,
         // Built with only Prev, Hint, Next and Recenter.
-        baseWidthMeters: this.bar.widthMeters,
+        leadCenterYMeters: this.bar.leadCenterYMeters,
+        holdButton: null,
         onRecenterHover: (hovered) => setRecenterHover(this.bar.recenter, hovered),
         onExitHover: (hovered) => setRecenterHover(this.bar.exit, hovered),
+        onArcLean: (leanRad) => setArcLean(this.bar, leanRad),
         onPointerHover: (index, previous) => setBarHover(this.bar, index, previous),
       },
     };
@@ -356,13 +366,15 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       }
       touchProbe.addSurface({
         name: 'puzzle bar',
+        // Its buttons sit on the band's arc: x is an arc length from the left edge.
+        arc: () => ({ radius: BAND_ARC_RADIUS_METERS, lean: this.bar.leanRad }),
         object: () => (bar.fade.peek() >= 0.5 ? bar.document : null),
         rects: (out) => {
           const count = Math.min(bar.buttons.length, out.length);
           for (let i = 0; i < count; i++) {
             const button = bar.buttons[i];
             const name = button.name === 'chip' ? CHIP_NAMES[button.chip] : button.name;
-            setRect(out[i], name, button.centerX, 0, button.width, bar.buttonHeightMeters);
+            setRect(out[i], name, button.centerX, button.centerY, button.width, bar.buttonHeightMeters);
           }
           return count;
         },
@@ -408,6 +420,13 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     this.clock += delta;
     this.updateFade(delta);
+    if (this.awaitingRecenter && deskBridge.desk?.recenterGliding) {
+      this.awaitingRecenter = false;
+      if (!this.pending) {
+        this.card.status.setProperties({ text: CARD.recentered });
+        this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
+      }
+    }
     // A puzzle picked on the welcome screen (not mid-switch: it waits for that to finish).
     if (!this.pending && this.puzzle) {
       const picked = takePickedPuzzle();
@@ -544,13 +563,20 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     bar.document.updateWorldMatrix(true, false);
     for (const hand of HANDS) {
       const source = this.input.xr.getPrimaryInputSource(hand);
-      if (!source?.hand || !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._point)) {
+      // A hand holding a slab doesn't poke the column (the arm passes it on the way to the right slab).
+      if (
+        !source?.hand ||
+        this.join?.handHoldsSlab(hand) ||
+        !readJointsPoint(this.world, this.player, source, INDEX_TIP, this._point)
+      ) {
         this.barPoke.reset(hand);
         continue;
       }
       this._pokeSource = source;
       this._local.copy(this._point);
       bar.document.worldToLocal(this._local);
+      // The band's buttons sit on an arc: unrolled, its flat targets apply.
+      unrollArc(this._local, BAND_ARC_RADIUS_METERS, this.bar.leanRad);
       const verdict = this.barPoke.update(hand, this._local, this.pokeOnBar, this.pokeStraightness);
       const target = this.pokedTarget;
       if (verdict === 'press' && target) {
@@ -701,6 +727,22 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     if (target) {
       this.press(target.name, path, target.chip);
+    }
+  }
+
+  onHoldComplete(name: string): void {
+    // Show answer, held its full time: the answer.
+    if (name === 'hint' && this.nextHintRevealsAnswer()) {
+      this.hintGate.pressed(this.clock);
+      this.showHint();
+    }
+  }
+
+  onHoldCancelled(name: string): void {
+    // Let go before its time: nothing happened, and the card says why.
+    if (name === 'hint' && this.nextHintRevealsAnswer() && !this.pending) {
+      this.card.status.setProperties({ text: CARD.holdForAnswer });
+      this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
     }
   }
 
@@ -860,6 +902,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.target = puzzleTarget(this.puzzle);
     this.session = startSession(id);
     this.completionShowing = false;
+    this.hintGate.reset();
     this.updateHintLabel();
     this.lastComparison = null;
     this.lastState = null;
@@ -1040,6 +1083,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
   }
 
+  /** Whether the next hint would reveal the answer for the first time (it asks "Show answer?" first). */
+  private nextHintRevealsAnswer(): boolean {
+    return !answerRevealed(this.session) && this.session.hintsShown >= BAR.hintLabels.length - 1;
+  }
+
   /**
    * The hint button says what it shows next: "Hint" before the first,
    * "Another hint" after it, "Show answer" before the third (and after it,
@@ -1048,6 +1096,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private updateHintLabel(): void {
     const labels = BAR.hintLabels;
     setHintLabel(this.bar, labels[Math.min(this.session.hintsShown, labels.length - 1)]);
+    // Before the answer, Show answer acts only when held (the join system times it: onHoldComplete).
+    if (this.layout) {
+      this.layout.bar.holdButton = this.nextHintRevealsAnswer() ? { name: 'hint', seconds: SHOW_ANSWER_HOLD_SECONDS } : null;
+    }
   }
 
   private next(): void {
@@ -1293,6 +1345,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     // The bar resizes to its buttons; re-place it so it stays clear of the control.
     setBarContents(this.bar, { where, filter: this.filterChoices.length > 0, chips });
     this.layout.bar.widthMeters = this.bar.widthMeters;
+    this.layout.bar.heightMeters = this.bar.heightMeters;
+    this.layout.bar.leadCenterYMeters = this.bar.leadCenterYMeters;
     join.requestLayout();
   }
 
@@ -1353,6 +1407,18 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       }
       return;
     }
+    // Hint: spaced presses; Show answer (before the answer) only acts when held, so a press does nothing.
+    if (button === 'hint') {
+      if (this.nextHintRevealsAnswer()) {
+        return;
+      }
+      if (this.hintGate.press(this.clock) === 'ignored') {
+        if (import.meta.env.DEV && this.debug) {
+          this.debug.note(`Hint pressed again within ${HINT_PRESS_GAP_SECONDS} s (${path}): ignored, no click`);
+        }
+        return;
+      }
+    }
     this.bar.document.updateWorldMatrix(true, false);
     this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
     sounds.playClick(this._point);
@@ -1363,11 +1429,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       if (import.meta.env.DEV && this.debug) {
         this.debug.note(`Recenter pressed (${path})`);
       }
-      deskBridge.desk?.requestRecenter();
-      if (!this.pending) {
-        this.card.status.setProperties({ text: CARD.recentered });
-        this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
-      }
+      // After its countdown ("Look straight ahead"); the card says so once the tables move.
+      deskBridge.desk?.requestRecenter(this._point);
+      this.awaitingRecenter = true;
     } else if (button === 'hint') {
       this.showHint();
     } else if (button === 'next') {
@@ -1408,15 +1472,16 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     bar.document.updateWorldMatrix(true, false);
     this._local.copy(point);
     bar.document.worldToLocal(this._local);
+    unrollArc(this._local, BAND_ARC_RADIUS_METERS, this.bar.leanRad);
     this.lastPinchDistance = Infinity;
     // Up to 6 cm in front of the face (players pinch in front of a button), 3 cm behind it.
     if (this._local.z > BUTTON_PINCH_FRONT_DEPTH_METERS || this._local.z < -BUTTON_PINCH_BACK_DEPTH_METERS) {
       return null;
     }
     let best: BarButtonTarget | null = null;
-    const dy = Math.max(0, Math.abs(this._local.y) - bar.buttonHeightMeters / 2);
     for (const button of bar.buttons) {
       const dx = Math.max(0, Math.abs(this._local.x - button.centerX) - button.width / 2);
+      const dy = Math.max(0, Math.abs(this._local.y - button.centerY) - bar.buttonHeightMeters / 2);
       const distance = Math.hypot(dx, dy);
       if (distance < this.lastPinchDistance) {
         this.lastPinchDistance = distance;
@@ -1441,14 +1506,10 @@ function diffSummary(comparison: Comparison): string {
     return CARD.emptyResult;
   }
   const extra = comparison.rowStatus.filter((status) => status === 'extra').length;
-  const parts: string[] = [];
-  if (comparison.missing.length > 0) {
-    parts.push(CARD.missingRows(comparison.missing.length));
+  if (comparison.missing.length === 0 && extra === 0) {
+    return '';
   }
-  if (extra > 0) {
-    parts.push(CARD.extraRows(extra));
-  }
-  return parts.join(', ');
+  return CARD.diffStatus(comparison.missing.length, extra);
 }
 
 /**

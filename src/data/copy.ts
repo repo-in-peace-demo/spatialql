@@ -260,8 +260,16 @@ export const CARD = {
   /** The query line when the full-answer hint was shown (honest: the moves were given). */
   winWithAnswer: "That's this query:",
   solvedWithHints: (count: number) => (count === 1 ? 'Solved with 1 hint.' : `Solved with ${count} hints.`),
-  missingRows: (count: number) => (count === 1 ? '1 row missing' : `${count} rows missing`),
-  extraRows: (count: number) => (count === 1 ? '1 row not in the answer' : `${count} rows not in the answer`),
+  /** The diff line: rows missing, and rows not in the answer (short when both show, to fit one line). */
+  diffStatus: (missing: number, extra: number) => {
+    if (missing > 0 && extra > 0) {
+      return `${missing} missing, ${extra} extra`;
+    }
+    if (missing > 0) {
+      return missing === 1 ? '1 row missing' : `${missing} rows missing`;
+    }
+    return extra === 1 ? '1 row not in the answer' : `${extra} rows not in the answer`;
+  },
   emptyResult: 'No rows',
   /** After the last available puzzle. */
   morePuzzlesSoon: 'More puzzles soon.',
@@ -282,6 +290,8 @@ export const CARD = {
    * far away to use (the slabs float instead).
    */
   moveCloser: 'Move closer to your table to use it.',
+  /** The status line, briefly, when Show answer was let go before its hold finished. */
+  holdForAnswer: 'Hold Show answer to see it.',
   /** The status line, briefly, after the Recenter button brought the tables back in front of you. */
   recentered: 'Recentered',
   /** The status line on a replay (Prev) of a puzzle solved before; the takeaway shows again once it's re-solved. */
@@ -330,6 +340,8 @@ export const BAR = {
    * hand's ray hovers it (it brings the tables back in front of you).
    */
   recenter: 'Recenter',
+  /** Shown centered in view for a moment after Recenter is pressed: it recenters on where you then look. */
+  recenterPrompt: 'Look straight ahead',
   /**
    * The Exit icon button's label, shown above it on hover: a press does
    * nothing; held for a moment (a ring fills), it ends the session.

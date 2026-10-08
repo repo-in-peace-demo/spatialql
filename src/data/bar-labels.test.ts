@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vitest';
+import { COLUMN_LABEL_MIN_PADDING_EM, columnHalfCm, columnHeightCm, columnWidthCm } from '../challenge-view.js';
 import {
   BAR_BUTTON_PADDING_EM,
   barButtonWidthCm,
-  barRowWidthCm,
+  CONTROL_OPTION_MIN_HEIGHT_CM,
   CONTROL_OPTION_MIN_WIDTH_CM,
+  DATA_METRICS,
   HEADER_METRICS,
   MAX_FILTER_CHIPS,
   measureTextCm,
 } from '../slab-metrics.js';
 import { PLANNED_CONTROL_DISTANCE_METERS, slabTextSizeAt } from '../text-angles.js';
+import { joinTypeControlSizeCm } from '../table-slab-view.js';
 import { BAR } from './copy.js';
 import { columnHeaderText } from './join-result.js';
 import { getPuzzle, PUZZLES, runPuzzleQuery } from './puzzles.js';
@@ -31,8 +34,8 @@ describe('puzzle bar labels', () => {
 
   it('the Exit hover label ("Hold to exit") is one short line, plain ASCII', () => {
     const label = measureTextCm(BAR.exit, HEADER_METRICS, LABEL_FONT_CM) + 2 * BAR_BUTTON_PADDING_EM * LABEL_FONT_CM;
-    // No wider than Hint + Next + Recenter + Exit, so it never hangs past the bar's right end by much.
-    expect(label).toBeLessThanOrEqual(barButtonWidthCm(BAR.hintLabels, LABEL_FONT_CM) + 2 * CONTROL_OPTION_MIN_WIDTH_CM);
+    // Centered under the column: at most 2 cm past either side.
+    expect(label).toBeLessThanOrEqual(11 + 4);
     expect(BAR.exit).toMatch(/^[\x20-\x7e]+$/);
   });
 
@@ -40,15 +43,9 @@ describe('puzzle bar labels', () => {
     expect(barButtonWidthCm([BAR.prev], LABEL_FONT_CM)).toBeGreaterThanOrEqual(CONTROL_OPTION_MIN_WIDTH_CM);
   });
 
-  it('the Recenter hover label is one short line, no wider than the bar at rest', () => {
+  it('the Recenter hover label is one short line, plain ASCII', () => {
     const label = measureTextCm(BAR.recenter, HEADER_METRICS, LABEL_FONT_CM) + 2 * BAR_BUTTON_PADDING_EM * LABEL_FONT_CM;
-    const rest = barRowWidthCm([
-      barButtonWidthCm([BAR.prev], LABEL_FONT_CM),
-      barButtonWidthCm(BAR.hintLabels, LABEL_FONT_CM),
-      barButtonWidthCm(NEXT_LABELS, LABEL_FONT_CM),
-      CONTROL_OPTION_MIN_WIDTH_CM,
-    ]);
-    expect(label).toBeLessThanOrEqual(rest / 2);
+    expect(label).toBeLessThanOrEqual(11 + 4);
     expect(BAR.recenter).toMatch(/^[\x20-\x7e]+$/);
   });
 
@@ -110,39 +107,59 @@ describe('the Filter chips', () => {
     expect(shop.columns).toEqual([]);
   });
 
-  // Temporarily 45 cm: Exit made the widest bar 44.2 cm. The side-controls step moves Recenter and
-  // Exit to their own row; this limit goes back to 40 cm there (reach: Clear at ~0.6 m from the eyes).
-  it('the widest playing bar (Prev, Hint, Next, Recenter, Exit, a filter label and Clear) stays within 45 cm', () => {
-    const labelWidth = (text: string) =>
-      measureTextCm(text, HEADER_METRICS, LABEL_FONT_CM) + 2 * BAR_BUTTON_PADDING_EM * LABEL_FONT_CM;
-    let widest = 0;
-    for (const { output, columns } of results) {
-      for (const column of columns) {
-        widest = Math.max(widest, labelWidth(chipLabel(output, column)));
-      }
+  /** The column as challenge-view.ts builds it. */
+  const lead = joinTypeControlSizeCm(LABEL_FONT_CM);
+  const width = columnWidthCm(
+    LABEL_FONT_CM,
+    {
+      prev: BAR.prev,
+      hint: BAR.hintLabels,
+      next: NEXT_LABELS,
+      clear: BAR.clearFilter,
+      filter: BAR.filter,
+      filterBack: BAR.filterBack,
+    },
+    lead,
+  );
+  const half = columnHalfCm(width);
+  const padding = BAR_BUTTON_PADDING_EM * LABEL_FONT_CM;
+
+  it('the column is about two buttons wide (at most 11.1 cm: ~12.7° at 0.5 m; INNER | LEFT sets it), its halves full touch targets', () => {
+    expect(width).toBeLessThanOrEqual(11.1);
+    expect(half).toBeGreaterThanOrEqual(CONTROL_OPTION_MIN_WIDTH_CM);
+    // Prev and every Next label fit a half cell; Hint, Filter, Back and Clear the full width.
+    for (const label of [BAR.prev, ...NEXT_LABELS]) {
+      expect(measureTextCm(label, HEADER_METRICS, LABEL_FONT_CM) + 2 * padding, label).toBeLessThanOrEqual(half + 1e-9);
     }
-    const width = barRowWidthCm([
-      barButtonWidthCm([BAR.prev], LABEL_FONT_CM),
-      barButtonWidthCm(BAR.hintLabels, LABEL_FONT_CM),
-      barButtonWidthCm(NEXT_LABELS, LABEL_FONT_CM),
-      // Recenter and Exit: icons at the minimum target size.
-      CONTROL_OPTION_MIN_WIDTH_CM,
-      CONTROL_OPTION_MIN_WIDTH_CM,
-      widest,
-      barButtonWidthCm([BAR.clearFilter], LABEL_FONT_CM),
-    ]);
-    expect(width).toBeLessThanOrEqual(45);
+    for (const label of [...BAR.hintLabels, BAR.filter, BAR.filterBack, BAR.clearFilter]) {
+      expect(measureTextCm(label, HEADER_METRICS, LABEL_FONT_CM) + 2 * padding, label).toBeLessThanOrEqual(width + 1e-9);
+    }
   });
 
-  it('fit the bar: at most MAX_FILTER_CHIPS, and Back plus the chips within the band (50 cm)', () => {
+  it('every chip (bold) and every WHERE label (regular) fits the column width, never cut', () => {
+    const minPadding = COLUMN_LABEL_MIN_PADDING_EM * LABEL_FONT_CM;
+    for (const { output, columns } of results) {
+      for (const column of columns) {
+        const label = chipLabel(output, column);
+        expect(measureTextCm(label, HEADER_METRICS, LABEL_FONT_CM) + 2 * minPadding, label).toBeLessThanOrEqual(width + 1e-9);
+        expect(measureTextCm(label, DATA_METRICS, LABEL_FONT_CM) + 2 * minPadding, label).toBeLessThanOrEqual(width + 1e-9);
+      }
+    }
+  });
+
+  it('the filter area adds at most 5 rows (the chips one per row, and Back), so the column stays under 33 cm', () => {
+    let rows = 2;
+    for (const { columns } of results) {
+      rows = Math.max(rows, columns.length > 0 ? columns.length + 1 : 0);
+    }
+    expect(rows).toBeLessThanOrEqual(5);
+    const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, LABEL_FONT_CM * 1.2);
+    expect(columnHeightCm(buttonHeight, lead.heightCm, rows)).toBeLessThanOrEqual(33);
+  });
+
+  it('at most MAX_FILTER_CHIPS', () => {
     for (const { puzzle, joinType, output, columns } of results) {
-      const where = `${puzzle.id} ${output.left.id} <- ${output.right.id} ${joinType}`;
-      expect(columns.length, where).toBeLessThanOrEqual(MAX_FILTER_CHIPS);
-      const widths = [
-        barButtonWidthCm([BAR.filterBack], LABEL_FONT_CM),
-        ...columns.map((column) => barButtonWidthCm([chipLabel(output, column)], LABEL_FONT_CM)),
-      ];
-      expect(barRowWidthCm(widths), where).toBeLessThanOrEqual(50);
+      expect(columns.length, `${puzzle.id} ${output.left.id} <- ${output.right.id} ${joinType}`).toBeLessThanOrEqual(MAX_FILTER_CHIPS);
     }
   });
 });
@@ -156,3 +173,4 @@ describe('takeaways name columns through placeholders', () => {
     );
   });
 });
+
