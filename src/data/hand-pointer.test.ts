@@ -34,6 +34,7 @@ import {
   PoseHistory,
   smoothingAlpha,
   StaleRay,
+  pinchOpenMetersFor,
 } from '../hand-pointer-math.js';
 
 describe('the hand pointer', () => {
@@ -406,6 +407,40 @@ describe('a clear pinch from a shown pointer', () => {
     expect(runFrames(() => 2.1, 0.05)).toEqual(['released']);
     // Held, never closing: dropped once the window ends, and nothing more on release.
     expect(runFrames(() => 2.1, 0.8)).toEqual(['no-close']);
+  });
+
+  it('openings by target: NULL cells, Prev and Next 1.5 cm; everything else 2.2 cm (2026-10-10)', () => {
+    expect(pinchOpenMetersFor('null')).toBe(PINCH_OPEN_NULL_METERS);
+    expect(pinchOpenMetersFor('stepper')).toBe(PINCH_OPEN_NULL_METERS);
+    expect(pinchOpenMetersFor('other')).toBe(PINCH_OPEN_METERS);
+  });
+
+  it('regression (headset log 2026-10-10 02:53:31-34): rapid Prev re-pinches opening 1.8 and 1.7 cm press as steppers; 1.0 cm and less never do', () => {
+    // After a press, each re-pinch closes to ~0.8 cm, opens to its logged widest, then the platform's pinch starts.
+    const replay = (openMeters: number) => {
+      const motion = new PinchMotion(openMeters);
+      let t = 0;
+      const hold = (gap: number, seconds: number) => {
+        for (const end = t + seconds; t < end; t += 1 / 72) {
+          motion.sample(gap, t);
+        }
+      };
+      const results: boolean[] = [];
+      motion.pressed(t);
+      for (const widest of [0.018, 0.017, 0.01, 0.009, 0.009]) {
+        hold(0.008, 0.25);
+        hold(widest, 0.15);
+        hold(0.008, 0.05);
+        const pressed = motion.isPinchMotion(t);
+        results.push(pressed);
+        if (pressed) {
+          motion.pressed(t);
+        }
+      }
+      return results;
+    };
+    expect(replay(pinchOpenMetersFor('stepper'))).toEqual([true, true, false, false, false]);
+    expect(replay(pinchOpenMetersFor('other'))).toEqual([false, false, false, false, false]);
   });
 
   it('FROZEN constants (2026-10-09): change only for a clear regression in a session log', () => {

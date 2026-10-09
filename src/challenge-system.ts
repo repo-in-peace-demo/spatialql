@@ -47,6 +47,7 @@ import {
   setBarHover,
   setRecenterHover,
   type BarButton,
+  type PickerTileView,
   type BarButtonTarget,
   type PuzzleBarView,
   type PuzzleCardView,
@@ -62,6 +63,7 @@ import {
   isTodaysDaily,
   nextPuzzle,
   prevPuzzle,
+  puzzleTiles,
   type FinishAction,
 } from './data/daily-flow.js';
 import { DATASETS } from './data/datasets.js';
@@ -146,6 +148,10 @@ const WHERE_PULSE_SECONDS = 0.45;
 const MESSAGE_FLASH_SECONDS = 3;
 /** The bar's touch-readout names for the filter chips (no per-frame strings). */
 const CHIP_NAMES = Array.from({ length: MAX_FILTER_CHIPS }, (_, i) => `chip ${i + 1}`);
+/** A bar target's name for the logs: a chip's or a picker tile's own name. */
+function targetName(name: BarButton, index: number): string {
+  return name === 'chip' ? CHIP_NAMES[index] : name === 'tile' ? `tile ${index + 1}` : name;
+}
 /** The card fades back in this fast when it changes puzzle (per second). */
 const CARD_FADE_IN_PER_SECOND = 3;
 /**
@@ -285,6 +291,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       clear: BAR.clearFilter,
       filter: BAR.filter,
       filterBack: BAR.filterBack,
+      puzzles: BAR.puzzles,
+      pickerBack: BAR.pickerBack,
+      today: BAR.pickerToday,
     }, joinTypeControlSizeCm(labelFontCm));
     this.barEntity = this.world.createTransformEntity(this.bar.document);
     // Poke and ray select arrive as UIKit clicks; pinches and hand rays come
@@ -305,6 +314,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         'chip',
         i,
       ]),
+      [this.bar.puzzles, 'puzzles', -1],
+      [this.bar.pickerBack, 'pickerBack', -1],
+      ...this.bar.pickerTiles.map((tile, i): [InstanceType<typeof UIKit.Container>, BarButton, number] => [tile.container, 'tile', i]),
     ];
     for (const [container, name, chip] of clickables) {
       const onClick = (event: unknown) => {
@@ -332,6 +344,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         buttonHeightMeters: this.bar.buttonHeightMeters,
         // Built with only Prev, Hint, Next and Recenter.
         leadCenterYMeters: this.bar.leadCenterYMeters,
+        extendLeftMeters: 0,
         holdButton: null,
         onRecenterHover: (hovered) => setRecenterHover(this.bar.recenter, hovered),
         onExitHover: (hovered) => setRecenterHover(this.bar.exit, hovered),
@@ -355,6 +368,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         ['clear', bar.clear],
         ['filter', bar.filter],
         ['filterBack', bar.filterBack],
+        ['puzzles', bar.puzzles],
+        ['pickerBack', bar.pickerBack],
         ...bar.filterChips.map((chip, i) => [CHIP_NAMES[i], chip.container] as const),
       ] as const) {
         for (const type of ['pointerdown', 'pointerup'] as const) {
@@ -376,7 +391,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
           const count = Math.min(bar.buttons.length, out.length);
           for (let i = 0; i < count; i++) {
             const button = bar.buttons[i];
-            const name = button.name === 'chip' ? CHIP_NAMES[button.chip] : button.name;
+            const name = targetName(button.name, button.chip);
             setRect(out[i], name, button.centerX, button.centerY, button.width, bar.buttonHeightMeters);
           }
           return count;
@@ -569,7 +584,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       } else if (verdict !== 'none' && verdict !== 'press' && import.meta.env.DEV && this.debug) {
         const { toward, sideways, straightness } = this.barPoke.last;
         const cm = (m: number) => `${(m * 100).toFixed(1)} cm`;
-        const name = target ? (target.name === 'chip' ? CHIP_NAMES[target.chip] : target.name) : 'the bar';
+        const name = target ? targetName(target.name, target.chip) : 'the bar';
         this.debug.note(
           verdict === 'rejected-direction'
             ? `${hand} fingertip contact on ${name} rejected: it came in along the face (${cm(toward)} ` +
@@ -706,7 +721,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   pressBarAt(point: Vector3, hand: string, path: PressPath): void {
     const target = this.barButtonAt(point);
-    const name = target ? (target.name === 'chip' ? CHIP_NAMES[target.chip] : target.name) : null;
+    const name = target ? targetName(target.name, target.chip) : null;
     if (import.meta.env.DEV && this.debug && path === 'pinch') {
       this.debug.notePinch(hand, name, this.lastPinchDistance);
     }
@@ -826,6 +841,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
    * arrived). The card shows the coming puzzle right away.
    */
   private loadPuzzle(id: PuzzleId): void {
+    // Any switch closes the picker (a tile closes it first; the debug keys may not).
+    if (this.pickerOpen) {
+      this.pickerOpen = false;
+      this.updateBar();
+    }
     if (!PLAYABLE.includes(id)) {
       if (import.meta.env.DEV && this.debug) {
         this.debug.error(`load refused: ${id} is outside the playable puzzles`);
@@ -1353,13 +1373,17 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this.filterOpen = false;
     }
     const chips = this.filterOpen ? this.filterChoices.map((choice) => BAR.filterChip(choice.header)) : null;
-    const key = `${where ?? ''}|${this.filterChoices.length > 0}|${chips ? chips.join('|') : '-'}`;
+    const picker = this.pickerOpen ? this.pickerTileViews() : null;
+    const key =
+      `${where ?? ''}|${this.filterChoices.length > 0}|${chips ? chips.join('|') : '-'}|` +
+      (picker ? picker.map((t) => `${t.status[0]}${t.today ? 't' : ''}${t.current ? 'c' : ''}${t.selectable ? '' : 'x'}`).join('') : '-');
     if (key === this.barKey) {
       return;
     }
     this.barKey = key;
     // The bar resizes to its buttons; re-place it so it stays clear of the control.
-    setBarContents(this.bar, { where, filter: this.filterChoices.length > 0, chips });
+    setBarContents(this.bar, { where, filter: this.filterChoices.length > 0, chips, picker });
+    this.layout.bar.extendLeftMeters = this.bar.extendLeftMeters;
     this.layout.bar.widthMeters = this.bar.widthMeters;
     this.layout.bar.heightMeters = this.bar.heightMeters;
     this.layout.bar.leadCenterYMeters = this.bar.leadCenterYMeters;
@@ -1382,7 +1406,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     const joined = state?.phase === 'joined' && !this.pending;
     const hasFilter = state?.phase === 'joined' && !this.pending && !!state.filter;
     // Only what's shown can be pressed (a ray click can come from a hidden button's last frame).
+    const pickerHides = button === 'prev' || button === 'next' || button === 'hint' || button === 'clear' || button === 'filter';
     if (
+      (this.pickerOpen && (pickerHides || button === 'filterBack' || button === 'chip')) ||
+      (!this.pickerOpen && (button === 'tile' || button === 'pickerBack')) ||
       (button === 'clear' && !hasFilter) ||
       (button === 'filter' && (!joined || hasFilter || this.filterChoices.length === 0)) ||
       (button === 'filterBack' && !this.filterOpen) ||
@@ -1392,7 +1419,12 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     this.lastPress = this.clock;
     if (import.meta.env.DEV && this.debug) {
-      touchProbe.pressed(button === 'chip' ? CHIP_NAMES[chip] : button, path);
+      touchProbe.pressed(targetName(button, chip), path);
+    }
+    // The picker: Puzzles opens and closes it, Back closes it, a tile switches (and closes it).
+    if (button === 'puzzles' || button === 'pickerBack' || button === 'tile') {
+      this.pressPicker(button, path, chip);
+      return;
     }
     // Next on the last puzzle with every puzzle done: Finish, then Today or Done.
     const finish = button === 'next' ? this.finishAction() : null;
@@ -1466,6 +1498,95 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     } else {
       this.join?.requestClearFilter();
     }
+  }
+
+  // --- The puzzle picker ------------------------------------------------------------------
+
+  /** Whether the in-XR puzzle picker is open (in place of Prev | Next, Hint and the filter area). */
+  private pickerOpen = false;
+
+  /** The picker's tiles: the welcome grid's status data (`puzzleTiles`), the puzzle on the desk, each dataset's accent. */
+  private pickerTileViews(): PickerTileView[] {
+    const current = this.pending ?? this.puzzle?.id ?? null;
+    return puzzleTiles(this.progress, this.today, PLAYABLE).map((tile) => ({
+      number: tile.number,
+      status: tile.status,
+      today: tile.today,
+      selectable: tile.selectable,
+      current: tile.id === current,
+      accent: DATASETS[getPuzzle(tile.id).datasetId].theme.accent,
+    }));
+  }
+
+  /** Opens or closes the picker (the bar re-lays out; the join system re-places it). */
+  private setPickerOpen(open: boolean): void {
+    if (this.pickerOpen === open) {
+      return;
+    }
+    this.pickerOpen = open;
+    if (open) {
+      this.filterOpen = false;
+    }
+    this.updateBar();
+  }
+
+  /**
+   * Puzzles (toggles the picker), Back (closes it), or a tile: an unlocked
+   * one switches to its puzzle through the same path as Prev and Next
+   * (separate, glide home, wait for a held slab, or switch datasets) and
+   * closes the picker; the puzzle on the desk just closes it; a locked one
+   * says so on the card, silently.
+   */
+  private pressPicker(button: 'puzzles' | 'pickerBack' | 'tile', path: PressPath, index: number): void {
+    if (button === 'tile') {
+      const data = this.bar.pickerTiles[index]?.data;
+      const id = PLAYABLE[index];
+      if (!data || !id) {
+        return;
+      }
+      if (!data.selectable) {
+        if (!this.pending) {
+          this.card.status.setProperties({ text: CARD.tileLocked });
+          this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
+        }
+        if (import.meta.env.DEV && this.debug) {
+          this.debug.note(`picker: tile ${index + 1} pressed (${path}) while locked: no click`);
+        }
+        return;
+      }
+      if (this.pending) {
+        if (import.meta.env.DEV && this.debug) {
+          this.debug.note(`picker: tile ${index + 1} pressed (${path}) mid-switch: no click`);
+        }
+        return;
+      }
+    }
+    this.bar.document.updateWorldMatrix(true, false);
+    this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
+    sounds.playClick(this._point);
+    if (button !== 'tile') {
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(`picker ${button === 'puzzles' && !this.pickerOpen ? 'opened' : 'closed'} (${button}, ${path})`);
+      }
+      this.setPickerOpen(button === 'puzzles' ? !this.pickerOpen : false);
+      return;
+    }
+    const id = PLAYABLE[index];
+    this.setPickerOpen(false);
+    if (id === this.puzzle?.id) {
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(`picker: tile ${index + 1} is the puzzle on the desk (${path}): closed`);
+      }
+      return;
+    }
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(
+        `picker: puzzle ${PRACTICE_ORDER.indexOf(this.puzzle.id) + 1} -> puzzle ${index + 1} (${path})` +
+          `${this.isDaily ? ' (from the daily)' : ''}`,
+      );
+    }
+    this.join?.resetToHome();
+    this.loadPuzzle(id);
   }
 
   private lastPinchDistance = Infinity;

@@ -35,6 +35,12 @@ export type PlacedBar = PlacedElement & {
   /** The INNER | LEFT row's middle, in the bar's frame (meters): the join system places the control there. */
   leadCenterYMeters: number;
   /**
+   * How much of `widthMeters` extends left of the column's own place (the
+   * in-XR puzzle picker, open): the join system keeps the column's right
+   * edge, the control and the group's plan where they were. 0 or absent: none.
+   */
+  extendLeftMeters?: number;
+  /**
    * A button that acts only when held (besides Exit, always held), and for
    * how long: challenge mode's Show answer, before the answer is shown. The
    * join system times the hold and draws its ring (onHoldComplete,

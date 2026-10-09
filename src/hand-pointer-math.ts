@@ -93,6 +93,19 @@ export const PINCH_OPEN_METERS = 0.022;
  * on a NULL cell opened only 1.6-2.1 cm.
  */
 export const PINCH_OPEN_NULL_METERS = 0.015;
+
+/**
+ * What a pinch presses, for its opening: a NULL cell, Prev or Next (a
+ * "stepper": low stakes and reversible, so they share the NULL cells' 1.5 cm
+ * opening -- 2026-10-10 log: rapid Prev re-pinches opened 1.7-1.8 cm), or
+ * anything else (2.2 cm).
+ */
+export type PinchTargetKind = 'null' | 'stepper' | 'other';
+
+/** The opening (meters) a pinch on `kind` needs. */
+export function pinchOpenMetersFor(kind: PinchTargetKind): number {
+  return kind === 'other' ? PINCH_OPEN_METERS : PINCH_OPEN_NULL_METERS;
+}
 /** The opening must come within this long before the platform's pinch starts. */
 export const PINCH_OPENING_WINDOW_SECONDS = 0.4;
 /** Tip-distance samples kept per hand (at 90 fps, ~0.7 s: more than the window). */
@@ -118,6 +131,10 @@ export class PinchMotion {
   /** A press may come from the next opening (false after a press until the tips close, then open). */
   private armed = true;
   private closedSincePress = false;
+  /** For the log: the last press, the first close since it, and the last opening (any), in clock seconds. */
+  pressedAt = -Infinity;
+  closedAfterPressAt = -Infinity;
+  lastOpenAt = -Infinity;
   /** The latest tip distance sampled (meters), or null before any (for the poke log). */
   latest: number | null = null;
 
@@ -128,6 +145,14 @@ export class PinchMotion {
     this.openAt = -Infinity;
     this.armed = true;
     this.closedSincePress = false;
+    this.pressedAt = -Infinity;
+    this.closedAfterPressAt = -Infinity;
+    this.lastOpenAt = -Infinity;
+  }
+
+  /** The opening this tracker requires (meters). */
+  get openThreshold(): number {
+    return this.openMeters;
   }
 
   /** One frame's tip distance (null: the tips aren't tracked; nothing is recorded). */
@@ -142,9 +167,13 @@ export class PinchMotion {
     this.head = (this.head + 1) % PINCH_MOTION_HISTORY;
     this.count = Math.min(this.count + 1, PINCH_MOTION_HISTORY);
     if (tipDistanceMeters < this.openMeters) {
+      if (!this.closedSincePress) {
+        this.closedAfterPressAt = now;
+      }
       this.closedSincePress = true;
       return;
     }
+    this.lastOpenAt = now;
     if (!this.armed && this.closedSincePress) {
       this.armed = true;
     }
@@ -159,10 +188,12 @@ export class PinchMotion {
   }
 
   /** A press came from this pinch: the next needs the tips to close and open again. */
-  pressed(): void {
+  pressed(now = -Infinity): void {
     this.armed = false;
     this.closedSincePress = false;
     this.openAt = -Infinity;
+    this.pressedAt = now;
+    this.closedAfterPressAt = -Infinity;
   }
 
   /** The widest tip distance (meters) sampled within the window before `now`, or -1 if none (for the log). */
@@ -295,7 +326,8 @@ export class PinchFreeze {
 // real and phantom pinches. Change them only for a clear regression seen in a
 // session log (scripts/headset_log.py summary / pinches); hand-pointer.test.ts
 // pins the values. PINCH_OPEN_METERS and PINCH_OPEN_NULL_METERS above are part
-// of the set.
+// of the set. (2026-10-10, approved: Prev and Next take PINCH_OPEN_NULL_METERS
+// too, via pinchOpenMetersFor; the constants themselves are unchanged.)
 
 /**
  * A hand's pointer presses only once it has been shown for this long: a hand

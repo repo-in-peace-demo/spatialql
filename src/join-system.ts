@@ -119,8 +119,9 @@ import {
   pinchStartVerdict,
   POINTER_PRESS_MIN_VISIBLE_SECONDS,
   PinchMotion,
-  PINCH_OPEN_METERS,
   PINCH_OPEN_NULL_METERS,
+  pinchOpenMetersFor,
+  type PinchTargetKind,
   PINCH_OPENING_WINDOW_SECONDS,
   PINCH_TARGET_LOCK_SECONDS,
   RECENTER_HOLD_SECONDS,
@@ -331,6 +332,8 @@ const CONTROL_SLAB_CLEARANCE_METERS = 0.1;
  * results pushed back (up to RESULT_MAX_FIT_DISTANCE_METERS) to fit.
  */
 const VIEW_HALF_WIDTH_DEG = 42;
+/** While the puzzle picker is open, the column may reach this far left (it extends left by design). */
+const PICKER_LEFT_LIMIT_DEG = 45;
 /** In view, the control column's right edge sits this far left of the result's left edge. */
 const COLUMN_RESULT_GAP_DEG = 2;
 /** A pinch selects an option when its pinch point is this close to it, in plane... */
@@ -826,7 +829,10 @@ export class JoinSystem
   private readonly holdTarget = { left: '', right: '' };
   /** Per hand: its pinch motion (hand-pointer-math.ts), sampled every frame; NULL cells' takes a smaller opening. */
   private readonly pinchMotion = { left: new PinchMotion(), right: new PinchMotion() };
+  /** NULL cells, Prev and Next (pinchOpenMetersFor): the smaller opening. */
   private readonly pinchMotionNull = { left: new PinchMotion(PINCH_OPEN_NULL_METERS), right: new PinchMotion(PINCH_OPEN_NULL_METERS) };
+  /** Each hand's last pinch start: its target's kind (which opening it needed). */
+  private readonly pinchStartKind: Record<(typeof HANDS)[number], PinchTargetKind> = { left: 'other', right: 'other' };
   /** Per hand: the last pressable target its pointer was on, and when (the target lock: PINCH_TARGET_LOCK_SECONDS). */
   private readonly recentTarget = { left: makeRayHit(), right: makeRayHit() };
   private readonly recentTargetAt = { left: -Infinity, right: -Infinity };
@@ -2092,7 +2098,9 @@ export class JoinSystem
         // A hand's pinch may press only from a pointer shown long enough, as a pinch motion (NULL cells: a smaller
         // opening), starting closed enough.
         const visibleFor = pointer.active ? now - pointer.activeSince : 0;
-        const motion = (target.target === 'null' ? this.pinchMotionNull : this.pinchMotion)[hand].isPinchMotion(now);
+        const kind = this.pinchTargetKind(target);
+        this.pinchStartKind[hand] = kind;
+        const motion = (pinchOpenMetersFor(kind) === PINCH_OPEN_NULL_METERS ? this.pinchMotionNull : this.pinchMotion)[hand].isPinchMotion(now);
         this.pinchStartBlock[hand] = source?.hand ? pinchStartVerdict(motion, gap, visibleFor) : '';
         this.pinchStartOk[hand] = this.pinchStartBlock[hand] === '';
         this.pinchStartWidest[hand] = source?.hand ? this.pinchMotion[hand].widest(now) : -1;
@@ -4167,7 +4175,8 @@ export class JoinSystem
     const r = BAND_ARC_RADIUS_METERS;
     // The column's angular width on its arc (at its bottom edge's height: fixed as its filter area grows).
     const bottomElevation = MathUtils.degToRad(plan.floorDeg) - this.headPitchDown;
-    const columnDeg = bar ? MathUtils.radToDeg(arcAngle(bar.widthMeters, r, bottomElevation)) : 0;
+    // The column's own width: the open picker's extension to the left never moves the group.
+    const columnDeg = bar ? MathUtils.radToDeg(arcAngle(bar.widthMeters - columnExtension(bar), r, bottomElevation)) : 0;
     const columnGap = bar ? COLUMN_RESULT_GAP_DEG : 0;
     const card = this.challengeLayout?.card;
     const cardDeg = card
@@ -4271,7 +4280,9 @@ export class JoinSystem
     const r = BAND_ARC_RADIUS_METERS;
     // The bar's origin (its left edge's middle) on the arc, facing the eyes.
     const elevation = MathUtils.degToRad(this.plan.floorDeg) - this.headPitchDown + bar.heightMeters / 2 / r;
-    const yaw = MathUtils.degToRad(this.plan.columnLeftYawDeg);
+    // The open picker extends the bar to the left: its origin moves left by that much, the column stays put.
+    const extension = columnExtension(bar);
+    const yaw = MathUtils.degToRad(this.plan.columnLeftYawDeg) - arcAngle(extension, r, elevation);
     this._colA
       .copy(this._colFwd)
       .multiplyScalar(Math.cos(yaw))
@@ -4287,7 +4298,7 @@ export class JoinSystem
     bar.onArcLean?.(this.bandLean);
     if (joined) {
       const control = this.control;
-      this.arcWorld(bar.object, bar.widthMeters / 2, bar.leadCenterYMeters, 0, control.document.position);
+      this.arcWorld(bar.object, extension + (bar.widthMeters - extension) / 2, bar.leadCenterYMeters, 0, control.document.position);
       // Facing the eyes, level (no roll).
       control.document.lookAt(this._head);
       control.document.updateWorldMatrix(true, false);
@@ -4427,11 +4438,16 @@ export class JoinSystem
       devLayout.version++;
       this.debug.note(line);
       this.noteReachPaths(a, b, joined, slot, bar);
-      if (left.yaw0 < -VIEW_HALF_WIDTH_DEG - 0.5 || right.yaw1 > VIEW_HALF_WIDTH_DEG + 0.5) {
+      // The open picker extends the column left by design (to about -45°, while open).
+      const pickerOpen = columnExtension(bar) > 0;
+      const leftLimit = pickerOpen ? PICKER_LEFT_LIMIT_DEG : VIEW_HALF_WIDTH_DEG;
+      if (left.yaw0 < -leftLimit - 0.5 || right.yaw1 > VIEW_HALF_WIDTH_DEG + 0.5) {
         this.debug.warn(
           `the group reaches ${left.yaw0.toFixed(1)}° (${left.name}) to ${right.yaw1.toFixed(1)}° (${right.name}), ` +
-            `past +/-${VIEW_HALF_WIDTH_DEG}°`,
+            `past -${leftLimit}° / +${VIEW_HALF_WIDTH_DEG}°${pickerOpen ? ' (picker open)' : ''}`,
         );
+      } else if (pickerOpen) {
+        this.debug.note(`puzzle picker open: the column reaches ${left.yaw0.toFixed(1)}° (allowed to -${PICKER_LEFT_LIMIT_DEG}° while open)`);
       }
     }
   }
@@ -4758,8 +4774,8 @@ export class JoinSystem
         this.pinchConfirmed[hand] = false;
         const now = this.tweens.now;
         this.pointers[hand].freeze.pressed(now);
-        this.pinchMotion[hand].pressed();
-        this.pinchMotionNull[hand].pressed();
+        this.pinchMotion[hand].pressed(now);
+        this.pinchMotionNull[hand].pressed(now);
         if (import.meta.env.DEV && this.debug) {
           const target = this.pinchTarget[hand];
           this.debug.note(
@@ -4870,12 +4886,35 @@ export class JoinSystem
           : `pointer not shown (${pointer.offReason || 'off'})`;
       case 'start-open':
         return `tips ${this.pinchStartGap[hand] < 0 ? 'untracked' : cm(this.pinchStartGap[hand])} apart at its start (needs <= ${cm(PINCH_START_MAX_METERS)})`;
-      default:
+      default: {
+        // Why: the re-arm state since the last press (the tips must drop below the opening, then reach it).
+        const kind = this.pinchStartKind[hand];
+        const motion = (kind === 'other' ? this.pinchMotion : this.pinchMotionNull)[hand];
+        const now = this.tweens.now;
+        const ago = (t: number) => (Number.isFinite(t) ? `${Math.round((now - t) * 1000)} ms ago` : 'never');
         return (
           `no opening motion (widest ${this.widestNote(hand)} in the last ${PINCH_OPENING_WINDOW_SECONDS} s; ` +
-          `needs ${cm(PINCH_OPEN_METERS)}, opened again after a press)`
+          `needs ${cm(pinchOpenMetersFor(kind))}${kind === 'other' ? '' : ` (${kind === 'null' ? 'a NULL cell' : 'Prev or Next'})`}, ` +
+          `opened again after a press; last press ${ago(motion.pressedAt)}, closed below it after that ${ago(motion.closedAfterPressAt)}, ` +
+          `last at or above it ${ago(motion.lastOpenAt)})`
         );
+      }
     }
+  }
+
+  /** Which opening a pinch on `target` needs: a NULL cell, Prev or Next (the bar's steppers), or anything else. */
+  private pinchTargetKind(target: RayHit): PinchTargetKind {
+    if (target.target === 'null') {
+      return 'null';
+    }
+    if (target.target === 'bar') {
+      const index = this.barButtonIndexAt(target.point);
+      const name = index >= 0 ? this.challengeLayout?.bar.buttons[index]?.name : undefined;
+      if (name === 'prev' || name === 'next') {
+        return 'stepper';
+      }
+    }
+    return 'other';
   }
 
   /** Dev log: the widest tip distance before this frame's pinch start. */
@@ -6192,6 +6231,11 @@ function nearestSourceNull(slab: SourceSlab, local: Vector3): number {
  * in the slab's own frame (the grab surface the palm sphere must reach).
  * Uses `scratch`; allocates nothing.
  */
+/** How far the bar extends left of the column's own place (the open puzzle picker; free play's bar: never). */
+function columnExtension(bar: { extendLeftMeters?: number }): number {
+  return bar.extendLeftMeters ?? 0;
+}
+
 function distanceToSlab(point: Vector3, slab: SourceSlab, scratch: Vector3): number {
   slab.object.updateWorldMatrix(true, false);
   scratch.copy(point);

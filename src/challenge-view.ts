@@ -19,6 +19,9 @@ import { computed, signal, UIKit, UIKitDocument, type Signal } from '@iwsdk/core
 // Only the icons used (four dataset icons, Recenter), each from its own module, so the bundle doesn't
 // pull in the whole icon set.
 import { BookOpen } from '@pmndrs/uikit-lucide/dist/BookOpen.js';
+import { Check } from '@pmndrs/uikit-lucide/dist/Check.js';
+import { Eye } from '@pmndrs/uikit-lucide/dist/Eye.js';
+import { Lock } from '@pmndrs/uikit-lucide/dist/Lock.js';
 import { Coffee } from '@pmndrs/uikit-lucide/dist/Coffee.js';
 import { LocateFixed } from '@pmndrs/uikit-lucide/dist/LocateFixed.js';
 import { LogOut } from '@pmndrs/uikit-lucide/dist/LogOut.js';
@@ -278,13 +281,50 @@ export function setCardIntro(card: PuzzleCardView, lead: string, lines: readonly
  * button is. `filter` opens the chips (one per result column with a NULL),
  * `filterBack` closes them, `chip` is one of them (`BarButtonTarget.chip`).
  */
-export type BarButton = 'prev' | 'hint' | 'next' | 'recenter' | 'exit' | 'clear' | 'filter' | 'filterBack' | 'chip';
+export type BarButton =
+  | 'prev'
+  | 'hint'
+  | 'next'
+  | 'recenter'
+  | 'exit'
+  | 'clear'
+  | 'filter'
+  | 'filterBack'
+  | 'chip'
+  | 'puzzles'
+  | 'pickerBack'
+  | 'tile';
 
 /**
  * One bar button's target in the bar's frame (meters: its center, and its
  * width); all share `buttonHeightMeters`. `chip`: which chip (its index), or -1.
  */
 export type BarButtonTarget = { name: BarButton; centerX: number; centerY: number; width: number; chip: number };
+
+/**
+ * One tile of the in-XR puzzle picker (the welcome grid's status data,
+ * `puzzleTiles`): its number, status mark, today's daily, whether a press
+ * selects it, whether it's the puzzle on the desk, and its dataset accent.
+ */
+export type PickerTileView = {
+  number: number;
+  status: 'solved' | 'revealed' | 'open' | 'locked';
+  today: boolean;
+  selectable: boolean;
+  current: boolean;
+  accent: string;
+};
+
+/** The picker grid: 4 tiles across, 5 down (puzzles 1-20 in order), each a full touch target. */
+export const PICKER_COLUMNS = 4;
+export const PICKER_ROWS = 5;
+/** A tile's width (cm, at least the 3 cm touch minimum) and the gap between tiles; its height is a button's. */
+export const PICKER_TILE_WIDTH_CM = 3.0;
+export const PICKER_TILE_GAP_CM = 0.3;
+/** The grid's width (cm): wider than the column, it extends the column to the left while open. */
+export const PICKER_WIDTH_CM = PICKER_COLUMNS * PICKER_TILE_WIDTH_CM + (PICKER_COLUMNS - 1) * PICKER_TILE_GAP_CM;
+const PICKER_TODAY_BORDER_CM = 0.2;
+const PICKER_LOCKED_OPACITY = 0.45;
 
 export { MAX_FILTER_CHIPS };
 
@@ -294,6 +334,7 @@ export { MAX_FILTER_CHIPS };
  * Bottom-anchored, so its fixed rows never move; bottom to top:
  * - Recenter | Exit (icons);
  * - INNER | LEFT (the join system's own control, placed in the room left for it);
+ * - Puzzles (opens the picker; it stays in this row while the picker is open);
  * - Prev | Next;
  * - Hint (the full width);
  * - the filter area, growing upward: Filter (`filter`: the result has
@@ -301,7 +342,13 @@ export { MAX_FILTER_CHIPS };
  *   chips open (`chips` not null), Back under the chips, one per row (the
  *   first on top).
  */
-export type BarContents = { where: string | null; filter: boolean; chips: readonly string[] | null };
+export type BarContents = {
+  where: string | null;
+  filter: boolean;
+  chips: readonly string[] | null;
+  /** The puzzle picker, open (its tiles, in order) in place of Prev | Next, Hint and the filter area; null: closed. */
+  picker?: readonly PickerTileView[] | null;
+};
 
 export type PuzzleBarView = ArcBand & {
   document: UIKitDocument;
@@ -328,6 +375,22 @@ export type PuzzleBarView = ArcBand & {
   filterBack: Container;
   /** The filter chips (MAX_FILTER_CHIPS, hidden until the chips open). */
   filterChips: { container: Container; text: Text }[];
+  /** Puzzles: opens (and closes) the picker; Back on top of the open grid closes it too. */
+  puzzles: Container;
+  pickerBack: Container;
+  /** The picker's tiles (20), hidden until it opens. */
+  pickerTiles: {
+    container: Container;
+    number: Text;
+    today: Container;
+    icons: { solved: Container; revealed: Container; locked: Container };
+    data: PickerTileView | null;
+  }[];
+  /**
+   * While the picker is open, how much wider than the column the bar is
+   * (meters): the grid extends to the left, the column's own items stay put.
+   */
+  extendLeftMeters: number;
   /** Recenter: an icon button (brings the tables back in front of you); its label shows on hover. */
   recenter: RecenterButtonView;
   /** Exit: an icon button; held for a moment, it ends the session ("Hold to exit" on hover). */
@@ -432,7 +495,15 @@ export function setArcLean(band: ArcBand, leanRad: number): void {
  */
 export function columnWidthCm(
   labelFontCm: number,
-  labels: { prev: string; hint: readonly string[]; next: readonly string[]; clear: string; filter: string; filterBack: string },
+  labels: {
+    prev: string;
+    hint: readonly string[];
+    next: readonly string[];
+    clear: string;
+    filter: string;
+    filterBack: string;
+    puzzles?: string;
+  },
   lead: { widthCm: number },
 ): number {
   const pair = (a: number, b: number) => 2 * Math.max(a, b) + COLUMN_GAP_CM;
@@ -444,6 +515,7 @@ export function columnWidthCm(
     barButtonWidthCm([labels.filter], labelFontCm),
     barButtonWidthCm([labels.filterBack], labelFontCm),
     barButtonWidthCm([labels.clear], labelFontCm),
+    labels.puzzles ? barButtonWidthCm([labels.puzzles], labelFontCm) : 0,
   );
 }
 
@@ -479,6 +551,9 @@ export function buildPuzzleBar(
     clear: string;
     filter: string;
     filterBack: string;
+    puzzles: string;
+    pickerBack: string;
+    today: string;
   },
   /** INNER | LEFT's size (cm): the column leaves a row for it. */
   lead: { widthCm: number; heightCm: number },
@@ -553,6 +628,30 @@ export function buildPuzzleBar(
     chipButton.container.setProperties({ display: 'none' });
     filterChips.push(chipButton);
   }
+  // Puzzles, and the picker: Back on top, then the tiles (number, status mark, "Today").
+  const puzzles = button(labels.puzzles, width, false, null);
+  const pickerBack = button(labels.pickerBack, PICKER_WIDTH_CM, false, null);
+  pickerBack.container.setProperties({ display: 'none' });
+  const markSize = labelFontCm * 0.7;
+  const pickerTiles: PuzzleBarView['pickerTiles'] = [];
+  for (let i = 0; i < PICKER_COLUMNS * PICKER_ROWS; i++) {
+    const tile = button('', PICKER_TILE_WIDTH_CM, false, null);
+    tile.container.setProperties({ display: 'none', flexDirection: 'column', gapRow: labelFontCm * 0.05 });
+    tile.text.setProperties({ fontSize: labelFontCm * 0.9 });
+    const marks = new UIKit.Container({ flexDirection: 'row', alignItems: 'center', height: markSize * 1.1 });
+    const icon = (Icon: typeof Check) => {
+      const wrapper = new UIKit.Container({ display: 'none' });
+      wrapper.add(new Icon({ width: markSize, height: markSize, color: controlOptionStyle(false).color }));
+      marks.add(wrapper);
+      return wrapper;
+    };
+    const icons = { solved: icon(Check), revealed: icon(Eye), locked: icon(Lock) };
+    const today = new UIKit.Container({ display: 'none' });
+    today.add(new UIKit.Text({ text: labels.today, fontSize: markSize * 0.85, fontWeight: 'bold', wordBreak: 'keep-all' }));
+    marks.add(today);
+    tile.container.add(marks);
+    pickerTiles.push({ container: tile.container, number: tile.text, today, icons, data: null });
+  }
   // Recenter and Exit: icons, their labels below them on hover.
   const recenter = recenterButton(root, root, labelFontCm, buttonHeight, labels.recenter, fade, LocateFixed, half);
   // Exit: held for a moment, it ends the session.
@@ -576,6 +675,10 @@ export function buildPuzzleBar(
     filter: filter.container,
     filterBack: back.container,
     filterChips,
+    puzzles: puzzles.container,
+    pickerBack: pickerBack.container,
+    pickerTiles,
+    extendLeftMeters: 0,
     recenter,
     exit,
     nextOpacity,
@@ -594,7 +697,7 @@ export function buildPuzzleBar(
       leadHeight: lead.heightCm,
     },
   };
-  setBarContents(bar, { where: null, filter: false, chips: null });
+  setBarContents(bar, { where: null, filter: false, chips: null, picker: null });
   return bar;
 }
 
@@ -613,8 +716,18 @@ export function setNextLabel(bar: PuzzleBarView, label: string): void {
  * above its fixed rows. Exported for the label tests.
  */
 export function columnHeightCm(buttonHeightCm: number, leadHeightCm: number, filterRows: number): number {
-  const rows = 3 + filterRows;
+  // Recenter | Exit, Prev | Next, Puzzles, Hint, and the filter rows (each with the gap above it), and INNER | LEFT.
+  const rows = 4 + filterRows;
   return leadHeightCm + rows * buttonHeightCm + rows * COLUMN_GAP_CM;
+}
+
+/**
+ * The column's height (cm) with the picker open: Recenter | Exit, INNER |
+ * LEFT, Puzzles, the tiles' rows, and Back on top. Exported for the tests.
+ */
+export function pickerColumnHeightCm(buttonHeightCm: number, leadHeightCm: number): number {
+  const grid = PICKER_ROWS * buttonHeightCm + (PICKER_ROWS - 1) * PICKER_TILE_GAP_CM;
+  return leadHeightCm + 3 * buttonHeightCm + grid + 4 * COLUMN_GAP_CM;
 }
 
 /**
@@ -625,18 +738,30 @@ export function columnHeightCm(buttonHeightCm: number, leadHeightCm: number, fil
  */
 export function setBarContents(bar: PuzzleBarView, contents: BarContents): void {
   const { width, half, buttonHeight, label, paddingX, leadHeight } = bar.sizes;
-  const open = contents.chips !== null;
+  const picker = contents.picker ?? null;
+  const open = contents.chips !== null && picker === null;
   // The targets change: no hover outline survives (the pointer re-hovers next frame).
-  for (const container of [bar.prev, bar.hint, bar.next, bar.recenter.container, bar.exit.container, bar.filter, bar.filterBack]) {
+  for (const container of [
+    bar.prev,
+    bar.hint,
+    bar.next,
+    bar.recenter.container,
+    bar.exit.container,
+    bar.filter,
+    bar.filterBack,
+    bar.puzzles,
+    bar.pickerBack,
+  ]) {
     setTargetHover(container, false);
   }
   for (const chipButton of bar.filterChips) {
     setTargetHover(chipButton.container, false);
   }
+  bar.pickerTiles.forEach((tile) => setTargetHover(tile.container, false, tileRest(tile.data)));
   setTargetHover(bar.clear, false, { color: COLOR_CLEAR_BORDER, width: CLEAR_BORDER_WIDTH });
-  const where = open ? null : contents.where;
-  const showFilter = !open && where === null && contents.filter;
-  const chips = contents.chips ?? [];
+  const where = open || picker ? null : contents.where;
+  const showFilter = !open && !picker && where === null && contents.filter;
+  const chips = picker ? [] : (contents.chips ?? []);
   const chipCount = Math.min(chips.length, bar.filterChips.length);
 
   if (where === null) {
@@ -653,36 +778,84 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
   bar.filter.setProperties({ display: showFilter ? 'flex' : 'none' });
   bar.filterBack.setProperties({ display: open ? 'flex' : 'none' });
 
-  // Rows, bottom to top: [items, height]. Each item: its button (null: not a
-  // target), container, width and chip index; laid out left to right.
-  type Item = { name: BarButton | null; container: Container | null; width: number; chip: number };
+  // The picker open: the bar is the grid's width, extended to the left; the
+  // column's own items keep their places (shifted right by the extension).
+  const totalWidth = picker ? Math.max(width, PICKER_WIDTH_CM) : width;
+  const shift = totalWidth - width;
+  bar.extendLeftMeters = shift / 100;
+  bar.widthMeters = totalWidth / 100;
+  bar.root.setProperties({ width: totalWidth });
+  for (const container of [bar.prev, bar.next, bar.hint]) {
+    container.setProperties({ display: picker ? 'none' : 'flex' });
+  }
+  bar.puzzles.setProperties(controlOptionStyle(picker !== null));
+  bar.pickerBack.setProperties({ display: picker ? 'flex' : 'none' });
+  bar.pickerTiles.forEach((tile, i) => {
+    const data = picker?.[i] ?? null;
+    tile.data = data;
+    tile.container.setProperties({ display: data ? 'flex' : 'none' });
+    if (data) {
+      applyTileLook(tile, data);
+    }
+  });
+
+  // Rows, bottom to top: [items, height, gap above]. Each item: its button
+  // (null: not a target), container, width, chip index and left edge (null:
+  // the column's own left half or right half / full width); laid out left to right.
+  type Item = { name: BarButton | null; container: Container | null; width: number; chip: number; left?: number };
   const pair = (left: Item, right: Item): Item[] => [left, right];
-  const rows: [Item[], number][] = [
+  const rows: [Item[], number, number][] = [
     [
       pair(
         { name: 'recenter', container: bar.recenter.container, width: half, chip: -1 },
         { name: 'exit', container: bar.exit.container, width: half, chip: -1 },
       ),
       buttonHeight,
+      COLUMN_GAP_CM,
     ],
     // The room for INNER | LEFT (the join system places the control there).
-    [[{ name: null, container: null, width, chip: -1 }], leadHeight],
-    [
-      pair({ name: 'prev', container: bar.prev, width: half, chip: -1 }, { name: 'next', container: bar.next, width: half, chip: -1 }),
-      buttonHeight,
-    ],
-    [[{ name: 'hint', container: bar.hint, width, chip: -1 }], buttonHeight],
+    [[{ name: null, container: null, width, chip: -1 }], leadHeight, COLUMN_GAP_CM],
   ];
+  if (picker) {
+    rows.push([[{ name: 'puzzles', container: bar.puzzles, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM]);
+    // The tiles, bottom row first (17-20), four across from the bar's left edge; Back on top.
+    for (let row = PICKER_ROWS - 1; row >= 0; row--) {
+      const items: Item[] = [];
+      for (let column = 0; column < PICKER_COLUMNS; column++) {
+        const index = row * PICKER_COLUMNS + column;
+        items.push({
+          name: 'tile',
+          container: bar.pickerTiles[index].container,
+          width: PICKER_TILE_WIDTH_CM,
+          chip: index,
+          left: column * (PICKER_TILE_WIDTH_CM + PICKER_TILE_GAP_CM),
+        });
+      }
+      rows.push([items, buttonHeight, row === 0 ? COLUMN_GAP_CM : PICKER_TILE_GAP_CM]);
+    }
+    rows.push([[{ name: 'pickerBack', container: bar.pickerBack, width: PICKER_WIDTH_CM, chip: -1, left: 0 }], buttonHeight, COLUMN_GAP_CM]);
+  } else {
+    // Puzzles right above INNER | LEFT, as when the picker is open: it never moves.
+    rows.push(
+      [[{ name: 'puzzles', container: bar.puzzles, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM],
+      [
+        pair({ name: 'prev', container: bar.prev, width: half, chip: -1 }, { name: 'next', container: bar.next, width: half, chip: -1 }),
+        buttonHeight,
+        COLUMN_GAP_CM,
+      ],
+      [[{ name: 'hint', container: bar.hint, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM],
+    );
+  }
   if (where !== null) {
-    rows.push([[{ name: 'clear', container: bar.clear, width, chip: -1 }], buttonHeight]);
-    rows.push([[{ name: null, container: bar.chip, width, chip: -1 }], buttonHeight]);
+    rows.push([[{ name: 'clear', container: bar.clear, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM]);
+    rows.push([[{ name: null, container: bar.chip, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM]);
   } else if (showFilter) {
-    rows.push([[{ name: 'filter', container: bar.filter, width, chip: -1 }], buttonHeight]);
+    rows.push([[{ name: 'filter', container: bar.filter, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM]);
   } else if (open) {
-    rows.push([[{ name: 'filterBack', container: bar.filterBack, width, chip: -1 }], buttonHeight]);
+    rows.push([[{ name: 'filterBack', container: bar.filterBack, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM]);
     // The chips above Back, one per row, the first on top.
     for (let i = chipCount - 1; i >= 0; i--) {
-      rows.push([[{ name: 'chip', container: bar.filterChips[i].container, width, chip: i }], buttonHeight]);
+      rows.push([[{ name: 'chip', container: bar.filterChips[i].container, width, chip: i }], buttonHeight, COLUMN_GAP_CM]);
     }
   }
   bar.filterChips.forEach((chipButton, i) => {
@@ -693,7 +866,8 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
     }
   });
 
-  const heightCm = columnHeightCm(buttonHeight, leadHeight, rows.length - 3);
+  // Each row's height, and the gap between it and the row below.
+  const heightCm = rows.reduce((sum, [, rowHeight, gap], i) => sum + rowHeight + (i > 0 ? gap : 0), 0);
   bar.root.setProperties({ height: heightCm });
   bar.heightMeters = heightCm / 100;
 
@@ -704,13 +878,17 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
   bar.buttons.length = 0;
   const targets: BarButtonTarget[] = [];
   let bottom = 0;
-  for (const [items, rowHeight] of rows) {
+  rows.forEach(([items, rowHeight, gap], rowIndex) => {
+    if (rowIndex > 0) {
+      bottom += gap;
+    }
     const rowY = bottom + rowHeight / 2 - heightCm / 2;
     if (items.length === 1 && items[0].container === null) {
       bar.leadCenterYMeters = rowY / 100;
     }
     items.forEach((item, i) => {
-      const center = i === 0 ? item.width / 2 : width - item.width / 2;
+      const center =
+        item.left !== undefined ? item.left + item.width / 2 : shift + (i === 0 ? item.width / 2 : width - item.width / 2);
       if (item.container) {
         placeFlat(item.container, center, rowY, item.width, rowHeight, heightCm);
         curveOntoArc(bar, item.container, center, rowY);
@@ -719,20 +897,44 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
         targets.push({ name: item.name, centerX: center / 100, centerY: rowY / 100, width: item.width / 100, chip: item.chip });
       }
     });
-    bottom += rowHeight + COLUMN_GAP_CM;
-  }
+    bottom += rowHeight;
+  });
   targets.sort((p, q) => q.centerY - p.centerY || p.centerX - q.centerX);
   bar.buttons.push(...targets);
   // Recenter's and Exit's hover labels: just below the column, centered under it, on the arc too.
-  placeIconLabels(bar, bar.recenter, bar.exit, width, heightCm);
+  placeIconLabels(bar, bar.recenter, bar.exit, width, heightCm, shift);
+}
+
+/** A tile's resting border: today's daily keeps its accent outline (hover replaces it while hovered). */
+function tileRest(data: PickerTileView | null): { color: string; width: number } | null {
+  return data?.today ? { color: data.accent, width: PICKER_TODAY_BORDER_CM } : null;
+}
+
+/** A picker tile's look: the puzzle on the desk filled; its status mark or "Today"; locked dimmed. */
+function applyTileLook(tile: PuzzleBarView['pickerTiles'][number], data: PickerTileView): void {
+  const style = controlOptionStyle(data.current);
+  tile.container.setProperties({ ...style, opacity: data.selectable ? 1 : PICKER_LOCKED_OPACITY });
+  setTargetHover(tile.container, false, tileRest(data));
+  tile.number.setProperties({ text: String(data.number) });
+  tile.icons.solved.setProperties({ display: !data.today && data.status === 'solved' ? 'flex' : 'none' });
+  tile.icons.revealed.setProperties({ display: !data.today && data.status === 'revealed' ? 'flex' : 'none' });
+  tile.icons.locked.setProperties({ display: !data.today && data.status === 'locked' ? 'flex' : 'none' });
+  tile.today.setProperties({ display: data.today ? 'flex' : 'none' });
 }
 
 /** Recenter's and Exit's hover labels: centered just below the column (toward the slabs, never over the result). */
-function placeIconLabels(band: ArcBand, recenter: RecenterButtonView, exit: RecenterButtonView, widthCm: number, heightCm: number): void {
+function placeIconLabels(
+  band: ArcBand,
+  recenter: RecenterButtonView,
+  exit: RecenterButtonView,
+  widthCm: number,
+  heightCm: number,
+  shiftCm = 0,
+): void {
   for (const view of [recenter, exit]) {
     const y = -heightCm / 2 - COLUMN_GAP_CM - view.labelHeightCm / 2;
-    placeFlat(view.label, widthCm / 2, y, view.labelWidthCm, view.labelHeightCm, heightCm);
-    curveOntoArc(band, view.label, widthCm / 2, y);
+    placeFlat(view.label, shiftCm + widthCm / 2, y, view.labelWidthCm, view.labelHeightCm, heightCm);
+    curveOntoArc(band, view.label, shiftCm + widthCm / 2, y);
   }
 }
 
@@ -928,6 +1130,12 @@ function barTargetContainer(bar: PuzzleBarView, index: number): Container | null
       return bar.filterBack;
     case 'chip':
       return bar.filterChips[target.chip]?.container ?? null;
+    case 'puzzles':
+      return bar.puzzles;
+    case 'pickerBack':
+      return bar.pickerBack;
+    case 'tile':
+      return bar.pickerTiles[target.chip]?.container ?? null;
   }
 }
 
@@ -939,7 +1147,13 @@ export function setBarHover(bar: PuzzleBarView, index: number, previous: number)
   if (index === previous) {
     return;
   }
-  const rest = (i: number) => (bar.buttons[i]?.name === 'clear' ? { color: COLOR_CLEAR_BORDER, width: CLEAR_BORDER_WIDTH } : null);
+  const rest = (i: number) => {
+    const target = bar.buttons[i];
+    if (target?.name === 'tile') {
+      return tileRest(bar.pickerTiles[target.chip]?.data ?? null);
+    }
+    return target?.name === 'clear' ? { color: COLOR_CLEAR_BORDER, width: CLEAR_BORDER_WIDTH } : null;
+  };
   const before = barTargetContainer(bar, previous);
   if (before) {
     setTargetHover(before, false, rest(previous));

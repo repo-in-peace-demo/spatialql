@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { COLUMN_LABEL_MIN_PADDING_EM, columnHalfCm, columnHeightCm, columnWidthCm } from '../challenge-view.js';
+import {
+  COLUMN_LABEL_MIN_PADDING_EM,
+  columnHalfCm,
+  columnHeightCm,
+  columnWidthCm,
+  PICKER_COLUMNS,
+  PICKER_ROWS,
+  PICKER_TILE_GAP_CM,
+  PICKER_TILE_WIDTH_CM,
+  PICKER_WIDTH_CM,
+  pickerColumnHeightCm,
+} from '../challenge-view.js';
 import {
   BAR_BUTTON_PADDING_EM,
   barButtonWidthCm,
@@ -118,6 +129,7 @@ describe('the Filter chips', () => {
       clear: BAR.clearFilter,
       filter: BAR.filter,
       filterBack: BAR.filterBack,
+      puzzles: BAR.puzzles,
     },
     lead,
   );
@@ -155,6 +167,44 @@ describe('the Filter chips', () => {
     expect(rows).toBeLessThanOrEqual(5);
     const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, LABEL_FONT_CM * 1.2);
     expect(columnHeightCm(buttonHeight, lead.heightCm, rows)).toBeLessThanOrEqual(33);
+  });
+
+  describe('the in-XR puzzle picker', () => {
+    const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, LABEL_FONT_CM * 1.2);
+
+    it('20 tiles (4 x 5), each a full touch target: at least 3 x 2 cm', () => {
+      expect(PICKER_COLUMNS * PICKER_ROWS).toBe(20);
+      expect(PICKER_TILE_WIDTH_CM).toBeGreaterThanOrEqual(3);
+      expect(buttonHeight).toBeGreaterThanOrEqual(2);
+      expect(PICKER_WIDTH_CM).toBeCloseTo(4 * 3.0 + 3 * 0.3, 6);
+    });
+
+    it('the grid is 12.9 cm wide: ~14.8° on the 0.5 m arc, extending the ~12.7° column ~2° to the left (to about -45°)', () => {
+      const deg = (cm: number) => (cm / 50) * (180 / Math.PI);
+      expect(deg(PICKER_WIDTH_CM)).toBeLessThanOrEqual(15);
+      expect(deg(PICKER_WIDTH_CM) - deg(width)).toBeLessThanOrEqual(3);
+    });
+
+    it('Puzzles fits the column; Back fits the grid; every tile number with its mark, and "Today", fit a tile', () => {
+      expect(measureTextCm(BAR.puzzles, HEADER_METRICS, LABEL_FONT_CM) + 2 * padding).toBeLessThanOrEqual(width + 1e-9);
+      expect(measureTextCm(BAR.pickerBack, HEADER_METRICS, LABEL_FONT_CM) + 2 * padding).toBeLessThanOrEqual(PICKER_WIDTH_CM);
+      // A tile: its number (as built, 0.9 label fonts) and, below it, an icon (0.7) or "Today" (0.7 x 0.85).
+      const tilePadding = COLUMN_LABEL_MIN_PADDING_EM * LABEL_FONT_CM;
+      for (let n = 1; n <= 20; n++) {
+        expect(measureTextCm(String(n), HEADER_METRICS, LABEL_FONT_CM * 0.9) + 2 * tilePadding, String(n)).toBeLessThanOrEqual(PICKER_TILE_WIDTH_CM);
+      }
+      expect(measureTextCm(BAR.pickerToday, HEADER_METRICS, LABEL_FONT_CM * 0.7 * 0.85) + 2 * tilePadding).toBeLessThanOrEqual(PICKER_TILE_WIDTH_CM);
+      // Height: the number's line and the mark's row within a button's height.
+      expect(LABEL_FONT_CM * 0.9 * 1.2 + LABEL_FONT_CM * 0.7 * 1.1 + LABEL_FONT_CM * 0.05).toBeLessThanOrEqual(buttonHeight);
+      for (const label of [BAR.puzzles, BAR.pickerBack, BAR.pickerToday]) {
+        expect(label).toMatch(/^[\x20-\x7e]+$/);
+      }
+    });
+
+    it('open, the column is at most 31 cm tall (its tallest with five filter rows is about the same)', () => {
+      expect(pickerColumnHeightCm(buttonHeight, lead.heightCm)).toBeLessThanOrEqual(31);
+      expect(PICKER_TILE_GAP_CM).toBeGreaterThan(0);
+    });
   });
 
   it('at most MAX_FILTER_CHIPS', () => {

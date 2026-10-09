@@ -174,6 +174,20 @@ Since phase 4:
 
 **Built, not committed:**
 
+- **In-XR puzzle picker:** a Puzzles button in the column (right above INNER |
+  LEFT, in both modes) opens a 4 x 5 grid of puzzles 1-20 in the column's place
+  (the welcome grid's status marks: solved, with answer, locked, Today; the
+  puzzle on the desk filled). A tile switches through the same path as Prev and
+  Next (never-yank) and closes the grid; a locked tile says so on the card; Back
+  or Puzzles closes it. Tiles 3.0 x 2.5 cm; the grid is 12.9 cm wide (14.8° at
+  0.5 m), extending the column about 2° further left while open (planned to
+  about -45°); the group's plan and INNER | LEFT don't move.
+- **Prev and Next take the NULL cells' 1.5 cm re-arm opening** (other targets
+  keep 2.2 cm; the frozen constants are unchanged). In the 2026-10-10 02:53 log,
+  2 of the 5 rapid Prev re-pinches rejected for a short opening (1.8, 1.7 cm)
+  would have passed; 3 never opened past 1.0 cm. A rejected pinch's log line now
+  says when the tips last closed and opened since the last press.
+
 - **Debug panel placement** (dev): it never goes below or in front of the
   tables. It's placed only from a layout readout, for the head pose that layout
   used (leaning in toward the tables once re-placed it in front of them,

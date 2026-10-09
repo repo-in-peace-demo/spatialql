@@ -254,6 +254,8 @@ export const CARD = {
   usedAllHints: 'You used all 3 hints.',
   /** A daily completed after "Show answer": why the streak didn't grow. */
   streakNeedsSolve: 'Streak needs a solve without the answer.',
+  /** A locked tile in the in-XR picker pressed (briefly, in the status line). */
+  tileLocked: 'Locked: solve earlier ones.',
   /** Next pressed before the puzzle is done (briefly, in the title row's right-hand slot). */
   solveFirst: 'Solve it first, or use Hint.',
   /** Under the answer (after "Show answer"): the moves still finish it, or Next (now Skip) moves on. */
@@ -357,6 +359,12 @@ export const BAR = {
   filterBack: 'Back',
   /** One chip: the column's header as the result slab shows it. */
   filterChip: (header: string) => `${header} is NULL`,
+  /** Opens (and closes) the in-XR puzzle picker: a grid of puzzles 1-20 in the column. */
+  puzzles: 'Puzzles',
+  /** On top of the open picker: closes it without switching. */
+  pickerBack: 'Back',
+  /** Under today's daily's number in the picker (as on the welcome screen). */
+  pickerToday: 'Today',
 };
 
 // --- The target outline (in the result's place, before a join) --------------------------
