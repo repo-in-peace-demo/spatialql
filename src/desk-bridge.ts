@@ -24,6 +24,8 @@ export interface DeskControls {
    * to use (the slabs float): the card suggests moving closer.
    */
   readonly surfaceTooFar: boolean;
+  /** The desk top's height (world y) while the slabs rest on it (a held slab's shadow falls there); null while they float. */
+  readonly deskSurfaceY: number | null;
   /**
    * The Recenter button: after a short "Look straight ahead" countdown
    * (recenter-countdown.ts), re-places the whole group in front of where the

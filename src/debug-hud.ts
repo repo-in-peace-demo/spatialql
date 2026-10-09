@@ -17,11 +17,14 @@
  *   (inner edge HUD_GROUP_MARGIN_DEG past the group's outermost element on
  *   that side -- the card, the column, a slab, the result -- as the join
  *   system's layout readout last measured it, `dev-layout.ts`), at
- *   HUD_DISTANCE_METERS, its center at eye level, facing the eyes. If
- *   its outer edge would pass HUD_MAX_OUTER_DEG from the group's middle, it
- *   goes centered below the tables instead. Placed once the desk is ready,
- *   and again only when the desk re-places the tables, the layout changes,
- *   a new session starts, or the side is swapped. It refreshes
+ *   HUD_DISTANCE_METERS, its center at eye level, facing the eyes it was
+ *   laid out for (never wherever the head is now). Clear of every hand's
+ *   path to a slab (reach-path.ts): it steps farther out if needed, and is
+ *   hidden if its outer edge would pass HUD_MAX_OUTER_DEG -- never below or
+ *   in front of the tables. Placed once a layout readout exists, again only
+ *   when the layout changes (once the tables are still, never during a
+ *   dataset switch, a recenter or a glide), a new session starts, or the
+ *   side is swapped. It refreshes
  *   its text at most HUD_REFRESH_HZ times a second, and only lines that
  *   changed. View only: no pointer events, no interactable components.
  * - **Swap button** (on the panel's inner edge): moves the panel to the
@@ -59,7 +62,7 @@ import { formatArgs, formatTable, logToFile, startLogSink } from './debug-log-si
 import { deskBridge } from './desk-bridge.js';
 import { DEV_FLAG_STORAGE_PREFIX } from './dev-flags.js';
 import { devLayout } from './dev-layout.js';
-import { grabPoints, reachClearances, reachClearanceText, rectFromCorners, shoulders, type Vec3 } from './reach-path.js';
+import { grabPoints, reachClearances, REACH_PATH_MIN_CLEARANCE_METERS, rectFromCorners, shoulders, type Vec3 } from './reach-path.js';
 import { readJointsPoint, readPinchPoint } from './pinch.js';
 import { sounds } from './sound.js';
 import { JoinResultSlab, TableSlab, TableSlabRuntime } from './table-slab-component.js';
@@ -114,12 +117,12 @@ const MIRRORED_TAGS: readonly (readonly [string, string])[] = [
 // --- Panel ---------------------------------------------------------------------------
 /** Eye distance of the panel: within reach, so the swap button can be poked. */
 const HUD_DISTANCE_METERS = 0.5;
-/** Before the join system's first layout readout: the inner edge this far (yaw) from the slabs' center direction. */
-const HUD_INNER_EDGE_DEG = 45;
-/** Beside the group: the inner edge this far (yaw) past the group's outermost element on that side. */
+/** Beside the group: the inner edge at least this far (yaw) past the group's outermost element on that side. */
 const HUD_GROUP_MARGIN_DEG = 5;
-/** ...unless the outer edge would then be more than this from the group's middle: below the tables instead. */
-const HUD_MAX_OUTER_DEG = 85;
+/** If a hand's path to a slab passes too close (reach-path.ts), it steps this much farther out... */
+const HUD_STEP_DEG = 5;
+/** ...as long as its outer edge stays within this of the group's middle; past that it's hidden (no room). */
+const HUD_MAX_OUTER_DEG = 100;
 /**
  * Beside the group, its center at eye level (not the natural gaze, 4° lower):
  * a right hand reaching for the right slab's outer corner passes below it
@@ -130,9 +133,7 @@ const HUD_PITCH_RAD = 0;
 const HUD_TEXT_DEG = 1.0;
 const HUD_WIDTH_EM = 34;
 const HUD_REFRESH_HZ = 4;
-/** Re-place when the group's center direction moves this far from where the panel was placed for... */
-const HUD_REPLACE_YAW_DEG = 20;
-/** ...and only once no table is held and they've been still this long (within this tolerance). */
+/** Re-placed for a new layout only once no table is held and they've been still this long (within this tolerance). */
 const HUD_STILL_SECONDS = 1;
 const HUD_STILL_TOLERANCE_METERS = 0.01;
 /** Seconds into a session before the first placement (the head pose and the desk settle). */
@@ -534,11 +535,8 @@ export class DebugHudSystem extends createSystem({
   private hudEntity: Entity | null = null;
   private side: Side = 'left';
   private placed = false;
-  /** The group's center direction (yaw, radians) the panel was placed for. */
-  private placedYaw = 0;
   /** The layout readout (`devLayout.version`) the panel was placed for. */
   private placedLayout = 0;
-  private deskWasReady = false;
   private immersiveSeconds = 0;
 
   // Text refresh.
@@ -620,13 +618,10 @@ export class DebugHudSystem extends createSystem({
     const immersive = this.world.visibilityState.peek() !== VisibilityState.NonImmersive;
     this.recordFrame(delta);
 
-    // Placement: once the desk is ready, and again after it re-places the tables.
+    // Placement waits out a dataset switch, a recenter's countdown and glide:
+    // it stays where it is, and follows the new layout once things are still.
     const desk = deskBridge.desk;
-    const deskReady = !desk || desk.deskState.phase === 'ready';
-    if (deskReady && !this.deskWasReady) {
-      this.placed = false;
-    }
-    this.deskWasReady = deskReady;
+    const calm = !desk || (desk.deskState.phase === 'ready' && !desk.recenterCountdownActive && !desk.recenterGliding);
 
     this.refreshTimer += delta;
     const refresh = this.refreshTimer >= 1 / HUD_REFRESH_HZ;
@@ -642,12 +637,15 @@ export class DebugHudSystem extends createSystem({
     // Let the session's head pose and the desk placement settle first.
     this.immersiveSeconds += delta;
     const settled = this.immersiveSeconds >= HUD_SETTLE_SECONDS;
-    if (!this.panelHidden && refresh && deskReady && settled) {
+    // Only from a layout readout (the group's edges known), and only when it
+    // changes -- never because the head moved: leaning in toward the tables
+    // once re-placed it right in front of them.
+    if (!this.panelHidden && refresh && calm && settled && devLayout.version > 0) {
       if (!this.placed) {
         this.place();
-      } else if (this.groupAtRest() && (this.groupYawMoved() || devLayout.version !== this.placedLayout)) {
+      } else if (devLayout.version !== this.placedLayout && this.groupAtRest()) {
         // Follows the tables only once they're put down and still: never
-        // while they're being carried around.
+        // while they're being carried around or glide home.
         this.place();
       }
     }
@@ -660,7 +658,7 @@ export class DebugHudSystem extends createSystem({
       this.checkHeadHeight();
       this.samplePitch();
     }
-    if (!this.panelHidden) {
+    if (!this.panelHidden && this.hud.document.visible) {
       this.updateButton();
     }
   }
@@ -737,88 +735,72 @@ export class DebugHudSystem extends createSystem({
     this._head.setFromMatrixPosition(this.player.head.matrixWorld);
   }
 
-  /** Yaw (radians) of the horizontal direction from the eyes to `_center`. */
-  private centerYaw(): number {
-    return Math.atan2(-(this._center.x - this._head.x), -(this._center.z - this._head.z));
-  }
-
-  private groupYawMoved(): boolean {
-    if (!this.groupCenter()) {
-      return false;
-    }
-    this.readHead();
-    let diff = this.centerYaw() - this.placedYaw;
-    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-    return Math.abs(diff) > (HUD_REPLACE_YAW_DEG * Math.PI) / 180;
-  }
-
   /** Yaw (radians, + left) of the horizontal direction from the eyes to `point`. */
   private yawTo(point: { x: number; z: number }): number {
     return Math.atan2(-(point.x - this._head.x), -(point.z - this._head.z));
   }
 
   /**
-   * Beside the group, outside its whole extent: the inner edge
+   * Beside the group, outside its whole extent, from the head pose of the
+   * join system's last layout readout (`devLayout`): the inner edge
    * HUD_GROUP_MARGIN_DEG (yaw) past the outermost element on this side, at
-   * HUD_DISTANCE_METERS along the natural gaze pitch, facing the eyes. If the
-   * outer edge would then pass HUD_MAX_OUTER_DEG from the group's middle,
-   * centered below the group's lowest edge instead. Before the join system's
-   * first layout readout: HUD_INNER_EDGE_DEG from the slabs' center.
+   * HUD_DISTANCE_METERS at eye level, facing those eyes. If a shoulder-to-slab
+   * path then passes within REACH_PATH_MIN_CLEARANCE_METERS of it, it steps
+   * HUD_STEP_DEG farther out; once its outer edge would pass HUD_MAX_OUTER_DEG
+   * from the group's middle, it's hidden instead (no room). Never in front of
+   * the tables.
    */
   private place(): void {
-    if (!this.groupCenter()) {
+    if (devLayout.version === 0) {
       return;
     }
-    this.readHead();
-    const yaw = this.centerYaw();
+    this._head.set(devLayout.head.x, devLayout.head.y, devLayout.head.z);
     const halfWidthRad = Math.atan(this.hud.widthMeters / 2 / HUD_DISTANCE_METERS);
-    const margin = (HUD_GROUP_MARGIN_DEG * Math.PI) / 180;
     const sign = this.side === 'left' ? 1 : -1;
-    let panelYaw = yaw + sign * ((HUD_INNER_EDGE_DEG * Math.PI) / 180 + halfWidthRad);
-    let pitch = HUD_PITCH_RAD;
-    let how = `${this.side}: inner edge ${HUD_INNER_EDGE_DEG} deg from the slabs' center (no layout readout yet)`;
-    if (devLayout.version > 0) {
-      const leftYaw = this.yawTo(devLayout.left);
-      const rightYaw = this.yawTo(devLayout.right);
-      const middle = leftYaw + wrapAngle(rightYaw - leftYaw) / 2;
-      const edgeYaw = this.side === 'left' ? leftYaw : rightYaw;
-      panelYaw = edgeYaw + sign * (margin + halfWidthRad);
-      const outerDeg = ((Math.abs(wrapAngle(panelYaw - middle)) + halfWidthRad) * 180) / Math.PI;
-      const edgeName = this.side === 'left' ? devLayout.leftName : devLayout.rightName;
-      how =
-        `${this.side}: inner edge ${HUD_GROUP_MARGIN_DEG} deg past the ${edgeName} ` +
-        `(${((Math.abs(wrapAngle(edgeYaw - middle)) * 180) / Math.PI).toFixed(0)} deg from the group's middle), ` +
-        `outer edge ${outerDeg.toFixed(0)} deg`;
-      if (outerDeg > HUD_MAX_OUTER_DEG) {
-        // No room beside it: centered below the group's lowest edge.
-        const b = devLayout.bottom;
-        const bottomPitch = Math.atan2(b.y - this._head.y, Math.hypot(b.x - this._head.x, b.z - this._head.z));
-        const halfHeightRad = Math.atan(this.hud.heightMeters / 2 / HUD_DISTANCE_METERS);
-        panelYaw = middle;
-        pitch = bottomPitch - margin - halfHeightRad;
-        how =
-          `below the tables (beside, its outer edge would be ${outerDeg.toFixed(0)} deg out, past ${HUD_MAX_OUTER_DEG}): ` +
-          `top edge ${HUD_GROUP_MARGIN_DEG} deg under the lowest edge`;
-      }
-    }
-    this._dir.set(0, 0, -1).applyAxisAngle(UP, panelYaw);
+    const leftYaw = this.yawTo(devLayout.left);
+    const rightYaw = this.yawTo(devLayout.right);
+    const middle = leftYaw + wrapAngle(rightYaw - leftYaw) / 2;
+    const edgeYaw = this.side === 'left' ? leftYaw : rightYaw;
+    const edgeName = this.side === 'left' ? devLayout.leftName : devLayout.rightName;
+    const edgeDeg = (Math.abs(wrapAngle(edgeYaw - middle)) * 180) / Math.PI;
     const object = this.hud.document;
-    object.position
-      .copy(this._head)
-      .addScaledVector(this._dir, HUD_DISTANCE_METERS * Math.cos(pitch))
-      .addScaledVector(UP, HUD_DISTANCE_METERS * Math.sin(pitch));
-    object.lookAt(this._head);
-    object.visible = true;
-    object.updateWorldMatrix(true, false);
     this.placed = true;
-    this.placedYaw = yaw;
     this.placedLayout = devLayout.version;
     this.shownVersion = -1;
-    this.reportPlacement(how);
+    for (let gapDeg = HUD_GROUP_MARGIN_DEG; ; gapDeg += HUD_STEP_DEG) {
+      const panelYaw = edgeYaw + sign * ((gapDeg * Math.PI) / 180 + halfWidthRad);
+      const outerDeg = ((Math.abs(wrapAngle(panelYaw - middle)) + halfWidthRad) * 180) / Math.PI;
+      if (outerDeg > HUD_MAX_OUTER_DEG) {
+        object.visible = false;
+        console.info(
+          `${LOG_PREFIX} hidden: no room on the ${this.side} (the ${edgeName} is ${edgeDeg.toFixed(0)} deg from the group's ` +
+            `middle; with a hand's path clear, its outer edge would be ${outerDeg.toFixed(0)} deg out, past ${HUD_MAX_OUTER_DEG}). ` +
+            `It comes back with the next layout (Recenter, or a new puzzle).`,
+        );
+        return;
+      }
+      this._dir.set(0, 0, -1).applyAxisAngle(UP, panelYaw);
+      object.position
+        .copy(this._head)
+        .addScaledVector(this._dir, HUD_DISTANCE_METERS * Math.cos(HUD_PITCH_RAD))
+        .addScaledVector(UP, HUD_DISTANCE_METERS * Math.sin(HUD_PITCH_RAD));
+      object.lookAt(this._head);
+      object.updateWorldMatrix(true, false);
+      const clearance = this.reachClearance();
+      if (clearance >= REACH_PATH_MIN_CLEARANCE_METERS) {
+        object.visible = true;
+        this.reportPlacement(
+          `${this.side}: inner edge ${gapDeg} deg past the ${edgeName} (${edgeDeg.toFixed(0)} deg from the group's middle), ` +
+            `outer edge ${outerDeg.toFixed(0)} deg`,
+          clearance,
+        );
+        return;
+      }
+    }
   }
 
   /** One readout line: where the panel went, the button's reach, and its clearance from the slabs. */
-  private reportPlacement(how: string): void {
+  private reportPlacement(how: string, reachMeters: number): void {
     this.buttonCenter(this._a);
     const buttonDistance = this._a.distanceTo(this._head);
     let clearance = Infinity;
@@ -828,7 +810,7 @@ export class DebugHudSystem extends createSystem({
     const clearanceText = Number.isFinite(clearance) ? `${(clearance * 100).toFixed(0)} cm` : 'n/a';
     console.info(
       `${LOG_PREFIX} placed ${how}; button ${buttonDistance.toFixed(2)} m (reach ${TOUCH_REACH_MAX_METERS} m), ` +
-        `${clearanceText} from a slab; ${this.reachPathText()}`,
+        `${clearanceText} from a slab; reach paths: debug panel ${(reachMeters * 100).toFixed(1)} cm (at least ${REACH_PATH_MIN_CLEARANCE_METERS * 100} cm)`,
     );
     if (clearance < GRAB_SPHERE_RADIUS_METERS + 0.05) {
       console.warn(`${LOG_PREFIX} swap button is only ${clearanceText} from a slab: a pinch there could grab it`);
@@ -836,19 +818,17 @@ export class DebugHudSystem extends createSystem({
   }
 
   /**
-   * How close the panel comes to the straight path from either shoulder to
-   * any slab's grab point (reach-path.ts). Dev only, per placement: allocates.
+   * How close the panel comes to the straight path from either shoulder (at
+   * the layout's head pose) to any slab's grab point (reach-path.ts), in
+   * meters. Dev only, per placement attempt: allocates.
    */
-  private reachPathText(): string {
+  private reachClearance(): number {
     const object = this.hud.document;
     const w = this.hud.widthMeters / 2;
     const h = this.hud.heightMeters / 2;
     const corner = (target: { localToWorld(v: Vector3): Vector3 }, x: number, y: number): Vec3 =>
       target.localToWorld(new Vector3(x, y, 0));
     const rect = rectFromCorners('debug panel', corner(object, -w, -h), corner(object, w, -h), corner(object, -w, h));
-    // Horizontal right of the panel's facing direction toward the group: the head's own right.
-    this.player.head.updateWorldMatrix(true, false);
-    const right = new Vector3(1, 0, 0).applyQuaternion(this.player.head.getWorldQuaternion(new Quaternion())).setY(0).normalize();
     const to: Vec3[] = [];
     for (const entity of this.queries.slabs.entities) {
       const slab = entity.object3D;
@@ -862,7 +842,8 @@ export class DebugHudSystem extends createSystem({
       const bottom = slabBottomLocalY(doc);
       to.push(...grabPoints(corner(slab, -sw, top), corner(slab, sw, top), corner(slab, -sw, bottom), corner(slab, sw, bottom)));
     }
-    return `reach paths: ${reachClearanceText(reachClearances(shoulders(this._head, right), to, [rect]))}`;
+    const [result] = reachClearances(shoulders(this._head, devLayout.rightAxis), to, [rect]);
+    return result.meters;
   }
 
   /** The swap button sits on the panel's inner edge (toward the group). */

@@ -35,7 +35,9 @@ export type SoundName =
   | 'complete'
   | 'hint'
   | 'tablesOut'
-  | 'tablesIn';
+  | 'tablesIn'
+  | 'pickUp'
+  | 'putDown';
 
 /** Dev-only observer: name, scheduled delay (s), measured peak (dBFS, or null if not measurable). */
 export type SoundHook = (name: SoundName, delaySeconds: number, peakDb: number | null) => void;
@@ -336,6 +338,30 @@ class JoinSounds {
         osc.frequency.value = freq;
         envelope(ctx, osc, out, t, gain, 0.004, 0.4);
       }
+    });
+  }
+
+  /** A table grabbed: a quiet, short lift (a soft rising tone with a little air). */
+  playPickUp(at: Position, delay = 0): void {
+    this.oneShot('pickUp', at, delay, (ctx, out, t) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(330, t);
+      osc.frequency.exponentialRampToValueAtTime(520, t + 0.08);
+      envelope(ctx, osc, out, t, 0.16, 0.008, 0.1);
+      this.noiseBurst(ctx, out, t, 'bandpass', 2400, 1.2, 0.06, 0.04);
+    });
+  }
+
+  /** A table let go (not docking): the lift reversed, lower and settling. */
+  playPutDown(at: Position, delay = 0): void {
+    this.oneShot('putDown', at, delay, (ctx, out, t) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(420, t);
+      osc.frequency.exponentialRampToValueAtTime(240, t + 0.1);
+      envelope(ctx, osc, out, t, 0.16, 0.006, 0.13);
+      this.noiseBurst(ctx, out, t + 0.02, 'lowpass', 700, 0.7, 0.07, 0.05);
     });
   }
 

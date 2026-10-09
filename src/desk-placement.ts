@@ -98,6 +98,8 @@ const FLOATING_BELOW_HEAD_METERS = 0.25;
 const SURFACE_FORWARD_METERS = 0.32;
 // Keeps the bottom edge from z-fighting with the surface it rests on.
 const SURFACE_LIFT_METERS = 0.002;
+/** Slabs are grabbed by one hand and carried level: they keep their tilt (no rotation with the wrist). */
+const SLAB_GRAB = { rotate: false };
 
 // Field-of-view guard (view-comfort.ts): every slab's top and bottom edges
 // should sit inside the group's view window around the natural seated gaze;
@@ -237,6 +239,8 @@ export class DeskPlacementSystem
   private lastSurface: SurfaceAssessment | null = null;
   /** The last search found a table or desk beyond reach (the slabs float); see DeskControls. */
   surfaceTooFar = false;
+  /** The desk top's height (world y) while the slabs rest on it; null while they float. */
+  deskSurfaceY: number | null = null;
 
   // Recenter: the group back in front of the player (headset back on, a
   // recenter, or the Recenter button; see recenter-trigger.ts).
@@ -381,7 +385,7 @@ export class DeskPlacementSystem
     entity.addComponent(TableSlab, { tableId: table.id });
     entity.addComponent(TableSlabRuntime, { document: doc.document, rowViews: doc.rowViews, layout: doc });
     if (grabbable) {
-      entity.addComponent(OneHandGrabbable, {});
+      entity.addComponent(OneHandGrabbable, SLAB_GRAB);
     }
     return {
       table,
@@ -784,7 +788,7 @@ export class DeskPlacementSystem
       slab.doc.fade.value = t;
       if (t >= 1 && !slab.landed) {
         slab.landed = true;
-        slab.entity.addComponent(OneHandGrabbable, {});
+        slab.entity.addComponent(OneHandGrabbable, SLAB_GRAB);
         if (object) {
           sounds.playDropTap(object.position);
         }
@@ -1164,6 +1168,7 @@ export class DeskPlacementSystem
     if (!this.canPlace()) {
       return;
     }
+    this.deskSurfaceY = null;
     const [leftSlab, rightSlab] = this.slabs;
     this.setYawAxes(this._headYaw);
     const customersHalf = this.slabHeightMeters(leftSlab.doc) / 2;
@@ -1313,6 +1318,7 @@ export class DeskPlacementSystem
       this._anchor.addScaledVector(this._forward, reachForward - anchorForward);
       anchorForward = reachForward;
     }
+    this.deskSurfaceY = this._anchor.y;
     if (!this.isFrozen(leftSlab.entity, leftSlab.touched)) {
       const lean = eyeFacingLeanFromBottom(anchorEyeRise, anchorForward, customersHeight);
       this.proppedCenter(-leftOffset, customersHeight / 2, Math.sin(lean), Math.cos(lean));

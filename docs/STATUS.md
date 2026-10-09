@@ -165,17 +165,30 @@ Since phase 4:
   (a hyphen: the fonts have no middle dot). The first daily shows "A new puzzle
   every day. Solve it to build a streak." once, marked only when seen in XR;
   Reset shows it again.
-- **7.** *(not committed)* Hover: the hand pointer rests on the card (view only,
-  never in front of a table's hover) and on the result between its NULL cells,
-  with a fainter side glow than a table's; the result's skips while the win glow
-  is on. Controllers keep the SDK's ray: out of scope.
+- **7.** Hover: only pressable targets highlight; the hand pointer's cursor dot
+  rests on a table, the card (never in front of a table) and the result between
+  its NULL cells, with no glow. Controllers keep the SDK's ray: out of scope.
 - **10.** *(not committed)* The flat page shows only the welcome panel, before the
   first session and after leaving one (a camera layer; XR is unchanged).
 - **13.** Prev and Next move through the puzzle numbers in order. Prev goes to N−1 (off on puzzle 1). Next goes to N+1 once N is solved (or as Skip after "Show answer"). The exceptions are by design: from puzzle 20, or from a daily that's ahead of practice, Next goes to the lowest open puzzle, and Finish once all 20 are done. Confirmed in the code (`prevPuzzle` / `nextPuzzle`, tested) and in the headset logs: 20 → 19 → … → 13 by Prev (2026-10-09 03:57), and 5 → 6 → … → 11 and 12 → … → 20 by Next (2026-10-07). The "Choose puzzle" grid and "Reset progress" (with a confirmation) are on the welcome screen.
 
-**Proposed, awaiting approval:**
+**Built, not committed:**
 
-- Grab feedback for the tables: can grab, grabbed, and ready to join, each clearly different.
+- **Debug panel placement** (dev): it never goes below or in front of the
+  tables. It's placed only from a layout readout, for the head pose that layout
+  used (leaning in toward the tables once re-placed it in front of them,
+  2026-10-10 02:52:43), re-placed only when the layout changes and the tables are
+  still (never during a switch, a recenter or a glide), steps farther out if a
+  hand's path to a slab passes within 5 cm, and hides if there's no room.
+
+- **Grab feedback** for the tables (`grab-feedback.ts`). Can grab: the nearest
+  table within the 7 cm grab sphere of a free hand's grip gets a soft, thin
+  outline in its dataset accent. Grabbed: a brighter, thicker outline, 2% larger,
+  carried level (rotation off), a soft shadow on the desk when it rests on one,
+  and quiet pick-up and put-down sounds (none when it docks). Ready to join: the
+  pulsing amber edge glow and hum, unchanged. Only pressable targets (buttons,
+  chips, NULL cells) get a pointer hover highlight; a table, the card and the
+  result between NULL cells show only the cursor dot.
 
 **Then:**
 

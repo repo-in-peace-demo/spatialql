@@ -96,6 +96,7 @@ import {
 } from './join-bridge.js';
 import { JoinDebug, type JoinDebugHost, type JoinStats } from './join-debug.js';
 import { isTouchPointerClick, setRect, touchProbe, type PressPath } from './touch-probe.js';
+import { DeskShadow, GRABBED_SCALE, SlabOutline, type GrabLook } from './grab-feedback.js';
 import { COLOR_MATCH_LINE, COLOR_PREVIEW, CursorDot, EdgeGlow, lineColorForTint, SegmentBatch } from './join-visuals.js';
 import {
   angleBetweenDeg,
@@ -372,10 +373,6 @@ const POINTER_THICKNESS_METERS = 0.0015;
 const POINTER_OPACITY = 0.6;
 const POINTER_DOT_RADIUS_METERS = 0.005;
 const POINTER_STUB_METERS = 0.3;
-/** A slab under the pointer glows this much along its sides (a grab target, for the distance grab). */
-const POINTER_SLAB_GLOW = 0.3;
-/** The card, or the result between its NULL cells, under the pointer: fainter (seen, but nothing to press or grab). */
-const POINTER_SURFACE_GLOW = 0.18;
 /** Dev log: a hover change is logged at most this often per hand. */
 const POINTER_HOVER_LOG_SECONDS = 0.25;
 /** Exit: held this long, it ends the session (a ring fills meanwhile). */
@@ -490,7 +487,7 @@ function pressable(hit: RayHit): boolean {
   return hit.target !== 'none' && hit.target !== 'slab' && hit.target !== 'result' && hit.target !== 'card';
 }
 
-/** Whether a ray hit is a surface the pointer rests on but never presses (its hover is a faint side glow). */
+/** Whether a ray hit is a surface the pointer rests on but never presses: only the cursor dot, no hover highlight. */
 function viewOnly(target: RayTarget): boolean {
   return target === 'slab' || target === 'result' || target === 'card';
 }
@@ -770,16 +767,16 @@ export class JoinSystem
     left: new CursorDot(POINTER_DOT_RADIUS_METERS, COLOR_POINTER, 0.95),
     right: new CursorDot(POINTER_DOT_RADIUS_METERS, COLOR_POINTER, 0.95),
   };
-  private pointerGlowA!: EdgeGlow;
-  private pointerGlowB!: EdgeGlow;
+  /** Grab feedback (grab-feedback.ts): one outline and one desk shadow per source slab, pooled. */
+  private readonly grabOutlines: SlabOutline[] = [];
+  private readonly grabShadows: DeskShadow[] = [];
+  /** Dev: each slab's last grab look, so only changes are logged. */
+  private readonly grabLooks = new Map<string, GrabLook>();
   private readonly pointerHover = {
     option: null as JoinType | null,
     barIndex: -1,
     recenter: false,
     exit: false,
-    slab: null as SourceSlab | null,
-    /** The card or the result (between its NULL cells) under a pointer, when no slab is. */
-    surface: null as 'card' | 'result' | null,
   };
   /** The control's two options as targets (centers and widths, in its frame). */
   private controlTargets: ButtonRect[] = [];
@@ -938,8 +935,6 @@ export class JoinSystem
     this.winGlowRight = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_WIN_GLOW);
     this.pointerLines = new SegmentBatch(HANDS.length, COLOR_POINTER, POINTER_THICKNESS_METERS, POINTER_OPACITY);
     this.pointerLines.setCount(HANDS.length);
-    this.pointerGlowA = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_POINTER);
-    this.pointerGlowB = new EdgeGlow(GLOW_WIDTH_METERS, COLOR_POINTER);
     // Exit's hold ring: built whole once; its draw range shows how far it has filled.
     // Mirrored in x, so it fills clockwise from the top.
     this.holdRing = new Mesh(
@@ -964,8 +959,6 @@ export class JoinSystem
       this.pointerLines.mesh,
       this.pointerDots.left.mesh,
       this.pointerDots.right.mesh,
-      this.pointerGlowA.mesh,
-      this.pointerGlowB.mesh,
     );
     const visualsEntity = this.world.createTransformEntity(this.visualsRoot, {
       parent: this.world.sceneEntity,
@@ -1073,8 +1066,8 @@ export class JoinSystem
         this.pointerLines.dispose();
         this.pointerDots.left.dispose();
         this.pointerDots.right.dispose();
-        this.pointerGlowA.dispose();
-        this.pointerGlowB.dispose();
+        this.grabOutlines.forEach((outline) => outline.dispose());
+        this.grabShadows.forEach((shadow) => shadow.dispose());
         this.holdRing.geometry.dispose();
         this.holdRing.material.dispose();
         visualsEntity.dispose();
@@ -1099,6 +1092,7 @@ export class JoinSystem
       const source = this.sourceFor(entity);
       if (source) {
         this.captureHome(source);
+        sounds.playPickUp(source.object.position);
       }
     });
     // A new session re-places the slabs: forget the old homes, re-lay out.
@@ -1176,6 +1170,7 @@ export class JoinSystem
         break;
     }
 
+    this.updateGrabFeedback();
     this.updatePreviewVisuals();
     this.updateLines();
     this.updateHandPointers(delta);
@@ -3260,6 +3255,18 @@ export class JoinSystem
     if (!source) {
       return;
     }
+    // Back to its own size before anything measures it (the dock pose, the glide home).
+    source.object.scale.setScalar(1);
+    const docking =
+      (this.state.phase === 'previewing' && this.state.moving === source.id) ||
+      (this.state.phase === 'joined' && (source.id === this.state.left || source.id === this.state.right));
+    // The dock has its own snap; anything else is put down.
+    if (!docking) {
+      sounds.playPutDown(source.object.position);
+    }
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`grab feedback: ${source.id} released: ${docking ? 'docking (its snap, no put-down sound)' : 'put down'}`);
+    }
     if (this.state.phase === 'previewing' && this.state.moving === source.id) {
       // Commit on release, not on contact: jitter while holding never joins.
       this.dockSide = this.previewSide;
@@ -4343,10 +4350,9 @@ export class JoinSystem
       pitch0: number;
       pitch1: number;
       distance: number;
-      /** The corners at yaw0, yaw1 and pitch0 (the lowest), for the debug panel. */
+      /** The corners at yaw0 and yaw1, for the debug panel. */
       leftPoint: Vector3;
       rightPoint: Vector3;
-      bottomPoint: Vector3;
     };
     const parts: Part[] = [];
     const span = (name: string, points: Vector3[], center: Vector3) => {
@@ -4363,7 +4369,6 @@ export class JoinSystem
         distance: center.distanceTo(this._head),
         leftPoint: at(yaws, (x, y) => x < y),
         rightPoint: at(yaws, (x, y) => x > y),
-        bottomPoint: at(pitches, (x, y) => x < y),
       });
     };
     const corners = (object: Object3D, x0: number, x1: number, y0: number, y1: number) =>
@@ -4413,10 +4418,10 @@ export class JoinSystem
     if (line !== this.lastBandNote) {
       this.lastBandNote = line;
       // The debug panel places itself outside these (dev-layout.ts).
-      const bottom = parts.reduce((m, part) => (part.pitch0 < m.pitch0 ? part : m));
       Object.assign(devLayout.left, left.leftPoint);
       Object.assign(devLayout.right, right.rightPoint);
-      Object.assign(devLayout.bottom, bottom.bottomPoint);
+      Object.assign(devLayout.head, { x: this._head.x, y: this._head.y, z: this._head.z });
+      Object.assign(devLayout.rightAxis, { x: this._colRight.x, y: 0, z: this._colRight.z });
       devLayout.leftName = left.name;
       devLayout.rightName = right.name;
       devLayout.version++;
@@ -4900,8 +4905,9 @@ export class JoinSystem
    * a thin ray with a cursor dot) while the hand is raised in front of the
    * body -- seated and leaning back counts -- and isn't doing something near:
    * a fingertip at a band button (poke) or the palm at a slab (near grab).
-   * What it's on is hovered (outlined, or a NULL's outline strengthened, or a
-   * slab's sides glowing), and a pinch presses it (updateSelect). The SDK's
+   * What it's on is hovered if it's pressable (outlined, or a NULL's outline
+   * strengthened; a slab, the card or the result between NULL cells get only
+   * the cursor dot), and a pinch presses it (updateSelect). The SDK's
    * own hand ray is off, so there's never a double line; controllers keep it.
    */
   private updateHandPointers(delta: number): void {
@@ -5140,7 +5146,7 @@ export class JoinSystem
   /**
    * Both hands' pointers as one hover state, applied only on a change: the
    * control option outlined, the bar button outlined (via the challenge
-   * layout), free play's Recenter outlined, a slab's sides glowing. (NULL
+   * layout), free play's Recenter outlined: pressable targets only. (NULL
    * cells: updateNullPokeAndHover; Recenter's label: updateRecenterHover.)
    */
   private applyPointerHover(): void {
@@ -5148,8 +5154,6 @@ export class JoinSystem
     let barIndex = -1;
     let recenter = false;
     let exit = false;
-    let slab: SourceSlab | null = null;
-    let surface: 'card' | 'result' | null = null;
     for (const hand of HANDS) {
       const p = this.pointers[hand];
       if (!p.active) {
@@ -5163,12 +5167,6 @@ export class JoinSystem
         recenter = true;
       } else if (p.hit.target === 'exit') {
         exit = true;
-      } else if (p.hit.target === 'slab' && !slab) {
-        slab = p.hit.slab;
-      } else if (p.hit.target === 'result') {
-        surface = 'result';
-      } else if (p.hit.target === 'card' && !surface) {
-        surface = 'card';
       }
     }
     const hover = this.pointerHover;
@@ -5189,29 +5187,6 @@ export class JoinSystem
       setTargetHover(this.freeBar.exit.container, exit);
     }
     hover.exit = exit;
-    hover.slab = slab;
-    // A slab's glow wins; then the result's (not while its win glow is on the
-    // same edges), then the card's. One pair of strips, re-placed each frame.
-    const view = this.active;
-    const card = this.challengeLayout?.card;
-    hover.surface = slab ? null : surface;
-    if (slab) {
-      const height = slab.doc.heightMeters;
-      this.pointerGlowA.place(slab.object, -slab.doc.widthMeters / 2, 0, height, POINTER_SLAB_GLOW);
-      this.pointerGlowB.place(slab.object, slab.doc.widthMeters / 2, 0, height, POINTER_SLAB_GLOW);
-    } else if (hover.surface === 'result' && view && !this.winGlowLeft.mesh.visible) {
-      const top = slabVisualTopLocalY(view.doc);
-      const bottom = -shownHeightMeters(view.doc);
-      const w = view.doc.widthMeters / 2;
-      this.pointerGlowA.place(view.object, -w, (top + bottom) / 2, top - bottom, POINTER_SURFACE_GLOW);
-      this.pointerGlowB.place(view.object, w, (top + bottom) / 2, top - bottom, POINTER_SURFACE_GLOW);
-    } else if (hover.surface === 'card' && card) {
-      this.pointerGlowA.place(card.object, -card.widthMeters / 2, 0, card.heightMeters, POINTER_SURFACE_GLOW);
-      this.pointerGlowB.place(card.object, card.widthMeters / 2, 0, card.heightMeters, POINTER_SURFACE_GLOW);
-    } else {
-      this.pointerGlowA.hide();
-      this.pointerGlowB.hide();
-    }
   }
 
   /** Dev: a pointer pinch that wasn't allowed to press, and why. */
@@ -5496,7 +5471,7 @@ export class JoinSystem
 
     // Source slabs never block a press: the ray passes through them to what's
     // behind (the result, the card, the controls); a slab is the hit only when
-    // nothing is behind it (its hover glow). Near grab is GrabSystem's, unaffected.
+    // nothing is behind it (the cursor dot rests on it). Near grab is GrabSystem's, unaffected.
     let slabHit: SourceSlab | null = null;
     let slabDistance = Infinity;
     for (const slab of this.sources.values()) {
@@ -5521,7 +5496,7 @@ export class JoinSystem
     }
 
     // The card (challenge mode): view only, never a press, and never in front
-    // of a slab's hover -- the pointer rests on it only when nothing else is on the ray.
+    // of a slab -- the cursor dot rests on it only when nothing else is on the ray.
     const card = this.challengeLayout?.card;
     if (hit.target === 'none' && card && card.object.visible) {
       const t = this.rayPlane(card.object, local);
@@ -5916,6 +5891,120 @@ export class JoinSystem
     this.hints.setCount(0);
     this.hints.update();
     sounds.setPreviewProximity(0, this._head);
+  }
+
+  /**
+   * Grab feedback (grab-feedback.ts), every frame: a held slab shows the
+   * grabbed outline, 2% larger, with its shadow on the desk when it rests on
+   * one; otherwise the one slab a pinch would grab now -- the nearest whose
+   * panel is within the grab sphere of a free hand's grip (GrabSystem's rule:
+   * the nearest hit wins) -- shows the soft outline. Dev: logs each change.
+   */
+  private updateGrabFeedback(): void {
+    const immersive = this.world.visibilityState.peek() !== VisibilityState.NonImmersive;
+    // Which hands already hold a slab (they can't grab another).
+    let leftHolds = false;
+    let rightHolds = false;
+    for (const entity of this.queries.held.entities) {
+      const hand = this.grabSystem?.getHolderHand(entity) ?? null;
+      leftHolds ||= hand === 'left';
+      rightHolds ||= hand === 'right';
+    }
+    let canGrab: SourceSlab | null = null;
+    let canGrabHand: (typeof HANDS)[number] = 'right';
+    let canGrabDistance = Infinity;
+    if (immersive && deskReady()) {
+      for (const hand of HANDS) {
+        if ((hand === 'left' ? leftHolds : rightHolds) || !this.input.xr.getPrimaryInputSource(hand)) {
+          continue;
+        }
+        const grip = this.player.gripSpaces[hand];
+        grip.updateWorldMatrix(true, false);
+        this._g.setFromMatrixPosition(grip.matrixWorld);
+        for (const slab of this.sources.values()) {
+          if (!slab.object.visible || slab.entity.hasComponent(Grabbed)) {
+            continue;
+          }
+          const distance = distanceToSlab(this._g, slab, this._e);
+          if (distance <= GRAB_SPHERE_RADIUS_METERS && distance < canGrabDistance) {
+            canGrab = slab;
+            canGrabHand = hand;
+            canGrabDistance = distance;
+          }
+        }
+      }
+    }
+    const deskY = deskBridge.desk?.deskSurfaceY ?? null;
+    let i = 0;
+    for (const slab of this.sources.values()) {
+      if (i >= this.grabOutlines.length) {
+        // Grows once per slab ever shown (two), never per frame.
+        const outline = new SlabOutline();
+        const shadow = new DeskShadow();
+        this.grabOutlines.push(outline);
+        this.grabShadows.push(shadow);
+        this.visualsRoot.add(outline.mesh, shadow.mesh);
+      }
+      const outline = this.grabOutlines[i];
+      const shadow = this.grabShadows[i];
+      i++;
+      const held = immersive && slab.entity.hasComponent(Grabbed);
+      const look: GrabLook = held ? 'grabbed' : slab === canGrab ? 'canGrab' : 'none';
+      const doc = slab.doc;
+      const top = slabTopLocalY(doc);
+      const bottom = slabBottomLocalY(doc);
+      if (held) {
+        // Re-applied each frame: the grab's handle owns the transform while held.
+        slab.object.scale.setScalar(GRABBED_SCALE);
+      }
+      if (look === 'none') {
+        outline.hide();
+      } else {
+        const accent = DATASETS[datasetOfTable(slab.id) ?? 'shop'].theme.accent;
+        // The panel's corner radius: 1.2 cm at the 1.6 cm base row font (slab-metrics.ts).
+        outline.show(slab.object, doc.widthMeters, bottom, top, doc.rowFontMeters * 0.75, accent, look);
+      }
+      if (held && deskY !== null) {
+        shadow.show(slab.object, doc.widthMeters, bottom, top, deskY);
+      } else {
+        shadow.hide();
+      }
+      if (import.meta.env.DEV && this.debug && this.grabLooks.get(slab.id) !== look) {
+        this.noteGrabLook(slab, look, canGrabHand, canGrabDistance, deskY);
+      }
+    }
+    for (; i < this.grabOutlines.length; i++) {
+      this.grabOutlines[i].hide();
+      this.grabShadows[i].hide();
+    }
+  }
+
+  /** Dev: one slab's grab look changed. */
+  private noteGrabLook(
+    slab: SourceSlab,
+    look: GrabLook,
+    hand: (typeof HANDS)[number],
+    distance: number,
+    deskY: number | null,
+  ): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    this.grabLooks.set(slab.id, look);
+    let text: string;
+    if (look === 'canGrab') {
+      text = `can grab (${hand} grip ${(distance * 100).toFixed(1)} cm from it, sphere ${(GRAB_SPHERE_RADIUS_METERS * 100).toFixed(0)} cm): soft outline`;
+    } else if (look === 'grabbed') {
+      slab.object.updateWorldMatrix(true, false);
+      this._e.set(0, slabBottomLocalY(slab.doc), 0);
+      slab.object.localToWorld(this._e);
+      text =
+        `grabbed: bright outline, ${Math.round((GRABBED_SCALE - 1) * 100)}% larger, ` +
+        (deskY === null ? 'no shadow (floating, no desk)' : `shadow on the desk ${Math.max(0, this._e.y - deskY).toFixed(2)} m below its bottom edge`);
+    } else {
+      text = 'no highlight';
+    }
+    this.debug.note(`grab feedback: ${slab.id} ${text}`);
   }
 
   /**
