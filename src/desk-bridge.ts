@@ -34,6 +34,8 @@ export interface DeskControls {
   requestRecenter(button?: Vector3): void;
   /** Whether a recenter glide is moving the slabs (the join system re-places what follows them). */
   readonly recenterGliding: boolean;
+  /** Whether the Recenter button's countdown ("Look straight ahead") is running. */
+  readonly recenterCountdownActive: boolean;
   /** Counts re-placements; the join system takes the slabs' new home poses when it changes. */
   readonly placementEpoch: number;
   /**

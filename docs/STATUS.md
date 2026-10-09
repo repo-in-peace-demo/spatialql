@@ -32,8 +32,10 @@ events and logged state. "Headset" means a Quest 3S session over Wi-Fi with
 | Join | Preview within 6 cm, commit on release, dock with bottoms aligned. | Emulator: grab-and-release joins, J / Shift+J |
 | Result slab | View only; above the pair, its bottom 1.5° above the pair's top in view; anchored by its bottom edge, so it grows upward on INNER ↔ LEFT. | Emulator: J and Shift+J, INNER and LEFT, screenshots |
 | Control column | Left of the result: Hint, Prev \| Next, INNER \| LEFT (once joined), Recenter \| Exit; Filter, its chips (one per row) or the WHERE label and Clear grow upward above Hint. On an arc around the eyes, each button facing them with no roll. Free play shows INNER \| LEFT over Recenter \| Exit. | Emulator: every button 0.50 m from the eyes, roll 0.0°; label widths tested |
-| Presses | A hand pinch presses through the hand pointer only as a pinch motion (the tips opened past 2.2 cm within 0.4 s, and again after each press); a pinch right at a button does nothing (only a fingertip poke presses there). Exit (1 s) and Show answer (0.8 s) are holds that must start on the button, with a filling ring; Hint presses at least 0.8 s apart. | Unit tests replay the headset logs' phantom pinches (no presses) and real ones (all press); emulator: pointer pinch, Show answer tap vs hold |
-| Recenter | The button shows "Look straight ahead" for 1.5 s, then recenters on the median head yaw of the last 0.3 s (once more if the head is still turned toward the button); the automatic recenters are unchanged. | Unit test: nine presses don't drift; emulator: pressed at -30°, recentered at 0° |
+| Presses (frozen 2026-10-09) | A hand pinch presses through the hand pointer only if the pointer was shown 0.2 s, the fingers opened past 2.2 cm (NULL cells 1.5 cm) within 0.4 s, the pinch started at most 2.5 cm apart, and it closed to 1.8 cm for 40 ms, or as a tap released closed, within 0.5 s. It presses what the pointer showed at its start (or within 0.25 s before). Source slabs don't block the press ray; NULL cells count within 1 cm. A pinch right at a button does nothing (only a fingertip poke presses there). Hint presses at least 0.8 s apart. Constants in the FROZEN block of `src/hand-pointer-math.ts`, pinned by a test. | Unit tests replay five headset logs' phantom and real pinches; emulator: pointer pinch, 25 ms tap, bottom-row NULL through a slab |
+| Holds | Exit (1.0 s), Show answer (0.8 s, before the answer) and Recenter (0.6 s) act only when held, with a filling ring; one continuous pinch, trigger or fingertip that started on the button; any let-go resets it. | Emulator: tap vs hold for each |
+| Recenter | After its hold: "Look straight ahead" for 1.5 s, then it recenters on the median head yaw of the last 0.3 s. Pressing again, or looking back toward the button after 0.5 s, cancels it. The automatic recenters are unchanged. | Unit tests: nine presses don't drift, cancel cases; emulator: pressed at -30°, recentered at 0° |
+| Reach banner | "Move closer, or hold Recenter." when the nearest column button is over 0.65 m from the nearer shoulder, or the nearer slab over 0.90 m from the eyes, for 2 s; hides 5 cm back inside, or on a Recenter. It sits in the row-free band between the slabs' rows and the result's, in front of both, sized to fit; below the gaze (semi-transparent) when the band is under 1.5°. The desk no longer produces a message. | Unit tests (`src/data/reach-hint.test.ts`); emulator: shown at 0.3 m back (banner 3.0°, text 1.67°), 0.6 m (2.5°), 1.0 m (1.8°), below the gaze at 1.5 m; hidden on return and on Recenter |
 | Slab release | A slab released outside preview range glides home (0.45 s). | Emulator: logged return, home extents restored |
 | Pull apart | Dragging a docked slab > 10 cm separates. | Emulator |
 | Feel | Approach glow and hum, dock snap with overshoot, line ticks and pulses, rows flying in from their source rows (row backgrounds fade in only as the cells land), unmatched rows dropping 12% of a row within their slot, resolve; ~1.15–1.2 s. Synthesized spatial sound (`src/sound.ts`), balanced: ticks 11–14 dB and the resolve ~9 dB below the snap. | Emulator: sound order and output peaks from the log; drop offsets for J / Shift+J, INNER / LEFT and five toggles (no drift); mid-flight screenshots; frame times; no long tasks at join start. Approach glow/hum not yet tried by hand. |
@@ -54,7 +56,10 @@ events and logged state. "Headset" means a Quest 3S session over Wi-Fi with
 | **Natural gaze 4°** below horizontal (`NATURAL_GAZE_PITCH_DEG`), with an 80° group window. | A fixed gaze keeps placement independent of where the user looked at session start. It was 18° (seated desk work); on the Quest 3S, seated users held their heads 2–6° down, so 8°; at the start of a later session about level to a few degrees up, with the group felt as too low, so 4°. The debug log records head pitch every 10 s for further tuning. |
 | **A pinch is a motion.** A hand pinch presses only if the fingers opened first. | On the headset, a resting pointing hand's thumb near the index made the platform's pinch flicker on and off, pressing Hint three times and holding Exit. The opening before the pinch separates real pinches (2.6–6.2 cm) from resting ones (mostly 1.3–2.0 cm); the distance at the pinch start doesn't. |
 | **Only fingertips press up close.** | Reaching in to pinch a button, the fingertip poked it first; a pinch right at a button now does nothing, and the pointer is the pinch path. |
-| **Show answer and Exit are holds.** | Irreversible or session-ending: never from a tap or a flicker. |
+| **Show answer, Exit and Recenter are holds.** | Irreversible, session-ending, or moving everything: never from a tap or a flicker (a stray pinch once recentered the group). |
+| **Pinch constants are frozen** (2026-10-09). | Five headset sessions traded false presses against missed ones; some false presses (a full 7.7 to 0.7 cm motion) match real pinches. Change them only for a clear regression in a session log. |
+| **Source slabs don't block presses.** | The docked slabs' top edges sat in the ray's path from a relaxed hand to the result's bottom rows; slabs aren't pressable. Near grab is unaffected (distance grab is dropped). |
+| **Reach, not the desk.** | "Move closer to your table" showed whenever a desk was detected out of reach, even when everything was within reach. The banner measures the player's reach from the head and shoulders, seated or standing. |
 | **Recenter waits for "Look straight ahead".** | The button sits left; pressing it turned the head toward it, and each recenter moved the group further left (0° to -93° in nine presses on the headset). |
 | **Text sized by angle**, not centimeters. | Slabs at arm's length were physically oversized; angular sizing keeps text readable at any distance and the group in view. |
 | **Bottoms-aligned slabs** at their natural heights. | Both rest on a real desk (nothing hovers or sinks); rows don't need to line up, since matches are shown by color and lines. |
@@ -77,13 +82,16 @@ events and logged state. "Headset" means a Quest 3S session over Wi-Fi with
   3S (headset log of 2026-10-06), none during play. Check whether they
   recur and what runs then (session start: placement, reference space,
   documents).
-- The 2.2 cm pinch-motion threshold: look for `pinch ignored` on pinches that
-  were meant, and read the new `poke press on` lines (approach and
-  thumb-index gap) to tell deliberate pokes from reaching-to-pinch ones.
-- Show answer's 0.8 s hold and the Recenter countdown, by hand.
-- From a relaxed hand, the result's bottom row at its left and right ends is
-  partly behind the docked slabs' top edges (2 cm above its bottom edge;
-  clear at 5 cm). Raising the result's floor about 2° would clear it.
+- Pinch rules are frozen: after a session, `python3 scripts/headset_log.py
+  summary` shows each rule's rejections; revisit only for a clear regression.
+  The `poke press on` lines (approach and thumb-index gap) tell deliberate
+  pokes from reaching-to-pinch ones.
+- The holds (Show answer 0.8 s, Recenter 0.6 s) and the Recenter countdown,
+  by hand.
+- The result's bottom rows from a relaxed hand, now that the press ray passes
+  through the slabs (emulator: row 10 pressed through the orders slab). If
+  still hard, the planned fallback is a 3° gap under the result (from 1.5°).
+- The reach banner: its trigger distances and its fit in the gap.
 - The approach glow and hum, by moving a slab by hand.
 
 ## In progress: challenge mode
@@ -125,10 +133,71 @@ Since phase 4:
   the result to the column on its left (the band sat in the pointer's path to
   the result); the group fits ±42°; slabs glide home when released away from
   the dock; the hand pointer presses only on a pinch motion; Exit and Show
-  answer are holds; Recenter waits for "Look straight ahead".
+  answer are holds; Recenter waits for "Look straight ahead". Then pinch
+  rules from logged pinches (frozen), Recenter as a hold, the press ray
+  through the slabs, and the reach banner in place of the desk message.
 - **Dev, for the headset:** the in-headset debug panel (`?debug=1`) mirrors
   the debug lines, warnings and errors, wrapping long ones, with frame times;
   testing on a Quest over Wi-Fi is in [`DEPLOY.md`](DEPLOY.md).
+
+## Plan status (2026-10-10)
+
+**Done** (committed unless noted):
+
+- **1.** The reach banner, "Move closer, or hold Recenter.", in the gap between
+  the tables and the result. *Built and emulator-checked; not committed.*
+- **2.** Pinch rules: start gap 2.5 cm, 0.5 s window, the tap-on-release test, then
+  frozen.
+- **3.** The pointer passes through tables for presses. The 3° gap under the result
+  stays an unused fallback, pending a headset check of the bottom rows.
+- **4.** Holds: Recenter (0.6 s) and Show answer (0.8 s); the 0.25 s target lock and
+  the 1 cm NULL touch area.
+- **5.** The Recenter drift fix: "Look straight ahead" with a countdown.
+- **Reach paths** *(not committed)*: nothing sits between a hand and a table.
+  The card moved behind the tables, to the result's depth (0.85 m, the same size
+  in view); the reach banner sits behind the tables; the debug panel sits outside
+  the whole group at eye level. A dev readout (`reach-path.ts`, tested) logs each
+  element's clearance from the shoulder-to-grab-point paths (at least 5 cm). In
+  the emulator, all four datasets, before and after the join: card 8.1–12.6 cm,
+  column 12.9–15.5 cm, result or outline 17.5–23.2 cm, INNER | LEFT 16.5–18.7 cm,
+  banner 12.3 cm, debug panel 17.6–20.8 cm.
+- **8.** *(not committed)* The card's daily title is "Today's puzzle - Puzzle 10"
+  (a hyphen: the fonts have no middle dot). The first daily shows "A new puzzle
+  every day. Solve it to build a streak." once, marked only when seen in XR;
+  Reset shows it again.
+- **7.** *(not committed)* Hover: the hand pointer rests on the card (view only,
+  never in front of a table's hover) and on the result between its NULL cells,
+  with a fainter side glow than a table's; the result's skips while the win glow
+  is on. Controllers keep the SDK's ray: out of scope.
+- **10.** *(not committed)* The flat page shows only the welcome panel, before the
+  first session and after leaving one (a camera layer; XR is unchanged).
+- **13.** Prev and Next move through the puzzle numbers in order. Prev goes to N−1 (off on puzzle 1). Next goes to N+1 once N is solved (or as Skip after "Show answer"). The exceptions are by design: from puzzle 20, or from a daily that's ahead of practice, Next goes to the lowest open puzzle, and Finish once all 20 are done. Confirmed in the code (`prevPuzzle` / `nextPuzzle`, tested) and in the headset logs: 20 → 19 → … → 13 by Prev (2026-10-09 03:57), and 5 → 6 → … → 11 and 12 → … → 20 by Next (2026-10-07). The "Choose puzzle" grid and "Reset progress" (with a confirmation) are on the welcome screen.
+
+**Proposed, awaiting approval:**
+
+- Grab feedback for the tables: can grab, grabbed, and ready to join, each clearly different.
+
+**Then:**
+
+- **9.** The streak calendar, the flame icon, and the 3/7/14-day milestone lines.
+
+**Not started** (submission):
+
+- **19.** Video footage: first join, NULL filter, fan-out win, dataset switch, "All 20 puzzles done."
+- **20.** The edited video (under 3 minutes), the description (500 words), the tagline (140 characters), the hand-interaction section, and screenshots.
+- **21.** A final check of the Vercel link on a Quest, then submitting.
+- **22.** After submitting: a release tag in Git, and Vercel's automatic deploys off.
+
+**To verify:**
+
+- **14.** Free play's labels: the welcome screen has "Free play", "Free play: no puzzles, just tables." and "Start free play" in the copy. Confirm on a Quest.
+- **15.** The Hint labels (Hint → Another hint → Show answer): in the copy and tested. Confirm on a Quest.
+- **16.** Start as the only entry: the welcome panel's only XR button is Start. The "Enter XR" pill seen at the top of the dev page is most likely the emulator's (dev config). Confirm on the production link on a Quest.
+- **17.** Frame rate with `?debugPanel=0` against the panel on: the flag exists, but no headset log has a `debugPanel=0` session yet.
+
+**Deferred:** 11 (the left-handed setting) and 12 (persistent anchors).
+
+**Dropped:** 6 (distance grab) and 18 (a playtest with other people).
 
 ## Future
 
@@ -161,6 +230,8 @@ IWSDK app (Vite + TypeScript):
 | `src/contact-poke.ts` | Fingertip poke detection. Unit-tested. |
 | `src/hint-gate.ts` | Hint press spacing; Show answer's hold time. Unit-tested. |
 | `src/recenter-countdown.ts`, `src/recenter-prompt.ts` | The Recenter button's countdown and its "Look straight ahead" prompt. |
+| `src/reach-hint.ts`, `src/reach-banner.ts` | The reach banner's trigger (unit-tested) and the banner. |
+| `scripts/headset_log.py` | Parses `logs/*.log`: pinches, summary, presses, layout, reach, recenter, context. |
 | `src/data/` | Pure data layer: tables, joins with `RowRef` lineage, SQL text, the join state machine, key tints. Unit-tested. |
 | `src/table-slab-view.ts` | Slab and control UIs (UIKit), sized from font size; per-row animation signals. |
 | `src/view-comfort.ts` | Gaze, view window, reach and text-size constants. |
@@ -176,6 +247,9 @@ IWSDK app (Vite + TypeScript):
   via the URL or Option+Shift+D / S / F / M. With `debug`: J / Shift+J join,
   T toggles, U separates, R replays. Steps and expected logs:
   [`grab-debug.md`](grab-debug.md).
+- Headset logs: `python3 scripts/headset_log.py summary` (or `pinches
+  --puzzle N`, `presses`, `reach`, `context --at HH:MM:SS`) on the newest
+  `logs/headset-*.log`, or `--latest N` / file globs.
 - Headset: the deployed link, or the dev server over Wi-Fi (network URL from
   `npx @iwsdk/cli dev status`; steps, the certificate warning and the flags in
   [`DEPLOY.md`](DEPLOY.md#testing-on-a-quest-over-wi-fi)). With `?debug=1`, an

@@ -312,8 +312,45 @@ def parse_layout(path: str) -> list[dict]:
                     pitch=(float(pm.group(4)), float(pm.group(5))),
                     dist=float(pm.group(6)),
                 )
-        out.append(dict(file=short(path), clock=e.clock, state=m.group(1), parts=parts, group=(float(m.group(3)), float(m.group(5)))))
+        buttons = {}
+        bm = re.search(r'from the eyes / left / right shoulder \(m\): (.*?); extents', e.text)
+        if bm:
+            for item in bm.group(1).split(', '):
+                im = re.match(r'(\S+) ([\d.]+)/([\d.]+)/([\d.]+)$', item)
+                if im:
+                    buttons[im.group(1)] = dict(eyes=float(im.group(2)), left=float(im.group(3)), right=float(im.group(4)))
+        out.append(
+            dict(
+                file=short(path),
+                clock=e.clock,
+                state=m.group(1),
+                parts=parts,
+                buttons=buttons,
+                group=(float(m.group(3)), float(m.group(5))),
+            )
+        )
     return out
+
+
+def cmd_reach(files: list[str]) -> None:
+    """Per layout: each column button's distance to the nearer shoulder, the slabs' from the eyes; and desk verdicts."""
+    for path in files:
+        for e in read_log(path):
+            if re.search(r'surface placement:|placement: detected plane too far|status line: "Move closer', e.text):
+                print(f'{short(path)} {e.clock} desk: {e.text[:150]}')
+        last = None
+        for r in parse_layout(path):
+            near = {k: min(v['left'], v['right']) for k, v in r['buttons'].items()}
+            slabs = {k: v['dist'] for k, v in r['parts'].items() if k.endswith('slab')}
+            line = (
+                f"{r['file']} {r['clock']} {r['state']:15} nearer shoulder: "
+                + (f"{min(near.values()):.2f}-{max(near.values()):.2f} m" if near else '-')
+                + '; slabs from the eyes: '
+                + (', '.join(f'{v:.2f}' for v in slabs.values()) or '-')
+            )
+            if line.split(' ', 2)[2] != last:
+                print(line)
+                last = line.split(' ', 2)[2]
 
 
 # --- Output ----------------------------------------------------------------------------
@@ -396,7 +433,7 @@ def cmd_context(path: str, at: str, before: float, after: float, grep: str | Non
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('command', choices=['pinches', 'presses', 'summary', 'layout', 'recenter', 'context'])
+    ap.add_argument('command', choices=['pinches', 'presses', 'summary', 'layout', 'recenter', 'context', 'reach'])
     ap.add_argument('files', nargs='*')
     ap.add_argument('--latest', type=int, help='the newest N headset logs (default 1 when no files are given)')
     ap.add_argument('--hand', choices=HANDS)
@@ -463,6 +500,10 @@ def main(argv: list[str]) -> int:
                     f"{k} {v['yaw'][0]:g}..{v['yaw'][1]:g}° / {v['pitch'][0]:g}..{v['pitch'][1]:g}° @{v['dist']:g} m" for k, v in r['parts'].items()
                 )
                 print(f"{r['file']} {r['clock']} {r['state']:15} group {r['group'][0]:g}..{r['group'][1]:g}°  {parts}")
+        return 0
+
+    if args.command == 'reach':
+        cmd_reach(files)
         return 0
 
     if args.command == 'recenter':

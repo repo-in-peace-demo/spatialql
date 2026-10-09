@@ -33,7 +33,7 @@ describe('the puzzle card fits its text', () => {
 
   it('every title fits one line beside the icon', () => {
     for (const id of DATASET_IDS) {
-      for (const title of [CARD.practiceTitle(PRACTICE_ORDER.length, id), CARD.dailyTitle(id)]) {
+      for (const title of [CARD.practiceTitle(PRACTICE_ORDER.length, id), CARD.dailyTitle(PRACTICE_ORDER.length)]) {
         expect(oneLine(title, true), title).toBe(1);
       }
     }
@@ -50,7 +50,6 @@ describe('the puzzle card fits its text', () => {
       CARD.usedAllHints,
       CARD.solveFirst,
       CARD.morePuzzlesSoon,
-      CARD.moveCloser,
       CARD.recentered,
       WELCOME.streak(365),
     ];
@@ -74,6 +73,15 @@ describe('the puzzle card fits its text', () => {
   it('"Poke a NULL in the result above, or use Filter." fits the message area on its own', () => {
     expect(cardMessageLines(CARD.wrongNull)).toBeLessThanOrEqual(2);
     expect(CARD.wrongNull).toMatch(/^[\x20-\x7e]+$/);
+  });
+
+  it('the streak explanation fits alone, and as the line after a daily-ahead intro', () => {
+    expect(cardMessageLines(CARD.streakExplainer)).toBeLessThanOrEqual(2);
+    for (const intro of Object.values(CONCEPT_INTROS)) {
+      expect(cardMessageLines(CARD.dailyAhead) + cardMessageLines(intro) + cardMessageLines(CARD.streakExplainer), intro).toBeLessThanOrEqual(
+        CARD_MESSAGE_LINES,
+      );
+    }
   });
 
   it('a daily ahead of practice: the lead-in and two intros fit together', () => {

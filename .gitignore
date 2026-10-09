@@ -48,3 +48,4 @@ pids/
 
 # Vite cache
 .vite/
+artifacts/

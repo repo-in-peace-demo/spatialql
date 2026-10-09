@@ -23,6 +23,7 @@ import {
   PokeInteractable,
   RayInteractable,
   Vector3,
+  VisibilityState,
   type Entity,
   type Signal,
   type UIKit,
@@ -74,6 +75,7 @@ import {
   isRevealed,
   isSolved,
   markConceptSeen,
+  markStreakExplained,
   markDailyRevealed,
   markDailySolved,
   markSolved,
@@ -176,6 +178,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   /** Shared with the join system, which places the card and bar; the bar's width is kept in sync here. */
   private layout!: ChallengeLayout;
   private cardEntity!: Entity;
+  /** The card shows the one-time streak explanation, not yet marked as given (see update). */
+  private streakExplainShowing = false;
   private barEntity!: Entity;
   private silhouette: { doc: TableSlabDocument; entity: Entity } | null = null;
 
@@ -211,7 +215,6 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   /** ...over this message and its intro lines, restored after it. */
   private flashRestore: { text: string; lines: readonly string[] } = { text: '', lines: [] };
   /** Whether the status line says "Move closer to your table" (a table was found out of reach). */
-  private moveCloserShown = false;
   /** The NULL cells' first-time cue waits for the first result with a NULL. */
   private nullCuePending = false;
   /** The card shows the completion state (every puzzle done; after "Finish"). */
@@ -420,6 +423,15 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     this.clock += delta;
     this.updateFade(delta);
+    // The streak explanation counts as given once it's on the card in a session (not on the flat page).
+    if (this.streakExplainShowing && this.world.visibilityState.peek() !== VisibilityState.NonImmersive) {
+      this.streakExplainShowing = false;
+      this.progress = markStreakExplained(this.progress);
+      this.save();
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note('streak explained on the card (shown once)');
+      }
+    }
     if (this.awaitingRecenter && deskBridge.desk?.recenterGliding) {
       this.awaitingRecenter = false;
       if (!this.pending) {
@@ -464,7 +476,6 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this.messageFlashUntil = 0;
       setCardIntro(this.card, this.flashRestore.text, this.flashRestore.lines);
     }
-    this.updateMoveCloser(state);
     this.updateWherePulse();
     this.updateBarPoke();
   }
@@ -484,32 +495,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   }
 
   /**
-   * The status line's "Move closer to your table to use it." while a table
-   * or desk was found out of reach (the slabs float) and nothing is joined.
-   * Writes only when it comes or goes.
-   */
-  private updateMoveCloser(state: JoinState): void {
-    const show =
-      !!deskBridge.desk?.surfaceTooFar &&
-      (state.phase === 'idle' || state.phase === 'previewing') &&
-      !this.session.solved &&
-      !this.pending;
-    if (show === this.moveCloserShown) {
-      return;
-    }
-    this.moveCloserShown = show;
-    if (import.meta.env.DEV && this.debug) {
-      this.debug.note(`status line: "${CARD.moveCloser}" ${show ? 'shown' : 'hidden'}`);
-    }
-    if (this.statusFlashUntil === 0) {
-      this.card.status.setProperties({ text: this.restingStatus() });
-    }
-  }
-
-  /**
-   * The status line when nothing brief covers it: finished, the diff, the
-   * move-closer hint, a replay's "Solved before" / "Done with answer
-   * before", or nothing.
+   * The status line when nothing brief covers it: finished, the diff, a
+   * replay's "Solved before" / "Done with answer before", or nothing. (Being
+   * out of reach is the join system's reach banner, not the card's.)
    */
   private restingStatus(): string {
     if (this.session.solved || this.completionShowing) {
@@ -517,9 +505,6 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     if (this.lastComparison) {
       return diffSummary(this.lastComparison.comparison);
-    }
-    if (this.moveCloserShown) {
-      return CARD.moveCloser;
     }
     return this.puzzle ? this.beforeStatus(this.puzzle.id) : '';
   }
@@ -952,17 +937,29 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.nullCuePending = (freshConcept && concept === 'antijoin') || ahead.includes('antijoin');
     this.filterOpen = false;
     this.messageFlashUntil = 0;
+    // The first daily explains the streak, once: in the message area, or in a
+    // free intro line; a concept intro keeps the slot (it waits for a later daily).
+    let explainStreak = this.isDaily && !this.progress.streakExplained;
     if (ahead.length > 0) {
-      this.introLines = ahead.map((c) => CONCEPT_INTROS[c]);
+      const intros = ahead.map((c) => CONCEPT_INTROS[c]);
+      if (explainStreak && intros.length < 2) {
+        intros.push(CARD.streakExplainer);
+      } else {
+        explainStreak = false;
+      }
+      this.introLines = intros;
       setCardIntro(this.card, CARD.dailyAhead, this.introLines);
       this.messageText = CARD.dailyAhead;
       this.introShown = true;
     } else if (freshConcept && concept !== 'antijoin') {
+      explainStreak = false;
       this.setMessage(CONCEPT_INTROS[concept]);
       this.progress = markConceptSeen(this.progress, concept);
     } else {
-      this.setMessage('');
+      this.setMessage(explainStreak ? CARD.streakExplainer : '');
     }
+    // Marked once seen in a session (update): the card is also built on the flat page, unseen.
+    this.streakExplainShowing = explainStreak;
 
     // A daily (possibly locked) is never the resume point; practice is, and
     // it only moves forward (a replay via Prev never sends the next session back).
@@ -993,11 +990,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     const daily = isTodaysDaily(this.progress, puzzle.id, this.today, PRACTICE_ORDER);
     this.card.title.setProperties({
       text: daily
-        ? CARD.dailyTitle(puzzle.datasetId)
+        ? CARD.dailyTitle(PRACTICE_ORDER.indexOf(puzzle.id) + 1)
         : CARD.practiceTitle(PRACTICE_ORDER.indexOf(puzzle.id) + 1, puzzle.datasetId),
     });
     this.card.goal.setProperties({ text: puzzleText(puzzle).goal });
-    this.card.status.setProperties({ text: this.moveCloserShown ? CARD.moveCloser : this.beforeStatus(puzzle.id) });
+    this.card.status.setProperties({ text: this.beforeStatus(puzzle.id) });
     if (fresh) {
       this.card.fade.value = 0;
     }

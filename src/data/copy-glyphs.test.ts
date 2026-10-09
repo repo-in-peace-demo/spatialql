@@ -34,7 +34,7 @@ function playerStrings(): string[] {
   }
   collect([CONCEPT_INTROS, NULL_EXPLAINER, CARD, BAR, DIFF, WELCOME, DATASET_TITLES]);
   for (const id of DATASET_IDS) {
-    collect([CARD.practiceTitle(1, id), CARD.dailyTitle(id), WELCOME.dailyOpen(id)]);
+    collect([CARD.practiceTitle(1, id), CARD.dailyTitle(20), WELCOME.dailyOpen(id)]);
   }
   return strings;
 }

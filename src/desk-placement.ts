@@ -248,6 +248,9 @@ export class DeskPlacementSystem
   private readonly countdown = new RecenterCountdown();
   private prompt!: RecenterPrompt;
   private recenterYaw: number | null = null;
+  get recenterCountdownActive(): boolean {
+    return this.countdown.active;
+  }
   /** See DeskControls. */
   recenterGliding = false;
   placementEpoch = 0;

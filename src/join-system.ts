@@ -71,8 +71,20 @@ import { DATASETS, datasetOfTable, tableById } from './data/datasets.js';
 import type { QuerySpec } from './data/query.js';
 import type { CellValue, JoinType, NullFilter, Table } from './data/types.js';
 import { buildRecenterBar, setArcLean, setRecenterHover, type RecenterBarView } from './challenge-view.js';
+import { ReachBanner } from './reach-banner.js';
+import { REACH_HINT_CONTROL_METERS, REACH_HINT_SLAB_METERS, ReachHint } from './reach-hint.js';
 import { BAR } from './data/copy.js';
 import { deskBridge, deskReady } from './desk-bridge.js';
+import { devLayout } from './dev-layout.js';
+import {
+  grabPoints,
+  reachClearances,
+  reachClearanceText,
+  REACH_PATH_MIN_CLEARANCE_METERS,
+  rectFromCorners,
+  shoulders,
+  type ReachRect,
+} from './reach-path.js';
 import { devFlag } from './dev-flags.js';
 import {
   joinBridge,
@@ -362,10 +374,27 @@ const POINTER_DOT_RADIUS_METERS = 0.005;
 const POINTER_STUB_METERS = 0.3;
 /** A slab under the pointer glows this much along its sides (a grab target, for the distance grab). */
 const POINTER_SLAB_GLOW = 0.3;
+/** The card, or the result between its NULL cells, under the pointer: fainter (seen, but nothing to press or grab). */
+const POINTER_SURFACE_GLOW = 0.18;
 /** Dev log: a hover change is logged at most this often per hand. */
 const POINTER_HOVER_LOG_SECONDS = 0.25;
 /** Exit: held this long, it ends the session (a ring fills meanwhile). */
 const EXIT_HOLD_SECONDS = 1.0;
+/** The reach hint: how often it measures, the shoulders (as the layout readout assumes them), and the banner's fit. */
+const REACH_CHECK_HZ = 4;
+const REACH_SHOULDER_SIDE_METERS = 0.18;
+const REACH_SHOULDER_DROP_METERS = 0.25;
+/**
+ * The banner sits this much behind the slabs' farthest top edge (out of the
+ * hand's path to them: reach-path.ts), and at least REACH_BANNER_RESULT_GAP_METERS
+ * in front of the result (or outline).
+ */
+const REACH_BANNER_BEHIND_SLABS_METERS = 0.08;
+const REACH_BANNER_RESULT_GAP_METERS = 0.02;
+/** A row-free band under this (degrees) can't hold a readable banner: it goes below the gaze instead. */
+const REACH_BANNER_MIN_DEG = 1.5;
+const REACH_BANNER_MAX_DEG = 3;
+const LINE_HEIGHT = 1.2;
 /**
  * A hold button wider than this has a label: its ring, smaller, sits at its
  * right end (centered this far in from the edge), clear of the centered text.
@@ -426,7 +455,7 @@ type SourceSlab = {
 };
 
 /** What a hand's or controller's target ray hit first (see `castRay`). */
-type RayTarget = 'none' | 'control' | 'bar' | 'recenter' | 'exit' | 'null' | 'result' | 'slab';
+type RayTarget = 'none' | 'control' | 'bar' | 'recenter' | 'exit' | 'null' | 'result' | 'slab' | 'card';
 
 /** A ray's nearest hit: what, how far along the ray, where (world), and which option, cell or slab. */
 type RayHit = {
@@ -456,9 +485,14 @@ function makeRayHit(): RayHit {
   };
 }
 
-/** Whether a ray hit is something a press acts on (not nothing, a slab, or the result between its NULL cells). */
+/** Whether a ray hit is something a press acts on (not nothing, a slab, the result between its NULL cells, or the card). */
 function pressable(hit: RayHit): boolean {
-  return hit.target !== 'none' && hit.target !== 'slab' && hit.target !== 'result';
+  return hit.target !== 'none' && hit.target !== 'slab' && hit.target !== 'result' && hit.target !== 'card';
+}
+
+/** Whether a ray hit is a surface the pointer rests on but never presses (its hover is a faint side glow). */
+function viewOnly(target: RayTarget): boolean {
+  return target === 'slab' || target === 'result' || target === 'card';
 }
 
 function copyRayHit(from: RayHit, to: RayHit): void {
@@ -744,6 +778,8 @@ export class JoinSystem
     recenter: false,
     exit: false,
     slab: null as SourceSlab | null,
+    /** The card or the result (between its NULL cells) under a pointer, when no slab is. */
+    surface: null as 'card' | 'result' | null,
   };
   /** The control's two options as targets (centers and widths, in its frame). */
   private controlTargets: ButtonRect[] = [];
@@ -856,6 +892,19 @@ export class JoinSystem
   private readonly _arcLift = new Vector3();
   /** Where the eyes were when the band was placed: its arc is a level circle around them. */
   private readonly _bandEyes = new Vector3();
+  /** The reach hint ("Move closer, or hold Recenter."): its logic, banner, and where the banner sits now. */
+  private readonly reachHint = new ReachHint();
+  private reachBanner!: ReachBanner;
+  private reachClock = 0;
+  private reachEpoch = -1;
+  private reachBelowGaze = false;
+  /** The banner's height in view as last placed (degrees; 0 below the gaze). */
+  private reachBannerDeg = 0;
+  private readonly _reachA = new Vector3();
+  private readonly _reachB = new Vector3();
+  private readonly _reachL = new Vector3();
+  private readonly _reachR = new Vector3();
+  private readonly _reachQ = new Quaternion();
   private readonly _arcQ = new Quaternion();
   private readonly _arcEuler = new Euler();
   /** The band's lean as last placed (radians; see placeBand). */
@@ -877,6 +926,7 @@ export class JoinSystem
   private readonly _prox = { side: 1, gap: 0, depth: 0, vertical: 0, angleDeg: 0 };
 
   init(): void {
+    this.reachBanner = new ReachBanner(this.world);
     this.visualsRoot = new Group();
     this.visualsRoot.name = 'join-visuals';
     this.lines = new SegmentBatch(MAX_MATCH_LINES, COLOR_MATCH_LINE, LINE_THICKNESS_METERS, LINE_OPACITY);
@@ -1138,6 +1188,7 @@ export class JoinSystem
       this.updateFreeBarPoke();
     }
     this.updateHolds(delta);
+    this.updateReach(delta);
     this.updateRecenterHover();
   }
 
@@ -1337,6 +1388,208 @@ export class JoinSystem
       }
     }
     return false;
+  }
+
+  // --- The reach hint ---------------------------------------------------------------------
+
+  /**
+   * "Move closer, or hold Recenter." (reach-hint.ts): REACH_CHECK_HZ times a
+   * second, the nearest column button's distance from the nearer shoulder
+   * (each assumed 0.18 m to the side of and 0.25 m below the eyes, along the
+   * head's yaw) and the nearer source slab's from the eyes. Paused while a
+   * slab is held, the desk switches tables, or a Recenter runs (which hides
+   * it). The banner fades every frame; below the gaze it follows the head.
+   */
+  private updateReach(delta: number): void {
+    this.reachBanner.update(delta);
+    if (this.reachBanner.shown && this.reachBelowGaze) {
+      this.reachBanner.placeBelowGaze(this.player.head);
+    }
+    this.reachClock += delta;
+    if (this.reachClock < 1 / REACH_CHECK_HZ) {
+      return;
+    }
+    const dt = this.reachClock;
+    this.reachClock = 0;
+    const desk = deskBridge.desk;
+    const epoch = desk?.placementEpoch ?? 0;
+    const recentering = !!desk && (desk.recenterGliding || desk.recenterCountdownActive || epoch !== this.reachEpoch);
+    this.reachEpoch = epoch;
+    if (this.world.visibilityState.peek() === VisibilityState.NonImmersive || recentering) {
+      if (this.reachHint.reset() === 'hide') {
+        this.reachBanner.hide();
+        if (import.meta.env.DEV && this.debug) {
+          this.debug.note(`reach hint hidden: ${recentering ? 'Recenter' : 'the session ended'}`);
+        }
+      }
+      return;
+    }
+    if (!deskReady() || this.queries.held.entities.size > 0) {
+      return;
+    }
+    const control = this.reachControlMeters();
+    const slab = this.reachSlabMeters();
+    const step = this.reachHint.step(dt, control, slab);
+    if (step === 'show') {
+      this.reachBanner.show();
+      const placement = this.placeReachBanner();
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(
+          `reach hint shown: nearest control ${control.toFixed(2)} m from the nearer shoulder (limit ` +
+            `${REACH_HINT_CONTROL_METERS} m), nearer slab ${slab.toFixed(2)} m from the eyes (limit ${REACH_HINT_SLAB_METERS} m); ${placement}`,
+        );
+      }
+    } else if (step === 'hide') {
+      this.reachBanner.hide();
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(
+          `reach hint hidden: back within reach (control ${control.toFixed(2)} m, slab ${slab.toFixed(2)} m)`,
+        );
+      }
+    } else if (this.reachHint.shown && !this.reachBelowGaze) {
+      // The player keeps moving: the banner refits the gap as they do (logged when it changes visibly).
+      const before = this.reachBannerDeg;
+      const placement = this.placeReachBanner();
+      if (import.meta.env.DEV && this.debug && (this.reachBelowGaze || Math.abs(this.reachBannerDeg - before) >= 0.3)) {
+        this.debug.note(`reach banner refit (control ${control.toFixed(2)} m, slab ${slab.toFixed(2)} m): ${placement}`);
+      }
+    }
+  }
+
+  /** The nearest column button's distance from the nearer shoulder (meters; Infinity without a column). */
+  private reachControlMeters(): number {
+    const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
+    if (!bar || !bar.object.visible) {
+      return Infinity;
+    }
+    const head = this.player.head;
+    head.updateWorldMatrix(true, false);
+    head.getWorldPosition(this._reachA);
+    head.getWorldQuaternion(this._reachQ);
+    this._euler.setFromQuaternion(this._reachQ, 'YXZ');
+    this._reachB.set(1, 0, 0).applyAxisAngle(UP, this._euler.y);
+    this._reachL.copy(this._reachA).addScaledVector(this._reachB, -REACH_SHOULDER_SIDE_METERS).addScaledVector(UP, -REACH_SHOULDER_DROP_METERS);
+    this._reachR.copy(this._reachA).addScaledVector(this._reachB, REACH_SHOULDER_SIDE_METERS).addScaledVector(UP, -REACH_SHOULDER_DROP_METERS);
+    let nearest = Infinity;
+    for (const button of bar.buttons) {
+      this.arcWorld(bar.object, button.centerX, button.centerY, 0, this._reachB);
+      nearest = Math.min(nearest, this._reachB.distanceTo(this._reachL), this._reachB.distanceTo(this._reachR));
+    }
+    return nearest;
+  }
+
+  /** The nearer source slab's center distance from the eyes (meters; Infinity without slabs). */
+  private reachSlabMeters(): number {
+    this.player.head.getWorldPosition(this._reachA);
+    let nearest = Infinity;
+    for (const slab of this.sources.values()) {
+      slab.object.getWorldPosition(this._reachB);
+      nearest = Math.min(nearest, this._reachB.distanceTo(this._reachA));
+    }
+    return nearest;
+  }
+
+  /** A world point's elevation from the eyes at `_reachA` (degrees, + up). */
+  private elevationDeg(point: Vector3): number {
+    const dx = point.x - this._reachA.x;
+    const dz = point.z - this._reachA.z;
+    return MathUtils.radToDeg(Math.atan2(point.y - this._reachA.y, Math.hypot(dx, dz)));
+  }
+
+  /**
+   * Places the banner in the row-free band between the source slabs' rows
+   * and the result's (or the target outline's): from the higher slab's
+   * header row top (its name tab and top padding may be covered) up to the
+   * result's lowest row bottom (its bottom padding may be covered), centered
+   * on the group, behind the slabs' top edges (REACH_BANNER_BEHIND_SLABS_METERS,
+   * so a hand reaching for a slab never meets it) and in front of the result,
+   * as tall as the band (at most REACH_BANNER_MAX_DEG). Too small a band
+   * (under REACH_BANNER_MIN_DEG): semi-transparent below the gaze instead.
+   * Returns a dev note on where it went.
+   */
+  private placeReachBanner(): string {
+    const head = this.player.head;
+    head.updateWorldMatrix(true, false);
+    head.getWorldPosition(this._reachA);
+    let lower = -Infinity;
+    let slabTopDistance = 0;
+    let pairTop = -Infinity;
+    for (const slab of this.sources.values()) {
+      const doc = slab.doc;
+      slab.object.updateWorldMatrix(true, false);
+      const headerRow = doc.headerFontMeters * LINE_HEIGHT + (doc.rowHeightMeters - doc.rowFontMeters * LINE_HEIGHT);
+      const rowsTop = slabTopLocalY(doc) - (doc.firstRowTopMeters - headerRow);
+      for (const sx of [-0.5, 0.5]) {
+        slab.object.localToWorld(this._reachB.set(sx * doc.widthMeters, rowsTop, 0));
+        lower = Math.max(lower, this.elevationDeg(this._reachB));
+        slab.object.localToWorld(this._reachB.set(sx * doc.widthMeters, slabVisualTopLocalY(doc), 0));
+        pairTop = Math.max(pairTop, this.elevationDeg(this._reachB));
+        slabTopDistance = Math.max(slabTopDistance, this._reachB.distanceTo(this._reachA));
+      }
+    }
+    // Above: the result's lowest row bottom, or the outline's bottom before the join.
+    let upper = Infinity;
+    let resultBottom = Infinity;
+    let resultDistance = Infinity;
+    const view = this.active && this.state.phase === 'joined' ? this.active : null;
+    const slot = view ? null : this.silhouette;
+    const above = view ? view.object : slot?.object ?? null;
+    if (above) {
+      const width = view ? view.doc.widthMeters : (slot?.widthMeters ?? 0);
+      const bottom = view ? -shownHeightMeters(view.doc) : -(slot?.heightMeters ?? 0);
+      const pad = view ? view.doc.heightForRowsMeters(0) - view.doc.firstRowTopMeters : 0;
+      above.updateWorldMatrix(true, false);
+      for (const sx of [-0.5, 0.5]) {
+        above.localToWorld(this._reachB.set(sx * width, bottom + pad, 0));
+        upper = Math.min(upper, this.elevationDeg(this._reachB));
+        above.localToWorld(this._reachB.set(sx * width, bottom, 0));
+        resultBottom = Math.min(resultBottom, this.elevationDeg(this._reachB));
+      }
+      above.localToWorld(this._reachB.set(0, bottom, 0));
+      resultDistance = this._reachB.distanceTo(this._reachA);
+    }
+    const band = upper - lower;
+    const gap = resultBottom - pairTop;
+    if (!Number.isFinite(band) || band < REACH_BANNER_MIN_DEG) {
+      this.reachBelowGaze = true;
+      this.reachBannerDeg = 0;
+      this.reachBanner.placeBelowGaze(head);
+      if (!import.meta.env.DEV) {
+        return '';
+      }
+      return (
+        `banner below the gaze, semi-transparent: the row-free band is ${Number.isFinite(band) ? band.toFixed(1) + '°' : 'missing'} ` +
+        `(needs ${REACH_BANNER_MIN_DEG}°; the bare gap ${Number.isFinite(gap) ? gap.toFixed(1) + '°' : '-'}); ${this.bannerReachText()}`
+      );
+    }
+    this.reachBelowGaze = false;
+    const heightDeg = Math.min(band, REACH_BANNER_MAX_DEG);
+    this.reachBannerDeg = heightDeg;
+    const centerDeg = (upper + lower) / 2;
+    const distance = Math.min(
+      slabTopDistance + REACH_BANNER_BEHIND_SLABS_METERS,
+      resultDistance - REACH_BANNER_RESULT_GAP_METERS,
+    );
+    // Centered on the group: straight ahead along the pair's forward, at the band's middle.
+    const elevation = MathUtils.degToRad(centerDeg);
+    this._reachB.copy(this._colFwd).multiplyScalar(Math.cos(elevation)).addScaledVector(UP, Math.sin(elevation));
+    this._reachL.copy(this._reachA).addScaledVector(this._reachB, distance);
+    const scale = (2 * distance * Math.tan(MathUtils.degToRad(heightDeg) / 2)) / this.reachBanner.heightMeters;
+    // Facing the eyes, level.
+    this.reachBanner.document.position.copy(this._reachL);
+    this.reachBanner.document.lookAt(this._reachA);
+    this._reachQ.copy(this.reachBanner.document.quaternion);
+    this.reachBanner.placeInGap(this._reachL, this._reachQ, scale);
+    if (!import.meta.env.DEV) {
+      return '';
+    }
+    const widthDeg = MathUtils.radToDeg(2 * Math.atan((this.reachBanner.widthMeters * scale) / 2 / distance));
+    const textDeg = MathUtils.radToDeg(2 * Math.atan((this.reachBanner.fontMeters * scale) / 2 / distance));
+    return (
+      `banner in the gap: the bare gap (slab tops to the result's bottom) ${gap.toFixed(1)}°, the row-free band ` +
+      `${band.toFixed(1)}° (${lower.toFixed(1)}° to ${upper.toFixed(1)}° from level); banner ${heightDeg.toFixed(1)}° x ` +
+      `${widthDeg.toFixed(1)}°, text ${textDeg.toFixed(2)}°, ${distance.toFixed(2)} m from the eyes; ${this.bannerReachText()}`
+    );
   }
 
   // --- Holds: Exit (ends the session) and Show answer -----------------------------------
@@ -4083,11 +4336,24 @@ export class JoinSystem
     }
     reach.push(`(column buttons roll at most ${worstRoll.toFixed(1)}°)`);
     // Each element's extent in view: yaw (+ right), pitch from the gaze, and its center's distance.
-    type Part = { name: string; yaw0: number; yaw1: number; pitch0: number; pitch1: number; distance: number };
+    type Part = {
+      name: string;
+      yaw0: number;
+      yaw1: number;
+      pitch0: number;
+      pitch1: number;
+      distance: number;
+      /** The corners at yaw0, yaw1 and pitch0 (the lowest), for the debug panel. */
+      leftPoint: Vector3;
+      rightPoint: Vector3;
+      bottomPoint: Vector3;
+    };
     const parts: Part[] = [];
     const span = (name: string, points: Vector3[], center: Vector3) => {
       const yaws = points.map((point) => this.yawInPair(point));
       const pitches = points.map((point) => degreesFromForward(this._head, this.headPitchDown, point));
+      const at = (values: number[], pick: (x: number, y: number) => boolean) =>
+        points[values.reduce((best, value, i) => (pick(value, values[best]) ? i : best), 0)];
       parts.push({
         name,
         yaw0: Math.min(...yaws),
@@ -4095,6 +4361,9 @@ export class JoinSystem
         pitch0: Math.min(...pitches),
         pitch1: Math.max(...pitches),
         distance: center.distanceTo(this._head),
+        leftPoint: at(yaws, (x, y) => x < y),
+        rightPoint: at(yaws, (x, y) => x > y),
+        bottomPoint: at(pitches, (x, y) => x < y),
       });
     };
     const corners = (object: Object3D, x0: number, x1: number, y0: number, y1: number) =>
@@ -4143,7 +4412,16 @@ export class JoinSystem
       `${(right.yaw1 - left.yaw0).toFixed(1)}° wide (limit +/-${VIEW_HALF_WIDTH_DEG}°)`;
     if (line !== this.lastBandNote) {
       this.lastBandNote = line;
+      // The debug panel places itself outside these (dev-layout.ts).
+      const bottom = parts.reduce((m, part) => (part.pitch0 < m.pitch0 ? part : m));
+      Object.assign(devLayout.left, left.leftPoint);
+      Object.assign(devLayout.right, right.rightPoint);
+      Object.assign(devLayout.bottom, bottom.bottomPoint);
+      devLayout.leftName = left.name;
+      devLayout.rightName = right.name;
+      devLayout.version++;
       this.debug.note(line);
+      this.noteReachPaths(a, b, joined, slot, bar);
       if (left.yaw0 < -VIEW_HALF_WIDTH_DEG - 0.5 || right.yaw1 > VIEW_HALF_WIDTH_DEG + 0.5) {
         this.debug.warn(
           `the group reaches ${left.yaw0.toFixed(1)}° (${left.name}) to ${right.yaw1.toFixed(1)}° (${right.name}), ` +
@@ -4155,6 +4433,112 @@ export class JoinSystem
 
   /** Dev: the last band readout (only changes are logged). */
   private lastBandNote = '';
+
+  /** Dev: a flat rectangle from `object`'s local x0..x1, y0..y1 (z = 0), in world space. */
+  private reachRect(name: string, object: Object3D, x0: number, x1: number, y0: number, y1: number): ReachRect {
+    object.updateWorldMatrix(true, false);
+    return rectFromCorners(
+      name,
+      object.localToWorld(new Vector3(x0, y0, 0)),
+      object.localToWorld(new Vector3(x1, y0, 0)),
+      object.localToWorld(new Vector3(x0, y1, 0)),
+    );
+  }
+
+  /** Dev: both shoulders and every grab point of the source slabs (reach-path.ts), from the eyes now. */
+  private reachPaths(): { from: Vector3[]; to: Vector3[] } {
+    this.readHead();
+    const right = new Vector3().copy(this._colRight).setY(0).normalize();
+    const from = shoulders(this._head, right).map((p) => new Vector3(p.x, p.y, p.z));
+    const to: Vector3[] = [];
+    for (const slab of this.sources.values()) {
+      const doc = slab.doc;
+      if (!slab.object.visible) {
+        continue;
+      }
+      slab.object.updateWorldMatrix(true, false);
+      const w = doc.widthMeters / 2;
+      const corner = (x: number, y: number) => slab.object.localToWorld(new Vector3(x, y, 0));
+      const top = slabVisualTopLocalY(doc);
+      const bottom = slabBottomLocalY(doc);
+      for (const p of grabPoints(corner(-w, top), corner(w, top), corner(-w, bottom), corner(w, bottom))) {
+        to.push(new Vector3(p.x, p.y, p.z));
+      }
+    }
+    return { from, to };
+  }
+
+  /**
+   * Dev: how close each UI element comes to the straight path from either
+   * shoulder to any source slab's grab point (reach-path.ts) -- the card,
+   * the column (as two flat halves of its arc), the result or its outline,
+   * the INNER | LEFT control; warns under REACH_PATH_MIN_CLEARANCE_METERS.
+   * (The reach banner and the debug panel report theirs where they're placed.)
+   */
+  private noteReachPaths(
+    a: SourceSlab,
+    b: SourceSlab,
+    joined: boolean,
+    slot: { object: Object3D; width: number; top: number; bottom: number } | null,
+    bar: PlacedBar,
+  ): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    const { from, to } = this.reachPaths();
+    const rects: ReachRect[] = [];
+    const card = this.challengeLayout?.card;
+    if (card && card.object.visible) {
+      const w = card.widthMeters / 2;
+      const h = card.heightMeters / 2;
+      rects.push(this.reachRect('card', card.object, -w, w, -h, h));
+    }
+    const h = bar.heightMeters / 2;
+    const arc = (x: number, y: number) => this.arcWorld(bar.object, x, y, 0, new Vector3());
+    for (const [x0, x1] of [
+      [0, bar.widthMeters / 2],
+      [bar.widthMeters / 2, bar.widthMeters],
+    ]) {
+      rects.push(rectFromCorners('column', arc(x0, -h), arc(x1, -h), arc(x0, h)));
+    }
+    if (slot) {
+      rects.push(this.reachRect(joined ? 'result' : 'outline', slot.object, -slot.width / 2, slot.width / 2, slot.bottom, slot.top));
+    }
+    if (joined && this.control.document.visible) {
+      const c = this.control;
+      const x0 = Math.min(c.innerCenterX, c.leftCenterX) - c.optionWidthMeters / 2;
+      const x1 = Math.max(c.innerCenterX, c.leftCenterX) + c.optionWidthMeters / 2;
+      rects.push(this.reachRect('INNER | LEFT', c.document, x0, x1, -c.optionHeightMeters / 2, c.optionHeightMeters / 2));
+    }
+    // One entry per element: the column's two halves as one.
+    const byName = new Map<string, number>();
+    for (const c of reachClearances(from, to, rects)) {
+      byName.set(c.name, Math.min(byName.get(c.name) ?? Infinity, c.meters));
+    }
+    const clearances = [...byName].map(([name, meters]) => ({ name, meters, shoulder: -1, point: -1 }));
+    this.debug.note(
+      `reach paths (${a.id} and ${b.id}, ${joined ? 'joined' : 'before the join'}; straight, shoulders to the slabs' ` +
+        `grab points, at least ${REACH_PATH_MIN_CLEARANCE_METERS * 100} cm): ${reachClearanceText(clearances)}`,
+    );
+    const close = clearances.filter((c) => c.meters < REACH_PATH_MIN_CLEARANCE_METERS);
+    if (close.length > 0) {
+      this.debug.warn(`a hand reaching for a slab passes within ${reachClearanceText(close)}`);
+    }
+  }
+
+  /** Dev: the reach banner's clearance from the shoulder-to-slab paths, for its placement note. */
+  private bannerReachText(): string {
+    if (!import.meta.env.DEV) {
+      return '';
+    }
+    const banner = this.reachBanner;
+    const { from, to } = this.reachPaths();
+    // Its scale is in its world matrix: local corners at its built size.
+    const w = banner.widthMeters / 2;
+    const h = banner.heightMeters / 2;
+    const rect = this.reachRect('banner', banner.document, -w, w, -h, h);
+    return `reach paths: ${reachClearanceText(reachClearances(from, to, [rect]))}`;
+  }
 
   /**
    * Challenge mode: the puzzle card beside a top-anchored slot (the result
@@ -4431,7 +4815,7 @@ export class JoinSystem
         this.debug.note(
           `${hand} ray select (controller): ` +
             (hit.target === 'none' ? 'hit nothing' : `${hit.name} at ${hit.distance.toFixed(2)} m`) +
-            (hit.target === 'slab' || hit.target === 'result' ? ' (not a button: no press)' : '') +
+            (viewOnly(hit.target) ? ' (not a button: no press)' : '') +
             (hit.through ? `; it passed through the ${hit.through.id} slab` : ''),
         );
       }
@@ -4765,6 +5149,7 @@ export class JoinSystem
     let recenter = false;
     let exit = false;
     let slab: SourceSlab | null = null;
+    let surface: 'card' | 'result' | null = null;
     for (const hand of HANDS) {
       const p = this.pointers[hand];
       if (!p.active) {
@@ -4780,6 +5165,10 @@ export class JoinSystem
         exit = true;
       } else if (p.hit.target === 'slab' && !slab) {
         slab = p.hit.slab;
+      } else if (p.hit.target === 'result') {
+        surface = 'result';
+      } else if (p.hit.target === 'card' && !surface) {
+        surface = 'card';
       }
     }
     const hover = this.pointerHover;
@@ -4801,10 +5190,24 @@ export class JoinSystem
     }
     hover.exit = exit;
     hover.slab = slab;
+    // A slab's glow wins; then the result's (not while its win glow is on the
+    // same edges), then the card's. One pair of strips, re-placed each frame.
+    const view = this.active;
+    const card = this.challengeLayout?.card;
+    hover.surface = slab ? null : surface;
     if (slab) {
       const height = slab.doc.heightMeters;
       this.pointerGlowA.place(slab.object, -slab.doc.widthMeters / 2, 0, height, POINTER_SLAB_GLOW);
       this.pointerGlowB.place(slab.object, slab.doc.widthMeters / 2, 0, height, POINTER_SLAB_GLOW);
+    } else if (hover.surface === 'result' && view && !this.winGlowLeft.mesh.visible) {
+      const top = slabVisualTopLocalY(view.doc);
+      const bottom = -shownHeightMeters(view.doc);
+      const w = view.doc.widthMeters / 2;
+      this.pointerGlowA.place(view.object, -w, (top + bottom) / 2, top - bottom, POINTER_SURFACE_GLOW);
+      this.pointerGlowB.place(view.object, w, (top + bottom) / 2, top - bottom, POINTER_SURFACE_GLOW);
+    } else if (hover.surface === 'card' && card) {
+      this.pointerGlowA.place(card.object, -card.widthMeters / 2, 0, card.heightMeters, POINTER_SURFACE_GLOW);
+      this.pointerGlowB.place(card.object, card.widthMeters / 2, 0, card.heightMeters, POINTER_SURFACE_GLOW);
     } else {
       this.pointerGlowA.hide();
       this.pointerGlowB.hide();
@@ -4907,7 +5310,7 @@ export class JoinSystem
     const yaw = MathUtils.radToDeg(Math.atan2(p.dir.x, -p.dir.z));
     this.debug.note(
       `${hand} pointer pinch: ${hit.target === 'none' ? 'hit nothing' : `${hit.name} at ${hit.distance.toFixed(2)} m`}` +
-        `${hit.target === 'slab' || hit.target === 'result' ? ' (not a button: no press)' : ''}; ${aim}; ` +
+        `${viewOnly(hit.target) ? ' (not a button: no press)' : ''}; ${aim}; ` +
         `ray pitch ${pitchDeg(p.dir.x, p.dir.y, p.dir.z).toFixed(1)}°, yaw ${yaw.toFixed(1)}°` +
         `${p.frozen ? ' (frozen)' : ''}; wrist ${p.forward.toFixed(2)} m ahead, ${p.below.toFixed(2)} m below the eyes; ` +
         `released ${Number.isFinite(p.freeze.openFor(this.tweens.now)) ? `${Math.round(p.freeze.openFor(this.tweens.now) * 1000)} ms` : 'never'} before`,
@@ -5115,6 +5518,18 @@ export class JoinSystem
       hit.name = naming ? `the ${slabHit.id} slab` : '';
     } else if (slabHit && slabDistance < hit.distance) {
       hit.through = slabHit;
+    }
+
+    // The card (challenge mode): view only, never a press, and never in front
+    // of a slab's hover -- the pointer rests on it only when nothing else is on the ray.
+    const card = this.challengeLayout?.card;
+    if (hit.target === 'none' && card && card.object.visible) {
+      const t = this.rayPlane(card.object, local);
+      if (t < Infinity && Math.abs(local.x) <= card.widthMeters / 2 && Math.abs(local.y) <= card.heightMeters / 2) {
+        hit.target = 'card';
+        hit.distance = t;
+        hit.name = naming ? 'the puzzle card' : '';
+      }
     }
 
     // Out of range is a miss; otherwise where it hit.

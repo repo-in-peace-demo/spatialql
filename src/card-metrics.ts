@@ -9,7 +9,7 @@
  * line and note) on up to CARD_MESSAGE_LINES lines.
  */
 
-import { HEADER_METRICS, DATA_METRICS, LINE_HEIGHT_FACTOR, measureTextCm, type GlyphMetrics } from './slab-metrics.js';
+import { HEADER_METRICS, DATA_METRICS, FIT_EPSILON_CM, LINE_HEIGHT_FACTOR, measureTextCm, type GlyphMetrics } from './slab-metrics.js';
 import {
   CARD_GOAL_TEXT_TARGET_DEG,
   CARD_ROW_TEXT_TARGET_DEG,
@@ -86,7 +86,8 @@ export function cardHeadlineFontCm(text: string): number {
   const goalHeight = CARD_GOAL_LINES * m.goalFont * LINE_HEIGHT_FACTOR;
   const max = Math.min(m.goalFont * HEADLINE_SCALE, goalHeight / LINE_HEIGHT_FACTOR);
   const width = measureTextCm(text, HEADER_METRICS, max);
-  return width <= m.innerWidthCm ? max : (max * m.innerWidthCm) / width;
+  // Shrunk to fit, a hair inside the width (an exact fit can round past it).
+  return width <= m.innerWidthCm ? max : (max * (m.innerWidthCm - FIT_EPSILON_CM)) / width;
 }
 
 /** Lines `text` takes in the card's message area (regular small font). */

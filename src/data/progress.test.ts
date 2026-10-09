@@ -8,6 +8,7 @@ import {
   markConceptSeen,
   markDailySolved,
   markSolved,
+  markStreakExplained,
   nextPracticePuzzle,
   parseProgress,
   practiceSolvedCount,
@@ -163,6 +164,27 @@ describe('parseProgress', () => {
     progress = markConceptSeen(progress, 'inner');
     progress = { ...progress, lastPuzzle: 'shop-every-customer' };
     expect(parseProgress(serializeProgress(progress), isPuzzleId)).toEqual(progress);
+  });
+});
+
+describe('the one-time streak explanation', () => {
+  it('is due on fresh progress, and marked once shown', () => {
+    expect(emptyProgress().streakExplained).toBeUndefined();
+    const shown = markStreakExplained(emptyProgress());
+    expect(shown.streakExplained).toBe(true);
+    expect(markStreakExplained(shown)).toBe(shown);
+  });
+
+  it('survives a reload (save and load), and Reset (empty progress) forgets it', () => {
+    const shown = markStreakExplained(markSolved(emptyProgress(), 'shop-match', DAY, 0));
+    expect(parseProgress(serializeProgress(shown), isPuzzleId).streakExplained).toBe(true);
+    expect(parseProgress(JSON.stringify({ version: 1, streakExplained: 'yes' }), isPuzzleId).streakExplained).toBeUndefined();
+    expect(emptyProgress()).not.toHaveProperty('streakExplained');
+  });
+
+  it('is kept by sanitizing', () => {
+    const shown = markStreakExplained(markSolved(emptyProgress(), 'shop-match', DAY, 0));
+    expect(sanitizeProgress(shown, PRACTICE_ORDER, PRACTICE_ORDER, true).streakExplained).toBe(true);
   });
 });
 

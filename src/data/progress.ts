@@ -56,6 +56,8 @@ export type Progress = {
   seenConcepts: Concept[];
   /** The puzzle to resume. */
   lastPuzzle: PuzzleId | null;
+  /** The card has explained the streak once (on the first daily with a free message slot); Reset clears it. */
+  streakExplained?: true;
 };
 
 export function emptyProgress(): Progress {
@@ -356,7 +358,15 @@ export function parseProgress(raw: string | null, isKnownPuzzle: (id: string) =>
   if (typeof data.lastPuzzle === 'string' && isKnownPuzzle(data.lastPuzzle)) {
     progress.lastPuzzle = data.lastPuzzle;
   }
+  if (data.streakExplained === true) {
+    progress.streakExplained = true;
+  }
   return progress;
+}
+
+/** The streak has been explained (shown once; `emptyProgress`, i.e. Reset, forgets it). */
+export function markStreakExplained(progress: Progress): Progress {
+  return progress.streakExplained ? progress : { ...progress, streakExplained: true };
 }
 
 export function serializeProgress(progress: Progress): string {

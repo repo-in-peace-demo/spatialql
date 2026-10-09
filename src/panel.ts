@@ -5,7 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import { createSystem, RayInteractable, UIKit, UIKitMLAsset, VisibilityState } from '@iwsdk/core';
+import { createSystem, RayInteractable, UIKit, UIKitMLAsset, VisibilityState, type Object3D } from '@iwsdk/core';
 import { Check } from '@pmndrs/uikit-lucide/dist/Check.js';
 import { Eye } from '@pmndrs/uikit-lucide/dist/Eye.js';
 import { Lock } from '@pmndrs/uikit-lucide/dist/Lock.js';
@@ -73,6 +73,9 @@ function setText(element: { setProperties(properties: object): void; children: u
   (child ?? element).setProperties({ text });
 }
 
+/** The camera layer the flat page draws (not 0, nor 1 and 2: the XR eyes'). */
+const FLAT_PAGE_LAYER = 5;
+
 /**
  * The welcome panel is the browser entry point (Enter XR). In XR it must not
  * render at all.
@@ -86,8 +89,20 @@ function setText(element: { setProperties(properties: object): void; children: u
  * flips `visible` and never re-parents anything -- detaching the panel each
  * frame is what flooded the console with "parented under active level root"
  * warnings before.
+ *
+ * The flat page (outside XR) shows only the welcome panel: the camera then
+ * draws FLAT_PAGE_LAYER alone, and only what hangs under the camera (the
+ * panel, in screen space) is put on it, so the slabs, the result, the card
+ * and the rest stay in place but unseen behind it -- before the first session
+ * and after leaving one. Entering XR restores the camera's own layers.
  */
 export class PanelSystem extends createSystem({}) {
+  /** The camera's layers as set up (restored in XR), and whether the flat-page layer is in use. */
+  private cameraLayersMask = 0;
+  private flatPage = false;
+  private readonly onFlatPageLayer = (object: Object3D): void => {
+    object.layers.enable(FLAT_PAGE_LAYER);
+  };
   private welcomePanel: UIKitMLAsset | null = null;
   private tiles: TileView[] = [];
   /** The puzzle picked in the picker (Start enters XR on it), or null. */
@@ -97,8 +112,23 @@ export class PanelSystem extends createSystem({}) {
 
   update(): void {
     const panel = this.welcomePanel;
-    if (panel && panel.visible && this.world.visibilityState.peek() !== VisibilityState.NonImmersive) {
+    const immersive = this.world.visibilityState.peek() !== VisibilityState.NonImmersive || this.renderer.xr.isPresenting;
+    if (panel && panel.visible && immersive) {
       panel.visible = false;
+    }
+    // The flat page: only the camera's descendants (the welcome panel) are drawn.
+    if (this.flatPage === immersive) {
+      this.flatPage = !immersive;
+      if (this.flatPage) {
+        this.cameraLayersMask = this.camera.layers.mask;
+        this.camera.layers.set(FLAT_PAGE_LAYER);
+      } else {
+        this.camera.layers.mask = this.cameraLayersMask;
+      }
+    }
+    if (this.flatPage) {
+      // The panel's UIKit meshes can change (text, the picker): tag them each frame (a handful of objects).
+      this.camera.traverse(this.onFlatPageLayer);
     }
   }
 

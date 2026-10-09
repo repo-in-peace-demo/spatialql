@@ -29,8 +29,14 @@ export const PLANNED_SOURCE_DISTANCE_METERS = 0.7;
 export const PLANNED_RESULT_DISTANCE_METERS = 0.85;
 /** The side column (INNER | LEFT, the puzzle bar): poked and pinched, so within near reach (it sits at 0.48 m). */
 export const PLANNED_CONTROL_DISTANCE_METERS = 0.5;
-/** Challenge mode's puzzle card, on an arc beside the result slot (view only). */
-export const PLANNED_CARD_DISTANCE_METERS = 0.75;
+/**
+ * Challenge mode's puzzle card, on an arc beside the result slot (view only),
+ * at the result's depth: behind the slabs, so a hand reaching for one never
+ * passes through it (at 0.75 m its bottom edge sat at the right slab's top
+ * edge, 2 cm above it: 2026-10-10 log). Its text is sized by angle, so it
+ * looks the same.
+ */
+export const PLANNED_CARD_DISTANCE_METERS = 0.85;
 /**
  * The card's own text targets: larger than the slabs', since it sits well
  * off-axis beside the result (the headset's lenses are least sharp there).

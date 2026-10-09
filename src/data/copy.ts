@@ -242,7 +242,10 @@ export const PUZZLE_COPY: Readonly<Record<PuzzleId, PuzzleCopy>> = {
 
 export const CARD = {
   practiceTitle: (number: number, dataset: DatasetId) => `Puzzle ${number}: ${DATASET_TITLES[dataset]}`,
-  dailyTitle: (dataset: DatasetId) => `Today's puzzle: ${DATASET_TITLES[dataset]}`,
+  /** Today's daily: its number in practice order (a hyphen: the fonts have no middle dot, and copy is ASCII). */
+  dailyTitle: (number: number) => `Today's puzzle - Puzzle ${number}`,
+  /** Shown once, on the first daily (the message area, or a free intro line): what the streak is. */
+  streakExplainer: 'A new puzzle every day. Solve it to build a streak.',
   /** Win headline (large, gold): solved with at most two hints. */
   headline: 'Solved!',
   /** Headline after "Show answer" (large, neutral): completed, not solved. */
@@ -285,11 +288,6 @@ export const CARD = {
    * filter. Briefly, in the message area (no click).
    */
   wrongNull: 'Poke a NULL in the result above, or use Filter.',
-  /**
-   * The status line, before a join, when a table or desk was found but too
-   * far away to use (the slabs float instead).
-   */
-  moveCloser: 'Move closer to your table to use it.',
   /** The status line, briefly, when Show answer was let go before its hold finished. */
   holdForAnswer: 'Hold Show answer to see it.',
   /** The status line, briefly, after the Recenter button brought the tables back in front of you. */
@@ -341,6 +339,8 @@ export const BAR = {
    */
   /** Recenter's hover label: it acts only when held (a stray pinch once moved the whole group). */
   recenter: 'Hold to recenter',
+  /** The reach banner (join system): shown while the controls or tables are out of comfortable reach. */
+  moveCloser: 'Move closer, or hold Recenter.',
   /** Shown centered in view for a moment after Recenter is pressed: it recenters on where you then look. */
   recenterPrompt: 'Look straight ahead',
   /**
