@@ -26,7 +26,7 @@ events and logged state. "Headset" means a Quest 3S session over Wi-Fi with
 | Area | What's built | Verified |
 | --- | --- | --- |
 | Placement | Slabs rest on a detected desk (or a synthetic one with `forceSurface`), or float at desk height; natural heights, bottom edges aligned. | Emulator: placement and reach logs, screenshots, nothing cut off |
-| Reach and view | Left to right: the control column (0.50 m), the result (0.85 m, pushed back to at most 0.89 m when the group is too wide), the card (0.75 m, 16 em wide, 1.30° text); the source slabs below at 0.70 m. The group is centered on straight ahead within ±42° (`VIEW_HALF_WIDTH_DEG`), and vertically within the 80° window around the 4° natural gaze. | Emulator, all 20 puzzles: cafe ±35.6°, school ±41.2°, shop and library -42.0° to +42.1° (shop's result at 0.89 m, rows 1.10°); column 2.3–2.8° left of the result and at least 3° above the slabs |
+| Reach and view | Left to right: the control column (0.50 m), the result (0.85 m, pushed back to at most 0.89 m when the group is too wide), the card (0.85 m at the result's depth, behind the tables, 16 em wide, 1.30° text); the source slabs below at 0.70 m. The group is centered on straight ahead within ±42° (`VIEW_HALF_WIDTH_DEG`), and vertically within the 80° window around the 4° natural gaze. | Emulator, all 20 puzzles: cafe ±35.6°, school ±41.2°, shop and library -42.0° to +42.1° (shop's result at 0.89 m, rows 1.10°); column 2.3–2.8° left of the result and at least 3° above the slabs |
 | Text size | Sized by angle (rows 1.15°, headers 1.3°) from planned distances; ≥ 0.9 cm. | Emulator: source rows 1.10–1.12°, result 1.08–1.11° |
 | Grab | Hand pinch grabs a source slab when the palm is within 7 cm. | Emulator: grab and "no grab" reasons logged |
 | Join | Preview within 6 cm, commit on release, dock with bottoms aligned. | Emulator: grab-and-release joins, J / Shift+J |
@@ -140,20 +140,24 @@ Since phase 4:
   the debug lines, warnings and errors, wrapping long ones, with frame times;
   testing on a Quest over Wi-Fi is in [`DEPLOY.md`](DEPLOY.md).
 
-## Plan status (2026-10-10)
+## Plan status (2026-10-11)
 
-**Done** (committed unless noted):
+**Done** (all committed):
 
 - **1.** The reach banner, "Move closer, or hold Recenter.", in the gap between
-  the tables and the result. *Built and emulator-checked; not committed.*
+  the tables and the result.
 - **2.** Pinch rules: start gap 2.5 cm, 0.5 s window, the tap-on-release test, then
   frozen.
 - **3.** The pointer passes through tables for presses. The 3° gap under the result
   stays an unused fallback, pending a headset check of the bottom rows.
 - **4.** Holds: Recenter (0.6 s) and Show answer (0.8 s); the 0.25 s target lock and
   the 1 cm NULL touch area.
-- **5.** The Recenter drift fix: "Look straight ahead" with a countdown.
-- **Reach paths** *(not committed)*: nothing sits between a hand and a table.
+- **5.** The Recenter drift fix: "Look straight ahead" with a countdown. Facing
+  the button's way before the press (within 15°) no longer cancels it (the
+  2026-10-11 04:33 log: four presses cancelled while facing -33° with the button
+  at -36°); one hold per touch, so a fingertip left on a hold button doesn't
+  re-trigger it.
+- **Reach paths:** nothing sits between a hand and a table.
   The card moved behind the tables, to the result's depth (0.85 m, the same size
   in view); the reach banner sits behind the tables; the debug panel sits outside
   the whole group at eye level. A dev readout (`reach-path.ts`, tested) logs each
@@ -161,18 +165,16 @@ Since phase 4:
   the emulator, all four datasets, before and after the join: card 8.1–12.6 cm,
   column 12.9–15.5 cm, result or outline 17.5–23.2 cm, INNER | LEFT 16.5–18.7 cm,
   banner 12.3 cm, debug panel 17.6–20.8 cm.
-- **8.** *(not committed)* The card's daily title is "Today's puzzle - Puzzle 10"
+- **8.** The card's daily title is "Today's puzzle - Puzzle 10"
   (a hyphen: the fonts have no middle dot). The first daily shows "A new puzzle
   every day. Solve it to build a streak." once, marked only when seen in XR;
   Reset shows it again.
 - **7.** Hover: only pressable targets highlight; the hand pointer's cursor dot
   rests on a table, the card (never in front of a table) and the result between
   its NULL cells, with no glow. Controllers keep the SDK's ray: out of scope.
-- **10.** *(not committed)* The flat page shows only the welcome panel, before the
+- **10.** The flat page shows only the welcome panel, before the
   first session and after leaving one (a camera layer; XR is unchanged).
 - **13.** Prev and Next move through the puzzle numbers in order. Prev goes to N−1 (off on puzzle 1). Next goes to N+1 once N is solved (or as Skip after "Show answer"). The exceptions are by design: from puzzle 20, or from a daily that's ahead of practice, Next goes to the lowest open puzzle, and Finish once all 20 are done. Confirmed in the code (`prevPuzzle` / `nextPuzzle`, tested) and in the headset logs: 20 → 19 → … → 13 by Prev (2026-10-09 03:57), and 5 → 6 → … → 11 and 12 → … → 20 by Next (2026-10-07). The "Choose puzzle" grid and "Reset progress" (with a confirmation) are on the welcome screen.
-
-**Built, not committed:**
 
 - **Background builds only when quiet:** queued builds start on their first
   step (queuing at a load costs nothing; before, the load frame started every
@@ -183,7 +185,6 @@ Since phase 4:
   interval (13.9 ms at 72 Hz). Sessions ask for 80 Hz (frame-rate.ts; the
   Quest 3 offers 72, 80, 90, 120): joined work measured p95 12.4 ms, inside 80
   Hz's 12.5 ms. Dev: `?hz=<rate>` asks for another.
-
 - **No builds at loads, switches or joins:** documents are built a few ms per
   frame in the background (build-queue.ts; table-slab-view.ts builds rows one
   at a time onto the live document) and cached: the current puzzle's and its
@@ -194,7 +195,6 @@ Since phase 4:
   A picker jump to a dataset that isn't kept builds during the switch, a few ms
   per frame. The display rate in use is in the frame line;
   `scripts/headset_log.py frames` compares sessions.
-
 - **Pokes:** every poke target (column buttons, chips, picker tiles, INNER | LEFT,
   NULL cells, free play's Recenter) takes approaches up to 60° off straight at
   the face (was 45°: the 2026-10-10 tile and chip pokes came in at 47-58° and
@@ -203,7 +203,6 @@ Since phase 4:
   face. A fingertip within 3 cm in front of a target highlights it (the pointer's
   outline), and a press dips the target with the click. Misses are logged with
   their angle and how deep the fingertip went.
-
 - **In-XR puzzle picker:** a Puzzles button in the column (right above INNER |
   LEFT, in both modes) opens a 4 x 5 grid of puzzles 1-20 in the column's place
   (the welcome grid's status marks: solved, with answer, locked, Today; the
@@ -217,14 +216,12 @@ Since phase 4:
   2 of the 5 rapid Prev re-pinches rejected for a short opening (1.8, 1.7 cm)
   would have passed; 3 never opened past 1.0 cm. A rejected pinch's log line now
   says when the tips last closed and opened since the last press.
-
 - **Debug panel placement** (dev): it never goes below or in front of the
   tables. It's placed only from a layout readout, for the head pose that layout
   used (leaning in toward the tables once re-placed it in front of them,
   2026-10-10 02:52:43), re-placed only when the layout changes and the tables are
   still (never during a switch, a recenter or a glide), steps farther out if a
   hand's path to a slab passes within 5 cm, and hides if there's no room.
-
 - **Grab feedback** for the tables (`grab-feedback.ts`). Can grab: the nearest
   table within the 7 cm grab sphere of a free hand's grip gets a soft, thin
   outline in its dataset accent. Grabbed: a brighter, thicker outline, 2% larger,
@@ -250,7 +247,16 @@ Since phase 4:
 - **14.** Free play's labels: the welcome screen has "Free play", "Free play: no puzzles, just tables." and "Start free play" in the copy. Confirm on a Quest.
 - **15.** The Hint labels (Hint → Another hint → Show answer): in the copy and tested. Confirm on a Quest.
 - **16.** Start as the only entry: the welcome panel's only XR button is Start. The "Enter XR" pill seen at the top of the dev page is most likely the emulator's (dev config). Confirm on the production link on a Quest.
-- **17.** Frame rate with `?debugPanel=0` against the panel on: the flag exists, but no headset log has a `debugPanel=0` session yet.
+- **17.** Answered (2026-10-11): with the panel off, frame times matched the
+  earlier panel-on sessions; the panel's cost is small. Being joined (1-2.5 ms a
+  frame) and puzzle loads (now under 50 ms) were the real costs.
+- **80 Hz holds:** a 3+ minute session with joins; the joined windows' frame gap
+  p95 should stay near 12.5 ms (`scripts/headset_log.py frames`). If not, consider
+  an automatic one-way fallback to 72 Hz after sustained misses.
+- **Recenter facing the button:** recenter while facing about where the Recenter
+  button is (the case that cancelled on 2026-10-11); it should complete there.
+- **Picker by hand:** tiles, Back and Puzzles by pinch and poke; a locked tile;
+  a tile that switches datasets.
 
 **Deferred:** 11 (the left-handed setting) and 12 (persistent anchors).
 
