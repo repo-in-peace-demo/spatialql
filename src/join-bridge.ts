@@ -89,6 +89,8 @@ export interface ChallengeHooks {
   onHoldCancelled(name: string): void;
   /** A press on a NULL in the column already filtered (no change): the bar's WHERE label pulses. */
   onNullFilterRepeat(): void;
+  /** Whether the card, bar or outline is fading or a switch is pending (background builds wait: build-queue.ts). */
+  animating(): boolean;
 }
 
 /** One Filter chip: a result column with a NULL the player sees, and its header. */

@@ -36,6 +36,7 @@ import {
   RECENTER_COUNTDOWN_SECONDS,
   RECENTER_TURNED_MAX_DEG,
   RECENTER_YAW_WINDOW_SECONDS,
+  HeadYawHistory,
   RecenterCountdown,
 } from './recenter-countdown.js';
 import { RecenterPrompt } from './recenter-prompt.js';
@@ -100,6 +101,12 @@ const FLOATING_BELOW_HEAD_METERS = 0.25;
 const SURFACE_FORWARD_METERS = 0.32;
 // Keeps the bottom edge from z-fighting with the surface it rests on.
 const SURFACE_LIFT_METERS = 0.002;
+/**
+ * One kept table of another dataset: its background job, and once that has
+ * taken its first step (or a switch needs it now), its slab and build.
+ */
+type ParkedTable = { table: Table; job: BuildJob; slab: Slab | null; build: SlabBuild | null };
+
 /** Where parked slabs (built ahead for a later switch) wait, out of sight. */
 const PARKED_Y_METERS = -100;
 /** Slabs are grabbed by one hand and carried level: they keep their tilt (no rotation with the wrist). */
@@ -237,7 +244,7 @@ export class DeskPlacementSystem
    * join system and grabbing ignore them): built a step at a time in the
    * background, then switched to without building anything.
    */
-  private readonly parked = new Map<DatasetId, { slabs: Slab[]; builds: SlabBuild[]; jobs: BuildJob[] }>();
+  private readonly parked = new Map<DatasetId, ParkedTable[]>();
   private deskStateValue: DeskState = { phase: 'ready', dataset: 'shop' };
   /** A requested dataset, waiting for the join to be idle and no slab held. */
   private pendingDataset: DatasetId | null = null;
@@ -261,6 +268,8 @@ export class DeskPlacementSystem
   private recenterClock = 0;
   /** The Recenter button's countdown, its prompt, and the yaw its recenter faces (null: the head's own). */
   private readonly countdown = new RecenterCountdown();
+  /** The head's yaw over the last few seconds (the settled yaw before a Recenter press). */
+  private readonly yawHistory = new HeadYawHistory();
   private prompt!: RecenterPrompt;
   private recenterYaw: number | null = null;
   get recenterCountdownActive(): boolean {
@@ -417,33 +426,35 @@ export class DeskPlacementSystem
 
   // --- Kept datasets: slabs built ahead, parked ---------------------------------------------
 
-  /** `dataset`'s slabs: parked (built, or building), or started now (in the background; `urgent`: first in line). */
-  private prepareDataset(dataset: DatasetId, urgent = false): { slabs: Slab[]; builds: SlabBuild[]; jobs: BuildJob[] } {
+  /** `dataset`'s tables: parked (built or building), or queued now (each starts on its first step: queuing costs nothing). */
+  private prepareDataset(dataset: DatasetId): ParkedTable[] {
     const existing = this.parked.get(dataset);
     if (existing) {
-      if (urgent) {
-        for (const job of existing.jobs) {
-          if (buildQueue.has(job)) {
-            buildQueue.remove(job);
-            buildQueue.add(job, true);
-          }
-        }
-      }
       return existing;
     }
-    const entry = { slabs: [] as Slab[], builds: [] as SlabBuild[], jobs: [] as BuildJob[] };
-    for (const table of DATASETS[dataset].tables) {
-      const build = this.startSlabBuild(table);
-      entry.slabs.push(build.slab);
-      entry.builds.push(build.build);
-      if (!build.build.done) {
-        const job: BuildJob = { name: `${table.id} slab`, step: (deadline) => build.build.step(deadline) };
-        entry.jobs.push(job);
-        buildQueue.add(job, urgent);
-      }
+    const entries = DATASETS[dataset].tables.map((table) => {
+      const entry: ParkedTable = {
+        table,
+        slab: null,
+        build: null,
+        job: { name: `${table.id} slab`, step: (deadline) => this.stepParked(entry, deadline) },
+      };
+      buildQueue.add(entry.job);
+      return entry;
+    });
+    this.parked.set(dataset, entries);
+    return entries;
+  }
+
+  /** One step of a parked table's build (its first step starts it); true once its slab is complete. */
+  private stepParked(entry: ParkedTable, deadline: number): boolean {
+    if (!entry.slab) {
+      const { slab, build } = this.startSlabBuild(entry.table);
+      entry.slab = slab;
+      entry.build = build;
+      return build.done;
     }
-    this.parked.set(dataset, entry);
-    return entry;
+    return entry.build ? entry.build.done || entry.build.step(deadline) : true;
   }
 
   /** Builds the kept datasets' slabs ahead (not the one on the desk) and disposes the parked ones no longer kept. */
@@ -463,15 +474,13 @@ export class DeskPlacementSystem
   }
 
   private dropParked(dataset: DatasetId): void {
-    const entry = this.parked.get(dataset);
-    if (!entry) {
+    const entries = this.parked.get(dataset);
+    if (!entries) {
       return;
     }
-    for (const job of entry.jobs) {
-      buildQueue.remove(job);
-    }
-    for (const slab of entry.slabs) {
-      slab.entity.dispose();
+    for (const entry of entries) {
+      buildQueue.remove(entry.job);
+      entry.slab?.entity.dispose();
     }
     this.parked.delete(dataset);
   }
@@ -557,13 +566,17 @@ export class DeskPlacementSystem
     this.readHeadPose();
     const groupYaw = this.groupYaw() ?? this._headYaw;
     const buttonYaw = button ? this.yawFromHead(button) : this._headYaw;
-    this.countdown.start(this._headYaw, groupYaw, buttonYaw);
+    // Where the head faced before the player reached for the button (null right after a session starts).
+    const settledYaw = this.yawHistory.settledYaw(performance.now() / 1000);
+    this.countdown.start(this._headYaw, groupYaw, buttonYaw, settledYaw);
     this.prompt.show(this.player.head, 0);
     if (import.meta.env.DEV && this.debug) {
       console.log(
         `[DeskPlacement debug] recenter requested (Recenter button): "look straight ahead" for ` +
           `${RECENTER_COUNTDOWN_SECONDS} s; at the press the head faces ${yawRightDeg(this._headYaw)}, the group ` +
-          `${yawRightDeg(groupYaw)}, the button ${yawRightDeg(buttonYaw)} (degrees, + right)`,
+          `${yawRightDeg(groupYaw)}, the button ${yawRightDeg(buttonYaw)} (degrees, + right); before the reach it faced ` +
+          `${settledYaw === null ? 'unknown' : yawRightDeg(settledYaw)}` +
+          (this.countdown.facingButtonAlready ? ' (already facing the button: looking there will not cancel)' : ''),
       );
     }
   }
@@ -864,7 +877,10 @@ export class DeskPlacementSystem
           for (const slab of this.slabs) {
             this.parkSlab(slab);
           }
-          this.parked.set(state.from, { slabs: this.slabs, builds: [], jobs: [] });
+          this.parked.set(
+            state.from,
+            this.slabs.map((slab) => ({ table: slab.table, job: { name: `${slab.table.id} slab`, step: () => true }, slab, build: null })),
+          );
         } else {
           for (const slab of this.slabs) {
             slab.entity.dispose();
@@ -878,21 +894,31 @@ export class DeskPlacementSystem
 
     if (state.phase === 'building') {
       // Built ahead (parked), or built now a few ms per frame: no frame builds a whole slab.
-      const prebuilt = this.parked.get(state.to)?.builds.every((build) => build.done) ?? false;
-      const entry = this.prepareDataset(state.to, true);
+      const prebuilt = this.parked.get(state.to)?.every((entry) => entry.slab && (entry.build?.done ?? true)) ?? false;
+      const entries = this.prepareDataset(state.to);
       const deadline = performance.now() + BUILD_BUDGET_MS;
+      // In order, within this frame's budget (at least one step); a slab not started yet starts here.
       let done = true;
-      for (const build of entry.builds) {
-        done = (build.done || build.step(deadline)) && done;
+      let stepped = false;
+      for (const entry of entries) {
+        if (entry.slab && (entry.build?.done ?? true)) {
+          continue;
+        }
+        if (stepped && performance.now() >= deadline) {
+          done = false;
+          continue;
+        }
+        stepped = true;
+        done = this.stepParked(entry, deadline) && done;
       }
       if (!done) {
         return;
       }
-      for (const job of entry.jobs) {
-        buildQueue.remove(job);
+      for (const entry of entries) {
+        buildQueue.remove(entry.job);
       }
       this.parked.delete(state.to);
-      this.slabs = entry.slabs;
+      this.slabs = entries.map((entry) => entry.slab!);
       for (const slab of this.slabs) {
         this.activateSlab(slab);
       }
@@ -971,6 +997,11 @@ export class DeskPlacementSystem
     if (CHALLENGE_MODE) {
       this.updateSwitch(delta);
     }
+    // The head's recent yaw: where the player was facing before a Recenter press.
+    if (this.sessionActive && this.headPoseValid) {
+      this.readHeadPose();
+      this.yawHistory.record(performance.now() / 1000, this._headYaw);
+    }
     this.updateRecenter(delta);
     if (this.sessionActive && !this.headPoseValid) {
       this.headPoseWaitElapsed += delta;
@@ -993,6 +1024,7 @@ export class DeskPlacementSystem
       slab.touched = false;
     }
     this.headPoseValid = false;
+    this.yawHistory.clear();
     this.headPoseWaitElapsed = 0;
     this.searching = false;
     this.surfaceTooFar = false;

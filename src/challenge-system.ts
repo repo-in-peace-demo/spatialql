@@ -453,7 +453,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.cleanupFuncs.push(() => {
       for (const entry of this.silhouettes.values()) {
         buildQueue.remove(entry.job);
-        entry.entity.dispose();
+        entry.entity?.dispose();
       }
       this.cardEntity.dispose();
       this.barEntity.dispose();
@@ -648,6 +648,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.applyBarHover();
   }
 
+  animating(): boolean {
+    return this.pending !== null || this.revealFrames > 0 || this.card.fade.peek() < 1;
+  }
+
   /**
    * The card's, bar's and silhouette's fade: out while the desk switches
    * datasets; in again once the new puzzle is active and placed.
@@ -666,7 +670,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     const step = delta * rate;
     stepFade(this.card.fade, target, step);
     stepFade(this.bar.fade, target, step);
-    if (this.silhouette) {
+    if (this.silhouette?.doc) {
       stepFade(this.silhouette.doc.fade, target, step);
     }
   }
@@ -986,10 +990,13 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     // Built ahead (prefetchNeighbors), or now: only its header and one row, so it's quick.
     this.parkSilhouette();
     const buildStart = performance.now();
-    const entry = this.silhouetteFor(this.puzzle, this.target, true);
-    const prebuilt = entry.build.done;
+    const entry = this.silhouetteFor(this.puzzle, this.target);
+    const prebuilt = entry.build?.done ?? false;
     if (!prebuilt) {
-      entry.build.step(Infinity);
+      if (!entry.build) {
+        this.startSilhouette(entry, this.puzzle, this.target);
+      }
+      entry.build!.step(Infinity);
       buildQueue.remove(entry.job);
     }
     if (import.meta.env.DEV && this.debug) {
@@ -997,7 +1004,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         `perf: target outline for ${id} ${prebuilt ? 'prebuilt (cached)' : `built now in ${(performance.now() - buildStart).toFixed(1)} ms`}`,
       );
     }
-    const doc = entry.doc;
+    const doc = entry.doc!;
     // It appears with the card: hidden until placed (after a switch the card
     // is faded out too), then they fade in together.
     doc.fade.value = Math.min(1, this.card.fade.peek());
@@ -1673,24 +1680,44 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   // --- Target outlines, cached -------------------------------------------------------------
 
-  /** `puzzle`'s target outline: kept, or started now (hidden, parked; built in the background unless `urgent`). */
-  private silhouetteFor(puzzle: Puzzle, target: QueryOutput, urgent = false): Silhouette {
+  /**
+   * `puzzle`'s target outline: kept, or queued (built in the background,
+   * starting with its first step, so queuing it costs nothing now).
+   */
+  private silhouetteFor(puzzle: Puzzle, target: QueryOutput): Silhouette {
     const cached = this.silhouettes.get(puzzle.id);
     if (cached) {
       return cached;
     }
+    const entry: Silhouette = {
+      build: null,
+      doc: null,
+      entity: null,
+      job: {
+        name: `target outline ${puzzle.id}`,
+        step: (deadline) => {
+          if (!entry.build) {
+            this.startSilhouette(entry, puzzle, target);
+            return entry.build!.done;
+          }
+          return entry.build.step(deadline);
+        },
+      },
+    };
+    this.silhouettes.set(puzzle.id, entry);
+    buildQueue.add(entry.job);
+    return entry;
+  }
+
+  /** Starts an outline's build: its document (hidden, parked) and entity. */
+  private startSilhouette(entry: Silhouette, puzzle: Puzzle, target: QueryOutput): void {
     const build = startSilhouetteBuild(puzzle, target);
     build.doc.fade.value = 0;
     build.doc.document.visible = false;
     build.doc.document.position.set(0, PARKED_Y, 0);
-    const entity = this.world.createTransformEntity(build.doc.document);
-    const job: BuildJob = { name: `target outline ${puzzle.id}`, step: (deadline) => build.step(deadline) };
-    const entry: Silhouette = { doc: build.doc, entity, build, job };
-    this.silhouettes.set(puzzle.id, entry);
-    if (!build.done) {
-      buildQueue.add(job, urgent);
-    }
-    return entry;
+    entry.build = build;
+    entry.doc = build.doc;
+    entry.entity = this.world.createTransformEntity(build.doc.document);
   }
 
   /** The outline on the desk leaves it (hidden; kept if it's a neighbor, see `prefetchNeighbors`). */
@@ -1699,8 +1726,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (!entry) {
       return;
     }
-    entry.doc.fade.value = 0;
-    entry.doc.document.visible = false;
+    if (entry.doc) {
+      entry.doc.fade.value = 0;
+      entry.doc.document.visible = false;
+    }
     this.silhouette = null;
   }
 
@@ -1720,7 +1749,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     for (const [id, entry] of this.silhouettes) {
       if (!ids.includes(id) && entry !== this.silhouette) {
         buildQueue.remove(entry.job);
-        entry.entity.dispose();
+        entry.entity?.dispose();
         this.silhouettes.delete(id);
       }
     }
@@ -1796,8 +1825,16 @@ function diffSummary(comparison: Comparison): string {
  * Its columns are sized from every target row (as the result's will be), but
  * only the first row shows, as an empty outline.
  */
-/** One cached target outline: its document, entity, and background build. */
-type Silhouette = { doc: TableSlabDocument; entity: Entity; build: SlabBuild; job: BuildJob };
+/**
+ * One cached target outline: its background job, and once that has taken its
+ * first step (or the outline is needed now), its build, document and entity.
+ */
+type Silhouette = {
+  job: BuildJob;
+  build: SlabBuild | null;
+  doc: TableSlabDocument | null;
+  entity: Entity | null;
+};
 
 /**
  * The target outline's build: its headers, one empty row and the row count.

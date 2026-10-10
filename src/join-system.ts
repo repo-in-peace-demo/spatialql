@@ -170,6 +170,7 @@ import {
   type SlabBuild,
 } from './table-slab-view.js';
 import { buildQueue, type BuildJob } from './build-queue.js';
+import { chooseFrameRate, PREFERRED_FRAME_RATE_HZ } from './frame-rate.js';
 import { keptDatasets, onKeptDatasets } from './dataset-cache.js';
 import { PressDips } from './press-dip.js';
 import { sounds } from './sound.js';
@@ -326,12 +327,8 @@ const RESULT_MAX_PUSHED_DISTANCE_METERS = Math.min(
   RESULT_ROW_FONT_METERS / (2 * Math.tan(MathUtils.degToRad(RESULT_MIN_PUSHED_ROW_TEXT_DEG) / 2)),
 );
 const PARKED_Y = -100;
-/**
- * The frame rate asked for at session start (when offered): 72 Hz gives a
- * 13.9 ms budget, which joined frames (13-16 ms p50 on 2026-10-11) mostly fit;
- * at 90 Hz (11.1 ms) they don't.
- */
-const TARGET_FRAME_RATE_HZ = 72;
+/** Background builds wait until nothing has moved for this long (build-queue.ts). */
+const BACKGROUND_QUIET_SECONDS = 0.5;
 
 // --- Join-type control ----------------------------------------------------------
 /**
@@ -653,6 +650,13 @@ type ResultView = {
   cleanup: (() => void)[];
 };
 
+/**
+ * A result slab queued for building (build-queue.ts): its job, and once that
+ * has taken its first step (or a join needs it now), its build and the step
+ * that turns the finished document into a ResultView.
+ */
+type ResultBuild = { job: BuildJob; build: SlabBuild | null; finish: (() => ResultView) | null };
+
 type DockAnimation = {
   active: boolean;
   slab: SourceSlab | null;
@@ -711,7 +715,7 @@ export class JoinSystem
    * Result slabs being built a step at a time (build-queue.ts), by key: each
    * becomes a ResultView in `results` when its last row is in.
    */
-  private readonly resultBuilds = new Map<string, { build: SlabBuild; job: BuildJob; finish: () => ResultView }>();
+  private readonly resultBuilds = new Map<string, ResultBuild>();
   private active: ResultView | null = null;
 
   /** Sign of the RIGHT slab's x in the LEFT slab's frame (+1: docked on its right). */
@@ -838,6 +842,12 @@ export class JoinSystem
   /** How long the hold button `holdName` has been held (seconds; 0 when not). */
   private holdHeld = 0;
   private holdName = '';
+  /**
+   * A hold that just completed, still held: the same touch doesn't start
+   * another (a fingertip left on Recenter re-triggered it every 0.6 s, 2026-10-11
+   * log); cleared once nothing holds that button.
+   */
+  private holdSpent = '';
   /** The session is ending (Exit completed); nothing more until a new one. */
   private exitEnded = false;
   /** Dev log: how the hold button is being held. */
@@ -1137,6 +1147,7 @@ export class JoinSystem
         // A new session: Exit can end it again.
         this.exitEnded = false;
         this.holdHeld = 0;
+        this.holdSpent = '';
         this.holdSelect.left.reset();
         this.holdSelect.right.reset();
         this.pinchMotion.left.reset();
@@ -1163,8 +1174,12 @@ export class JoinSystem
   update(delta: number): void {
     this.tweens.update(delta);
     this.dips.update(this.tweens.now);
-    // Background builds (the next puzzles' outlines, tables and result slabs), a few ms per frame.
-    buildQueue.run();
+    // Background builds (the next puzzles' outlines, tables and result slabs): only once
+    // things have been still a moment, at most BUILD_BUDGET_MS a frame; nothing once all are built.
+    const quiet = this.backgroundQuiet(delta);
+    if (quiet && buildQueue.pending > 0) {
+      buildQueue.run();
+    }
     if (import.meta.env.DEV && this.debug) {
       this.noteFinishedBuilds();
     }
@@ -1654,6 +1669,16 @@ export class JoinSystem
         button = held;
       }
     }
+    // One hold per touch: still on the button that just completed, nothing starts.
+    if (this.holdSpent) {
+      if (button && name === this.holdSpent) {
+        return;
+      }
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(`${this.holdSpent} let go after its hold: it can be held again`);
+      }
+      this.holdSpent = '';
+    }
     if (!bar || !button || name !== this.holdName) {
       if (this.holdHeld > 0) {
         if (import.meta.env.DEV && this.debug) {
@@ -1692,6 +1717,7 @@ export class JoinSystem
     }
     this.holdRing.visible = false;
     this.holdHeld = 0;
+    this.holdSpent = name;
     // Done: every hand's select must start again to hold anything.
     for (const hand of HANDS) {
       this.holdSelect[hand].reset();
@@ -2008,13 +2034,38 @@ export class JoinSystem
     this.requestJoinType(joinType);
   }
 
+  /** Seconds nothing has moved (backgroundQuiet). */
+  private quietFor = 0;
+
+  /**
+   * Whether background builds may run this frame: no slab held, docking or
+   * gliding, no join animation, no switch or recenter, the card and outline
+   * not fading -- for BACKGROUND_QUIET_SECONDS in a row.
+   */
+  private backgroundQuiet(delta: number): boolean {
+    const desk = deskBridge.desk;
+    const still =
+      this.queries.held.entities.size === 0 &&
+      !this.dock.active &&
+      !this.gliding() &&
+      !this.tweens.busy &&
+      (this.state.phase === 'idle' || this.state.phase === 'joined') &&
+      deskReady() &&
+      !desk?.recenterGliding &&
+      !desk?.recenterCountdownActive &&
+      !(joinBridge.challenge?.animating() ?? false);
+    this.quietFor = still ? this.quietFor + delta : 0;
+    return this.quietFor >= BACKGROUND_QUIET_SECONDS;
+  }
+
   /** Asked once per session (a new session asks again). */
   private frameRateSession: XRSession | null = null;
 
   /**
-   * At session start: asks for TARGET_FRAME_RATE_HZ if the browser offers it
-   * (the Quest Browser does: updateTargetFrameRate), a steadier frame budget
-   * than 90 Hz for this scene. Dev: logs the rates offered and the one used.
+   * At session start: asks for the rate frame-rate.ts chooses from the ones
+   * the browser offers (80 Hz on the Quest 3; the Quest Browser supports
+   * updateTargetFrameRate). Dev: `?hz=72` (or any rate) asks for that one;
+   * the log lists the rates offered and the one in use.
    */
   private requestFrameRate(): void {
     const session = this.xrManager.getSession() as
@@ -2029,29 +2080,33 @@ export class JoinSystem
     }
     this.frameRateSession = session;
     const offered = session.supportedFrameRates ? Array.from(session.supportedFrameRates) : [];
-    if (!session.updateTargetFrameRate || !offered.includes(TARGET_FRAME_RATE_HZ)) {
+    const manual = import.meta.env.DEV ? devFrameRateChoice() : null;
+    const target = chooseFrameRate(offered, manual ?? PREFERRED_FRAME_RATE_HZ);
+    // Not every browser has it (the types say it always exists).
+    const canUpdate = typeof (session as { updateTargetFrameRate?: unknown }).updateTargetFrameRate === 'function';
+    if (!canUpdate || target === null) {
       if (import.meta.env.DEV && this.debug) {
         this.debug.note(
-          `frame rate: ${session.frameRate ?? 'unknown'} Hz (${TARGET_FRAME_RATE_HZ} Hz not offered: ` +
-            `${offered.length > 0 ? offered.join(', ') : 'no rates listed'})`,
+          `frame rate: ${session.frameRate ?? 'unknown'} Hz kept (offered: ${offered.length > 0 ? offered.join(', ') : 'none listed'}` +
+            `${canUpdate ? '' : '; no updateTargetFrameRate'})`,
         );
       }
       return;
     }
     const before = session.frameRate;
     session
-      .updateTargetFrameRate(TARGET_FRAME_RATE_HZ)
+      .updateTargetFrameRate(target)
       .then(() => {
         if (import.meta.env.DEV && this.debug) {
           this.debug.note(
-            `frame rate: asked for ${TARGET_FRAME_RATE_HZ} Hz (offered ${offered.join(', ')}; was ${before ?? '?'} Hz); ` +
-              `now ${session.frameRate ?? '?'} Hz`,
+            `frame rate: asked for ${target} Hz${manual ? ` (?hz=${manual})` : ''} (offered ${offered.join(', ')}; was ` +
+              `${before ?? '?'} Hz); now ${session.frameRate ?? '?'} Hz`,
           );
         }
       })
       .catch((error: unknown) => {
         if (import.meta.env.DEV && this.debug) {
-          this.debug.note(`frame rate: asking for ${TARGET_FRAME_RATE_HZ} Hz failed (${String(error)}); ${session.frameRate ?? '?'} Hz`);
+          this.debug.note(`frame rate: asking for ${target} Hz failed (${String(error)}); ${session.frameRate ?? '?'} Hz`);
         }
       });
   }
@@ -2540,7 +2595,7 @@ export class JoinSystem
     if (cached) {
       return cached;
     }
-    if (!this.resultBuilds.has(key) && !this.startResultView(leftId, rightId)) {
+    if (!this.resultBuilds.has(key) && !this.queueResultView(leftId, rightId)) {
       return null;
     }
     const pending = this.resultBuilds.get(key);
@@ -2549,9 +2604,12 @@ export class JoinSystem
     }
     // Needed now (a join that started before it was built ahead): the rest of it in this frame.
     const start = performance.now();
-    pending.build.step(Infinity);
     buildQueue.remove(pending.job);
-    const view = pending.finish();
+    if (!pending.build) {
+      this.startResultBuild(key, leftId, rightId, pending);
+    }
+    pending.build!.step(Infinity);
+    const view = pending.finish!();
     if (import.meta.env.DEV && this.debug) {
       this.debug.note(`perf: result slab ${key} finished on demand in ${(performance.now() - start).toFixed(1)} ms`);
     }
@@ -2562,7 +2620,7 @@ export class JoinSystem
   private prefetchResultView(leftId: string, rightId: string): void {
     const key = resultKey(leftId, rightId);
     if (!this.results.has(key) && !this.resultBuilds.has(key)) {
-      this.startResultView(leftId, rightId);
+      this.queueResultView(leftId, rightId);
     }
   }
 
@@ -2589,7 +2647,7 @@ export class JoinSystem
       const [leftId, rightId] = key.split('>');
       if (!(keep(leftId) && keep(rightId))) {
         buildQueue.remove(pending.job);
-        pending.build.doc.document.dispose();
+        pending.build?.doc.document.dispose();
         this.resultBuilds.delete(key);
       }
     }
@@ -2603,17 +2661,45 @@ export class JoinSystem
   }
 
   /**
-   * Starts the result slab for `leftId` with `rightId`: its data now, its
-   * document a step at a time (build-queue.ts), the view itself once the
-   * last row is in. False if either table is unknown.
+   * Queues the result slab for `leftId` with `rightId` (build-queue.ts): its
+   * first step works out its data and starts its document, the next ones
+   * add its rows, and the last makes it a view. Queuing costs nothing now.
+   * False if either table is unknown.
    */
-  private startResultView(leftId: string, rightId: string): boolean {
+  private queueResultView(leftId: string, rightId: string): boolean {
     const key = resultKey(leftId, rightId);
-    const left = tableById(leftId);
-    const right = tableById(rightId);
-    if (!left || !right) {
+    if (!tableById(leftId) || !tableById(rightId)) {
       return false;
     }
+    const entry: ResultBuild = {
+      build: null,
+      finish: null,
+      job: {
+        name: `result slab ${key}`,
+        step: (deadline) => {
+          if (!entry.build) {
+            this.startResultBuild(key, leftId, rightId, entry);
+            return false;
+          }
+          if (!entry.build.done) {
+            entry.build.step(deadline);
+            return false;
+          }
+          // Its own step: the view's entity, listeners and tints.
+          entry.finish!();
+          return true;
+        },
+      },
+    };
+    this.resultBuilds.set(key, entry);
+    buildQueue.add(entry.job);
+    return true;
+  }
+
+  /** A queued result slab's first step: its data, and its document started (hidden, parked). */
+  private startResultBuild(key: string, leftId: string, rightId: string, entry: ResultBuild): void {
+    const left = tableById(leftId)!;
+    const right = tableById(rightId)!;
 
     // The slab holds every LEFT JOIN row; INNER hides the trailing ghosts.
     const result = buildJoinResultTable(left, right, joinTables(left, right, 'left'), 'left');
@@ -2661,26 +2747,14 @@ export class JoinSystem
     if (CHALLENGE_MODE && doc.captionOpacity[2]) {
       doc.captionOpacity[2].value = 0;
     }
-    const finish = (): ResultView => {
+    entry.build = build;
+    entry.finish = () => {
       this.resultBuilds.delete(key);
       const view = this.finishResultView(key, leftId, rightId, left, right, result, ghostRows, sql, doc);
       // The group is laid out for the pair's result width.
       this.layoutDirty = true;
       return view;
     };
-    const job: BuildJob = {
-      name: `result slab ${key}`,
-      step: (deadline) => {
-        const done = build.step(deadline);
-        if (done) {
-          finish();
-        }
-        return done;
-      },
-    };
-    this.resultBuilds.set(key, { build, job, finish });
-    buildQueue.add(job);
-    return true;
   }
 
   /** A result slab whose document is complete: its entity, listeners, tints and lineage, as a cached view. */
@@ -6444,6 +6518,21 @@ function nearestSourceNull(slab: SourceSlab, local: Vector3): number {
  * in the slab's own frame (the grab surface the palm sphere must reach).
  * Uses `scratch`; allocates nothing.
  */
+/** Dev: `?hz=<rate>` (or the stored `spatialql.hz`) asks for that rate instead of the preferred one; null: none given. */
+function devFrameRateChoice(): number | null {
+  if (!import.meta.env.DEV) {
+    return null;
+  }
+  let value: string | null = null;
+  try {
+    value = new URLSearchParams(location.search).get('hz') ?? localStorage.getItem('spatialql.hz');
+  } catch {
+    value = null;
+  }
+  const rate = Number(value);
+  return value && Number.isFinite(rate) && rate > 0 ? rate : null;
+}
+
 /** How far the bar extends left of the column's own place (the open puzzle picker; free play's bar: never). */
 function columnExtension(bar: { extendLeftMeters?: number }): number {
   return bar.extendLeftMeters ?? 0;

@@ -174,6 +174,16 @@ Since phase 4:
 
 **Built, not committed:**
 
+- **Background builds only when quiet:** queued builds start on their first
+  step (queuing at a load costs nothing; before, the load frame started every
+  neighbor's documents: 55-70 ms frames on the Quest), each step is one cell,
+  and the queue runs only after 0.5 s with nothing moving, at most 2 ms a frame,
+  and not at all once empty. The debug panel's frame line adds each frame's work
+  (update + render CPU time), since the frame gap can't drop below the refresh
+  interval (13.9 ms at 72 Hz). Sessions ask for 80 Hz (frame-rate.ts; the
+  Quest 3 offers 72, 80, 90, 120): joined work measured p95 12.4 ms, inside 80
+  Hz's 12.5 ms. Dev: `?hz=<rate>` asks for another.
+
 - **No builds at loads, switches or joins:** documents are built a few ms per
   frame in the background (build-queue.ts; table-slab-view.ts builds rows one
   at a time onto the live document) and cached: the current puzzle's and its
@@ -182,8 +192,8 @@ Since phase 4:
   Before: every load rebuilt the target outline (50-75 ms on the Quest) and
   every switch built two tables and two result slabs whole (100-240 ms each).
   A picker jump to a dataset that isn't kept builds during the switch, a few ms
-  per frame. Sessions ask for 72 Hz when offered (the rate is in the frame
-  line); `scripts/headset_log.py frames` compares sessions.
+  per frame. The display rate in use is in the frame line;
+  `scripts/headset_log.py frames` compares sessions.
 
 - **Pokes:** every poke target (column buttons, chips, picker tiles, INNER | LEFT,
   NULL cells, free play's Recenter) takes approaches up to 60° off straight at

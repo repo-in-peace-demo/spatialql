@@ -720,77 +720,80 @@ export function startTableSlabBuild(table: Table, options: SlabBuildOptions = {}
       }),
     );
   }
-  if (options.diffGutter) {
-    header.add(buildCell('', m.headerFont, gutterWidthCm, COLOR_TEXT, true, m));
-  }
-  table.columns.forEach((column, columnIndex) => {
-    const columnWidth = columnWidths[columnIndex];
-    const label = truncateToWidth(
-      headerLabel(table, column),
-      HEADER_METRICS,
-      m.headerFont,
-      columnWidth - 2 * m.cellPaddingX,
-    );
-    header.add(buildCell(label, m.headerFont, columnWidth, COLOR_TEXT, true, m));
-  });
+  // The header's cells join it one per step, like the rows' (see the steps below).
+  const headerSteps: (() => void)[] = [
+    ...(options.diffGutter ? [() => header.add(buildCell('', m.headerFont, gutterWidthCm, COLOR_TEXT, true, m))] : []),
+    ...table.columns.map((column, columnIndex) => () => {
+      const columnWidth = columnWidths[columnIndex];
+      const label = truncateToWidth(headerLabel(table, column), HEADER_METRICS, m.headerFont, columnWidth - 2 * m.cellPaddingX);
+      header.add(buildCell(label, m.headerFont, columnWidth, COLOR_TEXT, true, m));
+    }),
+  ];
   root.add(header);
 
   const rowViews = new Map<number, RowView>();
   // Dev only: values cut off with an ellipsis (a dataset test prevents these).
   const truncatedCells: string[] = [];
 
-  const buildRow = (dataRow: Table['rows'][number], rowIndex: number) => {
+  /**
+   * One row's build, as steps: the row itself (its layers and diff marker),
+   * then one cell per step, then its view. The row joins the live document
+   * first and its cells join it one by one, so no step is more than a cell.
+   */
+  const rowSteps = (dataRow: Table['rows'][number], rowIndex: number): (() => void)[] => {
     const rowBackground = rowIndex % 2 === 0 ? COLOR_ROW_BACKGROUND_EVEN : COLOR_ROW_BACKGROUND_ODD;
     const rowOpacity = signal(1);
     const offsetYCm = signal(0);
     const flight = options.cellSides ? { left: cellOffset(), right: cellOffset() } : null;
     const backgroundFade = signal(1);
-    const rowContainer = new UIKit.Container({
-      flexDirection: 'row',
-      // Join results (and silhouettes) paint the background on a separate layer (below).
-      ...(flight || options.silhouette ? {} : { backgroundColor: rowBackground }),
-      gapColumn: m.columnGap,
-      opacity: computed(() => rowOpacity.value * fade.value),
-      transformTranslateY: offsetYCm,
-      display: options.hiddenRows?.has(rowIndex) ? 'none' : 'flex',
-    });
-    // A background layer filling the row, behind its cells, with its own
-    // fade: lets a join result's row background appear only as its flying
-    // cells land, while the cells stay fully visible in flight.
-    let background = rowContainer;
-    if (flight) {
-      background = rowLayer({ backgroundColor: rowBackground, opacity: backgroundFade });
-      rowContainer.add(background);
-    }
     // A silhouette row is an empty outline (its text is laid out but invisible,
     // so its height matches a real row); the revealed row keeps its text.
     const revealed = !options.silhouette || options.silhouette.revealRow === rowIndex;
-    if (options.silhouette) {
-      rowContainer.add(rowLayer(revealed ? { ...outline, backgroundColor: rowBackground } : outline));
-    }
-
-    let marker: Signal<number> | null = null;
-    if (options.diffGutter) {
-      const markerOpacity = signal(0);
-      marker = markerOpacity;
-      // Its own opacity, so multiplied by the row's and the slab's explicitly.
-      const shown = computed(() => markerOpacity.value * rowOpacity.value * fade.value);
-      rowContainer.add(buildCell('+', m.rowFont, gutterWidthCm, COLOR_DIFF_MARKER, true, m, null, shown));
-    }
-
     // Cells of an unmatched LEFT JOIN row hold `null` and render as `NULL`,
     // exactly as a database would show them. The data layer's lineage still
     // records that they came from an unmatched join rather than a stored NULL.
     const nullOutlines = options.nullTargets ? new Map<number, Container>() : null;
-    const cells = table.columns.map((column, columnIndex) => {
+    const cells: Container[] = [];
+    let rowContainer: Container | null = null;
+    let background: Container | null = null;
+    let marker: Signal<number> | null = null;
+
+    const startRow = () => {
+      const row = new UIKit.Container({
+        flexDirection: 'row',
+        // Join results (and silhouettes) paint the background on a separate layer (below).
+        ...(flight || options.silhouette ? {} : { backgroundColor: rowBackground }),
+        gapColumn: m.columnGap,
+        opacity: computed(() => rowOpacity.value * fade.value),
+        transformTranslateY: offsetYCm,
+        display: options.hiddenRows?.has(rowIndex) ? 'none' : 'flex',
+      });
+      rowContainer = row;
+      // A background layer filling the row, behind its cells, with its own
+      // fade: lets a join result's row background appear only as its flying
+      // cells land, while the cells stay fully visible in flight.
+      background = row;
+      if (flight) {
+        background = rowLayer({ backgroundColor: rowBackground, opacity: backgroundFade });
+        row.add(background);
+      }
+      if (options.silhouette) {
+        row.add(rowLayer(revealed ? { ...outline, backgroundColor: rowBackground } : outline));
+      }
+      if (options.diffGutter) {
+        const markerOpacity = signal(0);
+        marker = markerOpacity;
+        // Its own opacity, so multiplied by the row's and the slab's explicitly.
+        const shown = computed(() => markerOpacity.value * rowOpacity.value * fade.value);
+        row.add(buildCell('+', m.rowFont, gutterWidthCm, COLOR_DIFF_MARKER, true, m, null, shown));
+      }
+      root.add(row);
+    };
+
+    const cellStep = (column: string, columnIndex: number) => () => {
       const columnWidth = columnWidths[columnIndex];
       const raw = dataRow[column];
-      const truncated = truncateToWidth(
-        displayValue(raw),
-        DATA_METRICS,
-        m.rowFont,
-        columnWidth - 2 * m.cellPaddingX,
-      );
+      const truncated = truncateToWidth(displayValue(raw), DATA_METRICS, m.rowFont, columnWidth - 2 * m.cellPaddingX);
       if (import.meta.env.DEV && truncated !== displayValue(raw)) {
         truncatedCells.push(displayValue(raw));
       }
@@ -821,23 +824,26 @@ export function startTableSlabBuild(table: Table, options: SlabBuildOptions = {}
         cell.add(layer);
         nullOutlines.set(columnIndex, layer);
       }
-      rowContainer.add(cell);
-      return cell;
-    });
+      rowContainer!.add(cell);
+      cells.push(cell);
+    };
 
-    root.add(rowContainer);
-    rowViews.set(rowIndex, {
-      row: rowContainer,
-      cells,
-      opacity: rowOpacity,
-      offsetYCm,
-      flight,
-      background,
-      backgroundFade,
-      baseBackground: rowBackground,
-      marker,
-      nullOutlines,
-    });
+    const endRow = () => {
+      rowViews.set(rowIndex, {
+        row: rowContainer!,
+        cells,
+        opacity: rowOpacity,
+        offsetYCm,
+        flight,
+        background: background!,
+        backgroundFade,
+        baseBackground: rowBackground,
+        marker,
+        nullOutlines,
+      });
+    };
+
+    return [startRow, ...table.columns.map((column, columnIndex) => cellStep(column, columnIndex)), endRow];
   };
 
   // Placeholders for rows the answer still needs: a `?` in an outline, the
@@ -880,7 +886,8 @@ export function startTableSlabBuild(table: Table, options: SlabBuildOptions = {}
   // The live document now (frame, caption, header); the rows join it step by step, in order.
   const document = new UIKitDocument(root);
   const steps: (() => void)[] = [
-    ...visibleRows.map((dataRow, rowIndex) => () => buildRow(dataRow, rowIndex)),
+    ...headerSteps,
+    ...visibleRows.flatMap((dataRow, rowIndex) => rowSteps(dataRow, rowIndex)),
     ...Array.from({ length: options.placeholderRows ?? 0 }, () => buildPlaceholder),
     ...(overflow ? [buildOverflow] : []),
   ];

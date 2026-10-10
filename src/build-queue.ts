@@ -2,15 +2,16 @@
  * Background builds, a little per frame: slab documents for the puzzles and
  * datasets the player may go to next (the previous and next puzzle, their
  * datasets' tables and result slabs), built ahead so a load, a switch or a
- * join never builds a whole document in one frame. Each job takes steps
- * until this frame's budget (BUILD_BUDGET_MS of real time) is spent; at least
- * one step per frame, so a slow device still moves forward. Run once per
- * frame (the join system does). Jobs run in the order added; `urgent` ones
- * (what the current state needs next) go first.
+ * join never builds a whole document in one frame. A job's steps are small
+ * (a document's start, one cell, its finish) and each job starts on its
+ * first step, so queuing costs nothing. The join system runs the queue only
+ * once nothing has moved for a moment, for at most BUILD_BUDGET_MS of real
+ * time per frame (at least one step), and not at all once it's empty.
+ * Jobs run in the order added; `urgent` ones go first.
  */
 
-/** Real time (ms) the queue may use per frame: a few ms of the 11-14 ms budget (one step can run over). */
-export const BUILD_BUDGET_MS = 3;
+/** Real time (ms) the queue may use per frame (one step can run over: a step is one cell, or a document's start). */
+export const BUILD_BUDGET_MS = 2;
 
 export type BuildJob = {
   /** For the log. */

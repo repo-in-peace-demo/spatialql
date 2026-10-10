@@ -555,6 +555,16 @@ export class DebugHudSystem extends createSystem({
   private readonly sorted = new Float32Array(HUD_FRAME_WINDOW);
   private frameIndex = 0;
   private frameCount = 0;
+  /**
+   * Each frame's work (ms): from the start of the world's update to the end
+   * of the scene's render (CPU time, whatever the display rate; the frame
+   * times above are the gaps between frames, so never under the refresh
+   * interval). A ring like `frames`.
+   */
+  private readonly work = new Float32Array(HUD_FRAME_WINDOW);
+  private workIndex = 0;
+  private workCount = 0;
+  private workStart = 0;
   private longTasks: PerformanceObserver | null = null;
   private frameLogCounter = 0;
   /** Head height the last head-height line was measured against (NaN until placed this session). */
@@ -597,12 +607,37 @@ export class DebugHudSystem extends createSystem({
       this.longTasks = null;
     }
 
+    // Each frame's work: the world's update starts it, the scene's render ends it.
+    const world = this.world;
+    const update = world.update;
+    world.update = (delta: number, time: number) => {
+      this.workStart = performance.now();
+      update.call(world, delta, time);
+    };
+    const scene = this.scene;
+    const afterRender = scene.onAfterRender;
+    scene.onAfterRender = (...args) => {
+      afterRender.apply(scene, args);
+      if (this.workStart > 0) {
+        this.work[this.workIndex] = performance.now() - this.workStart;
+        this.workIndex = (this.workIndex + 1) % HUD_FRAME_WINDOW;
+        this.workCount = Math.min(this.workCount + 1, HUD_FRAME_WINDOW);
+        this.workStart = 0;
+      }
+    };
+    this.cleanupFuncs.push(() => {
+      world.update = update;
+      scene.onAfterRender = afterRender;
+    });
+
     // A new session (or leaving one): re-place, and start the frame window over.
     this.cleanupFuncs.push(
       this.world.visibilityState.subscribe(() => {
         this.placed = false;
         this.frameCount = 0;
         this.frameIndex = 0;
+        this.workCount = 0;
+        this.workIndex = 0;
         // A new session: the head height is measured afresh once placed.
         this.headRefY = NaN;
       }),
@@ -979,6 +1014,20 @@ export class DebugHudSystem extends createSystem({
     }
   }
 
+  /** The frame line's work part: ` | work p50 6.1 p95 9.8 max 31.0 ms` (sorted at refresh time, in `sorted`'s spare copy). */
+  private workText(): string {
+    const n = this.workCount;
+    if (n === 0) {
+      return '';
+    }
+    this.workSorted.set(this.work);
+    const times = n === HUD_FRAME_WINDOW ? this.workSorted : this.workSorted.subarray(0, n);
+    times.sort();
+    const at = (q: number) => times[Math.floor(q * (n - 1))].toFixed(1);
+    return ` | work p50 ${at(0.5)} p95 ${at(0.95)} max ${times[n - 1].toFixed(1)} ms`;
+  }
+  private readonly workSorted = new Float32Array(HUD_FRAME_WINDOW);
+
   private refreshText(): void {
     // Frame line: sort a copy in place (a full window needs no subarray).
     const n = this.frameCount;
@@ -1002,7 +1051,8 @@ export class DebugHudSystem extends createSystem({
         `frame p50 ${p50.toFixed(1)}  p95 ${p95.toFixed(1)}  max ${max.toFixed(1)} ms ` +
         `(${(total / 1000).toFixed(1)} s) | long tasks ${longTask}` +
         // The session's display rate (72 Hz is asked for at session start; see the join system).
-        `${frameRateText((this.renderer.xr.getSession() as { frameRate?: number } | null)?.frameRate)}`;
+        `${frameRateText((this.renderer.xr.getSession() as { frameRate?: number } | null)?.frameRate)}` +
+        this.workText();
       if (!this.panelHidden) {
         this.hud.frameLine.setProperties({ text: frameText });
       }

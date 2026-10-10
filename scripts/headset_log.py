@@ -401,22 +401,26 @@ def cmd_pokes(files: list[str], target: str | None) -> None:
 
 FRAME_RE = re.compile(
     r'\[HUD\] frame p50 (?P<p50>[\d.]+)\s+p95 (?P<p95>[\d.]+)\s+max (?P<max>[\d.]+) ms \((?P<win>[\d.]+) s\)'
-    r' \| long tasks (?P<lt>\d+|none)(?:[^|]*\| (?P<hz>\d+) Hz)?'
+    r' \| long tasks (?P<lt>\d+|none)[^|]*(?:\| (?P<hz>\d+) Hz)?\s*'
+    r'(?:\| work p50 (?P<wp50>[\d.]+) p95 (?P<wp95>[\d.]+) max (?P<wmax>[\d.]+) ms)?'
 )
 JOIN_STATE_RE = re.compile(r'\[Join debug\] \w+: (?P<from>\w+)\s*(?:\([^)]*\))?\s*-> (?P<to>\w+)')
-SWITCH_RE = re.compile(r'\[Challenge debug\] switching to|\[DeskPlacement debug\] switched to|\[Challenge debug\] puzzle \d+ \(.*\) loaded on')
+SWITCH_RE = re.compile(
+    r'\[Challenge debug\] switching to|\[DeskPlacement debug\] switched to|\[Challenge debug\] puzzle \d+ \(.*\) loaded on'
+)
 
 
 def cmd_frames(files: list[str]) -> None:
-    """Frame times (the HUD's ~5 s windows: p50 / p95 / max ms) per log, split by join state over each window:
-    not joined (idle / previewing), joined, or mixed (a join, a separation, a puzzle load or a dataset switch inside it).
-    Also: whether the in-headset panel was shown, and long tasks during the session."""
+    """Frame times per log, by display rate and join state over each ~5 s window: not joined (idle /
+    previewing), joined, or mixed (a join, a separation, a puzzle load or a dataset switch inside it).
+
+    Two measures: the frame gap (p50 / p95 / max: never under the refresh interval, 13.9 ms at 72 Hz,
+    11.1 at 90) and, where logged, the work per frame (update + render CPU time: what has to fit)."""
     import statistics
 
     for path in files:
         entries = read_log(path)
         panel = 'off' if any('panel hidden (?debugPanel=0)' in e.text for e in entries) else 'on'
-        # Join-state changes and dataset switches, in time order.
         changes: list[tuple[float, str]] = []
         for e in entries:
             m = JOIN_STATE_RE.search(e.text)
@@ -424,36 +428,39 @@ def cmd_frames(files: list[str]) -> None:
                 changes.append((e.t, 'joined' if m['to'] in ('joined', 'separating') else 'not'))
             elif SWITCH_RE.search(e.text):
                 changes.append((e.t, 'switch'))
-        groups: dict[str, list[tuple[float, float, float]]] = {'not joined': [], 'joined': [], 'mixed': []}
+        groups: dict[tuple[str, str], list[tuple[float, ...]]] = {}
         long_tasks = 0
-        rates: set[int] = set()
-        state = 'not'
         for e in entries:
             m = FRAME_RE.search(e.text)
             if not m:
                 continue
             long_tasks = max(long_tasks, int(m['lt']) if m['lt'] != 'none' else 0)
-            if m['hz']:
-                rates.add(int(m['hz']))
             start = e.t - float(m['win'])
             inside = [c for c in changes if start < c[0] <= e.t]
             before = [c for c in changes if c[0] <= start]
             state = before[-1][1] if before and before[-1][1] != 'switch' else 'not'
             key = 'mixed' if inside else ('joined' if state == 'joined' else 'not joined')
-            groups[key].append((float(m['p50']), float(m['p95']), float(m['max'])))
-        rate = '/'.join(str(r) for r in sorted(rates)) + ' Hz' if rates else 'rate not logged'
-        print(f'== {short(path)}  (debug panel {panel}; {rate}; long tasks in the session: {long_tasks})')
-        print(f"   {'windows':16} {'n':>3} {'p50 median':>11} {'p95 median':>11} {'p95 worst':>10} {'max median':>11} {'max worst':>10}")
-        for key, rows in groups.items():
-            if not rows:
-                print(f'   {key:16} {0:>3}')
-                continue
-            p50 = statistics.median(r[0] for r in rows)
-            p95 = statistics.median(r[1] for r in rows)
-            mx = statistics.median(r[2] for r in rows)
+            rate = f"{m['hz']} Hz" if m['hz'] else 'rate ?'
+            work = (float(m['wp50']), float(m['wp95']), float(m['wmax'])) if m['wp50'] else (math.nan,) * 3
+            groups.setdefault((rate, key), []).append((float(m['p50']), float(m['p95']), float(m['max']), *work))
+        print(f'== {short(path)}  (debug panel {panel}; long tasks in the session: {long_tasks})')
+        if not groups:
+            session = any('frame rate:' in e.text or 'reference space in use' in e.text for e in entries)
             print(
-                f'   {key:16} {len(rows):>3} {p50:>11.1f} {p95:>11.1f} {max(r[1] for r in rows):>10.1f} {mx:>11.1f} {max(r[2] for r in rows):>10.1f}'
+                '   no frame-time lines: '
+                + ('the session logged none' if session else 'no XR session in this log (frame lines are written only in XR)')
             )
+            continue
+        print(
+            f"   {'rate':7} {'windows':11} {'n':>3} | {'gap p50':>7} {'p95':>5} {'max':>6} | {'work p50':>8} {'p95':>5} {'p95 worst':>9} {'max':>6}"
+        )
+        order = {'not joined': 0, 'joined': 1, 'mixed': 2}
+        for (rate, key), rows in sorted(groups.items(), key=lambda kv: (kv[0][0], order[kv[0][1]])):
+            med = lambda i: statistics.median(r[i] for r in rows)
+            worst = lambda i: max(r[i] for r in rows)
+            has_work = not math.isnan(rows[0][3])
+            work = f'{med(3):8.1f} {med(4):5.1f} {worst(4):9.1f} {worst(5):6.1f}' if has_work else f"{'-':>8} {'-':>5} {'-':>9} {'-':>6}"
+            print(f'   {rate:7} {key:11} {len(rows):>3} | {med(0):7.1f} {med(1):5.1f} {worst(2):6.1f} | {work}')
 
 
 # --- Output ----------------------------------------------------------------------------
