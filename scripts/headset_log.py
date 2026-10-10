@@ -399,6 +399,63 @@ def cmd_pokes(files: list[str], target: str | None) -> None:
             )
 
 
+FRAME_RE = re.compile(
+    r'\[HUD\] frame p50 (?P<p50>[\d.]+)\s+p95 (?P<p95>[\d.]+)\s+max (?P<max>[\d.]+) ms \((?P<win>[\d.]+) s\)'
+    r' \| long tasks (?P<lt>\d+|none)(?:[^|]*\| (?P<hz>\d+) Hz)?'
+)
+JOIN_STATE_RE = re.compile(r'\[Join debug\] \w+: (?P<from>\w+)\s*(?:\([^)]*\))?\s*-> (?P<to>\w+)')
+SWITCH_RE = re.compile(r'\[Challenge debug\] switching to|\[DeskPlacement debug\] switched to|\[Challenge debug\] puzzle \d+ \(.*\) loaded on')
+
+
+def cmd_frames(files: list[str]) -> None:
+    """Frame times (the HUD's ~5 s windows: p50 / p95 / max ms) per log, split by join state over each window:
+    not joined (idle / previewing), joined, or mixed (a join, a separation, a puzzle load or a dataset switch inside it).
+    Also: whether the in-headset panel was shown, and long tasks during the session."""
+    import statistics
+
+    for path in files:
+        entries = read_log(path)
+        panel = 'off' if any('panel hidden (?debugPanel=0)' in e.text for e in entries) else 'on'
+        # Join-state changes and dataset switches, in time order.
+        changes: list[tuple[float, str]] = []
+        for e in entries:
+            m = JOIN_STATE_RE.search(e.text)
+            if m:
+                changes.append((e.t, 'joined' if m['to'] in ('joined', 'separating') else 'not'))
+            elif SWITCH_RE.search(e.text):
+                changes.append((e.t, 'switch'))
+        groups: dict[str, list[tuple[float, float, float]]] = {'not joined': [], 'joined': [], 'mixed': []}
+        long_tasks = 0
+        rates: set[int] = set()
+        state = 'not'
+        for e in entries:
+            m = FRAME_RE.search(e.text)
+            if not m:
+                continue
+            long_tasks = max(long_tasks, int(m['lt']) if m['lt'] != 'none' else 0)
+            if m['hz']:
+                rates.add(int(m['hz']))
+            start = e.t - float(m['win'])
+            inside = [c for c in changes if start < c[0] <= e.t]
+            before = [c for c in changes if c[0] <= start]
+            state = before[-1][1] if before and before[-1][1] != 'switch' else 'not'
+            key = 'mixed' if inside else ('joined' if state == 'joined' else 'not joined')
+            groups[key].append((float(m['p50']), float(m['p95']), float(m['max'])))
+        rate = '/'.join(str(r) for r in sorted(rates)) + ' Hz' if rates else 'rate not logged'
+        print(f'== {short(path)}  (debug panel {panel}; {rate}; long tasks in the session: {long_tasks})')
+        print(f"   {'windows':16} {'n':>3} {'p50 median':>11} {'p95 median':>11} {'p95 worst':>10} {'max median':>11} {'max worst':>10}")
+        for key, rows in groups.items():
+            if not rows:
+                print(f'   {key:16} {0:>3}')
+                continue
+            p50 = statistics.median(r[0] for r in rows)
+            p95 = statistics.median(r[1] for r in rows)
+            mx = statistics.median(r[2] for r in rows)
+            print(
+                f'   {key:16} {len(rows):>3} {p50:>11.1f} {p95:>11.1f} {max(r[1] for r in rows):>10.1f} {mx:>11.1f} {max(r[2] for r in rows):>10.1f}'
+            )
+
+
 # --- Output ----------------------------------------------------------------------------
 
 
@@ -479,7 +536,7 @@ def cmd_context(path: str, at: str, before: float, after: float, grep: str | Non
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('command', choices=['pinches', 'presses', 'summary', 'layout', 'recenter', 'context', 'reach', 'pokes'])
+    ap.add_argument('command', choices=['pinches', 'presses', 'summary', 'layout', 'recenter', 'context', 'reach', 'pokes', 'frames'])
     ap.add_argument('files', nargs='*')
     ap.add_argument('--latest', type=int, help='the newest N headset logs (default 1 when no files are given)')
     ap.add_argument('--hand', choices=HANDS)
@@ -525,6 +582,10 @@ def main(argv: list[str]) -> int:
             print_pinches(rows)
         else:
             print_summary(rows)
+        return 0
+
+    if args.command == 'frames':
+        cmd_frames(files)
         return 0
 
     if args.command == 'pokes':

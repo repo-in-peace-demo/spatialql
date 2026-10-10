@@ -174,6 +174,17 @@ Since phase 4:
 
 **Built, not committed:**
 
+- **No builds at loads, switches or joins:** documents are built a few ms per
+  frame in the background (build-queue.ts; table-slab-view.ts builds rows one
+  at a time onto the live document) and cached: the current puzzle's and its
+  neighbors' target outlines (one row built, columns fitted to all), and their
+  datasets' tables and result slabs (dataset-cache.ts; parked out of sight).
+  Before: every load rebuilt the target outline (50-75 ms on the Quest) and
+  every switch built two tables and two result slabs whole (100-240 ms each).
+  A picker jump to a dataset that isn't kept builds during the switch, a few ms
+  per frame. Sessions ask for 72 Hz when offered (the rate is in the frame
+  line); `scripts/headset_log.py frames` compares sessions.
+
 - **Pokes:** every poke target (column buttons, chips, picker tiles, INNER | LEFT,
   NULL cells, free play's Recenter) takes approaches up to 60° off straight at
   the face (was 45°: the 2026-10-10 tile and chip pokes came in at 47-58° and

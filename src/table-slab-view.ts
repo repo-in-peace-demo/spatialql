@@ -191,6 +191,8 @@ export type TableSlabDocument = {
 export type SlabBuildOptions = {
   /** Row cap; defaults to MAX_VISIBLE_ROWS. */
   maxRows?: number;
+  /** Rows the columns are fitted to, if not the rows built (a silhouette builds one row but fits every target row). */
+  sizeRows?: Table['rows'];
   /** Rows that start with `display: 'none'`. */
   hiddenRows?: ReadonlySet<number>;
   /**
@@ -470,6 +472,27 @@ function tabHeightCm(fontCm: number): number {
  * indicator row if the table has more rows than fit).
  */
 export function buildTableSlabDocument(table: Table, options: SlabBuildOptions = {}): TableSlabDocument {
+  const build = startTableSlabBuild(table, options);
+  build.step(Infinity);
+  return build.doc;
+}
+
+/**
+ * A slab document built a little at a time (see `startTableSlabBuild`): the
+ * document exists from the start (its frame, caption and header); `step`
+ * adds its rows, placeholders and overflow line until `deadlineMs`
+ * (performance.now()), and says whether it's done. Use the document (its
+ * rows, its size) only once it's done.
+ */
+export type SlabBuild = { readonly doc: TableSlabDocument; step(deadlineMs: number): boolean; readonly done: boolean };
+
+/**
+ * Starts building `table`'s slab: everything but its rows now (cheap), the
+ * rows a few at a time from `step`. UIKit sets up each row as it's added to
+ * the live document, so a build spread over frames never costs one long
+ * frame (a whole result slab at once was 100-240 ms on the Quest).
+ */
+export function startTableSlabBuild(table: Table, options: SlabBuildOptions = {}): SlabBuild {
   const m = slabMetrics(options.text);
   const maxRows = options.maxRows ?? MAX_VISIBLE_ROWS;
   const { visibleRowCount, overflow } = visibleRowLayout(table, maxRows);
@@ -482,7 +505,8 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
   const shownRows = visibleRows.filter((_, rowIndex) => !options.hiddenRows?.has(rowIndex)).length;
   const panelHeight = options.animatedHeight ? signal(heightForRowsMeters(shownRows) * 100) : null;
 
-  const columnWidths = computeColumnWidths(table, visibleRows, m);
+  // Columns fit every row given for sizing (a silhouette builds one row but fits them all).
+  const columnWidths = computeColumnWidths(table, options.sizeRows ?? visibleRows, m);
   // The diff gutter is a narrow column before the data columns.
   const gutterWidthCm = options.diffGutter ? BASE_GUTTER_WIDTH * (m.rowFont / BASE_ROW_FONT_CM) : 0;
   const gutterSpanCm = options.diffGutter ? gutterWidthCm + m.columnGap : 0;
@@ -715,7 +739,7 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
   // Dev only: values cut off with an ellipsis (a dataset test prevents these).
   const truncatedCells: string[] = [];
 
-  visibleRows.forEach((dataRow, rowIndex) => {
+  const buildRow = (dataRow: Table['rows'][number], rowIndex: number) => {
     const rowBackground = rowIndex % 2 === 0 ? COLOR_ROW_BACKGROUND_EVEN : COLOR_ROW_BACKGROUND_ODD;
     const rowOpacity = signal(1);
     const offsetYCm = signal(0);
@@ -814,12 +838,12 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       marker,
       nullOutlines,
     });
-  });
+  };
 
   // Placeholders for rows the answer still needs: a `?` in an outline, the
   // same height as a data row, hidden until shown.
   const placeholders: PlaceholderRowView[] = [];
-  for (let i = 0; i < (options.placeholderRows ?? 0); i++) {
+  const buildPlaceholder = () => {
     const opacity = signal(0);
     const row = new UIKit.Container({
       flexDirection: 'row',
@@ -832,9 +856,9 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     row.add(buildCell('?', m.rowFont, m.columnMinWidth, COLOR_TEXT_NULL, true, m));
     root.add(row);
     placeholders.push({ row, opacity });
-  }
+  };
 
-  if (overflow) {
+  const buildOverflow = () => {
     const remaining = table.rows.length - visibleRowCount;
     const indicator = new UIKit.Container({
       flexDirection: 'row',
@@ -850,18 +874,26 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
       }),
     );
     root.add(indicator);
-  }
+  };
 
   const firstRowTopCm = m.borderWidth + m.panelPadding + captionHeightCm + m.headerRowHeight;
-  if (import.meta.env.DEV && truncatedCells.length > 0) {
-    console.warn(
-      `[Slab] ${table.id}: ${truncatedCells.length} cell(s) cut off with an ellipsis: ${truncatedCells.slice(0, 4).join(', ')}`,
-    );
-  }
-
+  // The live document now (frame, caption, header); the rows join it step by step, in order.
   const document = new UIKitDocument(root);
+  const steps: (() => void)[] = [
+    ...visibleRows.map((dataRow, rowIndex) => () => buildRow(dataRow, rowIndex)),
+    ...Array.from({ length: options.placeholderRows ?? 0 }, () => buildPlaceholder),
+    ...(overflow ? [buildOverflow] : []),
+  ];
+  let next = 0;
+  const finish = () => {
+    if (import.meta.env.DEV && truncatedCells.length > 0) {
+      console.warn(
+        `[Slab] ${table.id}: ${truncatedCells.length} cell(s) cut off with an ellipsis: ${truncatedCells.slice(0, 4).join(', ')}`,
+      );
+    }
+  };
 
-  return {
+  const doc: TableSlabDocument = {
     document,
     root,
     rowViews,
@@ -883,6 +915,28 @@ export function buildTableSlabDocument(table: Table, options: SlabBuildOptions =
     badge,
     nullOutlineWidthCm: nullOutlineWidth,
   };
+  const build = {
+    doc,
+    done: steps.length === 0,
+    step(deadlineMs: number): boolean {
+      // At least one step per call, so a build always moves forward.
+      while (next < steps.length) {
+        steps[next++]();
+        if (performance.now() >= deadlineMs) {
+          break;
+        }
+      }
+      if (next >= steps.length && !build.done) {
+        build.done = true;
+        finish();
+      }
+      return build.done;
+    },
+  };
+  if (build.done) {
+    finish();
+  }
+  return build;
 }
 
 /**

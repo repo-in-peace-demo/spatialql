@@ -173,6 +173,11 @@ const HANDS = ['left', 'right'] as const;
 const INDEX_TIP: readonly XRHandJoint[] = ['index-finger-tip'];
 const UP = new Vector3(0, 1, 0);
 
+/** The frame line's display rate: ` | 72 Hz`, or nothing when the session doesn't say. */
+function frameRateText(rate: number | undefined): string {
+  return rate ? ` | ${Math.round(rate)} Hz` : '';
+}
+
 /** `angle` (radians) wrapped into -PI..PI. */
 function wrapAngle(angle: number): number {
   return Math.atan2(Math.sin(angle), Math.cos(angle));
@@ -995,7 +1000,9 @@ export class DebugHudSystem extends createSystem({
             `${((performance.now() - this.lastLongTaskAt) / 1000).toFixed(0)} s ago`;
       const frameText =
         `frame p50 ${p50.toFixed(1)}  p95 ${p95.toFixed(1)}  max ${max.toFixed(1)} ms ` +
-        `(${(total / 1000).toFixed(1)} s) | long tasks ${longTask}`;
+        `(${(total / 1000).toFixed(1)} s) | long tasks ${longTask}` +
+        // The session's display rate (72 Hz is asked for at session start; see the join system).
+        `${frameRateText((this.renderer.xr.getSession() as { frameRate?: number } | null)?.frameRate)}`;
       if (!this.panelHidden) {
         this.hud.frameLine.setProperties({ text: frameText });
       }

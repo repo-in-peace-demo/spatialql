@@ -43,7 +43,9 @@ import { devFlag } from './dev-flags.js';
 import { PlacementDebug, type PlacementKind, type SlabReport } from './placement-debug.js';
 import { sounds } from './sound.js';
 import { JoinDocked, TableSlab, TableSlabRuntime } from './table-slab-component.js';
-import { buildTableSlabDocument, type TableSlabDocument } from './table-slab-view.js';
+import { buildTableSlabDocument, startTableSlabBuild, type SlabBuild, type TableSlabDocument } from './table-slab-view.js';
+import { BUILD_BUDGET_MS, buildQueue, type BuildJob } from './build-queue.js';
+import { keptDatasets, onKeptDatasets } from './dataset-cache.js';
 import { easeInCubic, easeInOutCubic, easeOutCubic } from './tween.js';
 import {
   RECENTER_AFTER_HIDDEN_SECONDS,
@@ -98,6 +100,8 @@ const FLOATING_BELOW_HEAD_METERS = 0.25;
 const SURFACE_FORWARD_METERS = 0.32;
 // Keeps the bottom edge from z-fighting with the surface it rests on.
 const SURFACE_LIFT_METERS = 0.002;
+/** Where parked slabs (built ahead for a later switch) wait, out of sight. */
+const PARKED_Y_METERS = -100;
 /** Slabs are grabbed by one hand and carried level: they keep their tilt (no rotation with the wrist). */
 const SLAB_GRAB = { rotate: false };
 
@@ -227,6 +231,13 @@ export class DeskPlacementSystem
 {
   /** The two source slabs of the dataset on the desk (empty mid-switch, between leaving and building). */
   private slabs: Slab[] = [];
+  /**
+   * Other datasets' slabs, kept built (dataset-cache.ts: the current puzzle's
+   * neighbors), parked out of sight with no slab or grab components (so the
+   * join system and grabbing ignore them): built a step at a time in the
+   * background, then switched to without building anything.
+   */
+  private readonly parked = new Map<DatasetId, { slabs: Slab[]; builds: SlabBuild[]; jobs: BuildJob[] }>();
   private deskStateValue: DeskState = { phase: 'ready', dataset: 'shop' };
   /** A requested dataset, waiting for the join to be idle and no slab held. */
   private pendingDataset: DatasetId | null = null;
@@ -317,7 +328,12 @@ export class DeskPlacementSystem
         deskBridge.desk = null;
       }
       this.sessionListenersCleanup?.();
+      for (const dataset of [...this.parked.keys()]) {
+        this.dropParked(dataset);
+      }
     });
+    // The kept datasets (challenge mode): build their slabs ahead, let go of the rest.
+    this.cleanupFuncs.push(onKeptDatasets(() => this.trimParked()));
 
     this.forceSurfaceRequested = import.meta.env.DEV && devFlag('forceSurface');
     this.debug = import.meta.env.DEV && devFlag('debug') ? new PlacementDebug(this.world) : null;
@@ -397,6 +413,115 @@ export class DeskPlacementSystem
       landed: grabbable,
       glide: { active: false, fromPos: new Vector3(), fromQuat: new Quaternion(), toPos: new Vector3(), toQuat: new Quaternion() },
     };
+  }
+
+  // --- Kept datasets: slabs built ahead, parked ---------------------------------------------
+
+  /** `dataset`'s slabs: parked (built, or building), or started now (in the background; `urgent`: first in line). */
+  private prepareDataset(dataset: DatasetId, urgent = false): { slabs: Slab[]; builds: SlabBuild[]; jobs: BuildJob[] } {
+    const existing = this.parked.get(dataset);
+    if (existing) {
+      if (urgent) {
+        for (const job of existing.jobs) {
+          if (buildQueue.has(job)) {
+            buildQueue.remove(job);
+            buildQueue.add(job, true);
+          }
+        }
+      }
+      return existing;
+    }
+    const entry = { slabs: [] as Slab[], builds: [] as SlabBuild[], jobs: [] as BuildJob[] };
+    for (const table of DATASETS[dataset].tables) {
+      const build = this.startSlabBuild(table);
+      entry.slabs.push(build.slab);
+      entry.builds.push(build.build);
+      if (!build.build.done) {
+        const job: BuildJob = { name: `${table.id} slab`, step: (deadline) => build.build.step(deadline) };
+        entry.jobs.push(job);
+        buildQueue.add(job, urgent);
+      }
+    }
+    this.parked.set(dataset, entry);
+    return entry;
+  }
+
+  /** Builds the kept datasets' slabs ahead (not the one on the desk) and disposes the parked ones no longer kept. */
+  private trimParked(): void {
+    const kept = keptDatasets();
+    const onDesk = this.deskStateValue.phase === 'ready' ? this.deskStateValue.dataset : null;
+    for (const dataset of [...this.parked.keys()]) {
+      if (!kept.includes(dataset)) {
+        this.dropParked(dataset);
+      }
+    }
+    for (const dataset of kept) {
+      if (dataset !== onDesk && !this.parked.has(dataset)) {
+        this.prepareDataset(dataset);
+      }
+    }
+  }
+
+  private dropParked(dataset: DatasetId): void {
+    const entry = this.parked.get(dataset);
+    if (!entry) {
+      return;
+    }
+    for (const job of entry.jobs) {
+      buildQueue.remove(job);
+    }
+    for (const slab of entry.slabs) {
+      slab.entity.dispose();
+    }
+    this.parked.delete(dataset);
+  }
+
+  /** A slab's document started (its rows a step at a time) on a parked entity: out of sight, not a slab yet. */
+  private startSlabBuild(table: Table): { slab: Slab; build: SlabBuild } {
+    const text = slabTextSizeAt(PLANNED_SOURCE_DISTANCE_METERS);
+    const dataset = DATASETS[this.deskDatasetFor(table)];
+    const build = startTableSlabBuild(table, {
+      text,
+      title: tableLabel(table),
+      ...(CHALLENGE_MODE ? { accent: dataset.theme.accent } : {}),
+    });
+    const doc = build.doc;
+    const entity = this.world.createTransformEntity(doc.document);
+    const slab: Slab = {
+      table,
+      doc,
+      entity,
+      touched: false,
+      from: new Vector3(),
+      to: new Vector3(),
+      landed: false,
+      glide: { active: false, fromPos: new Vector3(), fromQuat: new Quaternion(), toPos: new Vector3(), toQuat: new Quaternion() },
+    };
+    this.parkSlab(slab);
+    return { slab, build };
+  }
+
+  /** Out of sight and out of play: no slab or grab components (the join system and grabbing let go of it). */
+  private parkSlab(slab: Slab): void {
+    for (const component of [OneHandGrabbable, TableSlabRuntime, TableSlab]) {
+      if (slab.entity.hasComponent(component)) {
+        slab.entity.removeComponent(component);
+      }
+    }
+    slab.doc.fade.value = 0;
+    slab.doc.document.visible = false;
+    slab.entity.object3D?.position.set(0, PARKED_Y_METERS, 0);
+    slab.landed = false;
+    slab.touched = false;
+    slab.glide.active = false;
+  }
+
+  /** Back in play (a switch to its dataset): a slab again, faded out until it arrives; grabbable once it lands. */
+  private activateSlab(slab: Slab): void {
+    slab.doc.fade.value = 0;
+    slab.doc.document.visible = true;
+    slab.entity.addComponent(TableSlab, { tableId: slab.table.id });
+    slab.entity.addComponent(TableSlabRuntime, { document: slab.doc.document, rowViews: slab.doc.rowViews, layout: slab.doc });
   }
 
   // --- Recenter --------------------------------------------------------------------------
@@ -734,8 +859,16 @@ export class DeskPlacementSystem
         slab.doc.fade.value = 1 - t;
       }
       if (t >= 1) {
-        for (const slab of this.slabs) {
-          slab.entity.dispose();
+        // Kept (a neighbor of the next puzzle): parked for a later switch back; otherwise disposed.
+        if (keptDatasets().includes(state.from) && !this.parked.has(state.from)) {
+          for (const slab of this.slabs) {
+            this.parkSlab(slab);
+          }
+          this.parked.set(state.from, { slabs: this.slabs, builds: [], jobs: [] });
+        } else {
+          for (const slab of this.slabs) {
+            slab.entity.dispose();
+          }
         }
         this.slabs = [];
         this.deskStateValue = deskTransition(state, { type: 'leftDone' });
@@ -744,14 +877,29 @@ export class DeskPlacementSystem
     }
 
     if (state.phase === 'building') {
-      // One document per frame, so no frame does all of them.
-      const tables = DATASETS[state.to].tables;
-      const table = tables[this.slabs.length];
-      const slab = this.createSlab(table, false);
-      slab.doc.fade.value = 0;
-      this.slabs.push(slab);
-      if (this.slabs.length < tables.length) {
+      // Built ahead (parked), or built now a few ms per frame: no frame builds a whole slab.
+      const prebuilt = this.parked.get(state.to)?.builds.every((build) => build.done) ?? false;
+      const entry = this.prepareDataset(state.to, true);
+      const deadline = performance.now() + BUILD_BUDGET_MS;
+      let done = true;
+      for (const build of entry.builds) {
+        done = (build.done || build.step(deadline)) && done;
+      }
+      if (!done) {
         return;
+      }
+      for (const job of entry.jobs) {
+        buildQueue.remove(job);
+      }
+      this.parked.delete(state.to);
+      this.slabs = entry.slabs;
+      for (const slab of this.slabs) {
+        this.activateSlab(slab);
+      }
+      if (import.meta.env.DEV && this.debug) {
+        console.log(
+          `[DeskPlacement debug] perf: ${state.to} slabs ${prebuilt ? 'prebuilt (cached)' : 'built during the switch, a few ms per frame'}`,
+        );
       }
       // Both built: place them for their sizes, then start them one sink-depth down.
       this.placingForSwitch = true;

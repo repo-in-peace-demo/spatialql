@@ -67,7 +67,7 @@ import { INITIAL_JOIN_STATE, transition, type JoinEvent, type JoinState } from '
 import { assignKeyTints } from './data/key-tints.js';
 import { RESULT_ROW_CAP } from './data/puzzles.js';
 import { filterForColumn, nullFilterColumns, nullFilterMask, nullPokeEvent, sameFilter } from './data/query.js';
-import { DATASETS, datasetOfTable, tableById } from './data/datasets.js';
+import { DATASETS, datasetOfTable, tableById, type DatasetId } from './data/datasets.js';
 import type { QuerySpec } from './data/query.js';
 import type { CellValue, JoinType, NullFilter, Table } from './data/types.js';
 import { buildRecenterBar, setArcLean, setRecenterHover, type RecenterBarView } from './challenge-view.js';
@@ -150,7 +150,7 @@ import { JoinDocked, JoinResultSlab, TableSlab, TableSlabRuntime } from './table
 import {
   buildJoinTypeControl,
   joinTypeControlSizeCm,
-  buildTableSlabDocument,
+  startTableSlabBuild,
   captionColor,
   controlOptionStyle,
   MAX_RESULT_ROWS,
@@ -167,7 +167,10 @@ import {
   type SlabBadgeLook,
   type JoinTypeControlView,
   type TableSlabDocument,
+  type SlabBuild,
 } from './table-slab-view.js';
+import { buildQueue, type BuildJob } from './build-queue.js';
+import { keptDatasets, onKeptDatasets } from './dataset-cache.js';
 import { PressDips } from './press-dip.js';
 import { sounds } from './sound.js';
 import {
@@ -323,6 +326,12 @@ const RESULT_MAX_PUSHED_DISTANCE_METERS = Math.min(
   RESULT_ROW_FONT_METERS / (2 * Math.tan(MathUtils.degToRad(RESULT_MIN_PUSHED_ROW_TEXT_DEG) / 2)),
 );
 const PARKED_Y = -100;
+/**
+ * The frame rate asked for at session start (when offered): 72 Hz gives a
+ * 13.9 ms budget, which joined frames (13-16 ms p50 on 2026-10-11) mostly fit;
+ * at 90 Hz (11.1 ms) they don't.
+ */
+const TARGET_FRAME_RATE_HZ = 72;
 
 // --- Join-type control ----------------------------------------------------------
 /**
@@ -698,7 +707,11 @@ export class JoinSystem
   private readonly sources = new Map<string, SourceSlab>();
   private readonly results = new Map<string, ResultView>();
   /** Result directions still to build (left id, right id), one per frame. */
-  private pendingResults: [string, string][] = [];
+  /**
+   * Result slabs being built a step at a time (build-queue.ts), by key: each
+   * becomes a ResultView in `results` when its last row is in.
+   */
+  private readonly resultBuilds = new Map<string, { build: SlabBuild; job: BuildJob; finish: () => ResultView }>();
   private active: ResultView | null = null;
 
   /** Sign of the RIGHT slab's x in the LEFT slab's frame (+1: docked on its right). */
@@ -1063,9 +1076,13 @@ export class JoinSystem
       this.world.visibilityState.subscribe((state) => {
         if (state !== VisibilityState.NonImmersive) {
           sounds.unlock();
+          this.requestFrameRate();
         }
       }),
     );
+    // The kept datasets (challenge mode: the current puzzle's and its neighbors'):
+    // build their result slabs ahead, dispose the rest.
+    this.cleanupFuncs.push(onKeptDatasets(() => this.trimResultViews()));
 
     this.cleanupFuncs.push(
       () => this.control.inner.removeEventListener('click', onInner),
@@ -1146,18 +1163,16 @@ export class JoinSystem
   update(delta: number): void {
     this.tweens.update(delta);
     this.dips.update(this.tweens.now);
+    // Background builds (the next puzzles' outlines, tables and result slabs), a few ms per frame.
+    buildQueue.run();
+    if (import.meta.env.DEV && this.debug) {
+      this.noteFinishedBuilds();
+    }
     this.updateDock(delta);
     this.updateGlides(delta);
     sounds.update();
     this.unlockSoundOnPinch();
     this.samplePinchMotion();
-    // Result slabs for newly arrived tables: one document per frame.
-    const pending = this.pendingResults.shift();
-    if (pending) {
-      this.resultViewFor(pending[0], pending[1]);
-      // The group is laid out for the pair's result width.
-      this.layoutDirty = true;
-    }
     this.followRecenter();
     this.followResultHeight();
     this.updateHomeAfterSeparate();
@@ -1993,6 +2008,64 @@ export class JoinSystem
     this.requestJoinType(joinType);
   }
 
+  /** Asked once per session (a new session asks again). */
+  private frameRateSession: XRSession | null = null;
+
+  /**
+   * At session start: asks for TARGET_FRAME_RATE_HZ if the browser offers it
+   * (the Quest Browser does: updateTargetFrameRate), a steadier frame budget
+   * than 90 Hz for this scene. Dev: logs the rates offered and the one used.
+   */
+  private requestFrameRate(): void {
+    const session = this.xrManager.getSession() as
+      | (XRSession & {
+          supportedFrameRates?: Float32Array;
+          frameRate?: number;
+          updateTargetFrameRate?: (rate: number) => Promise<void>;
+        })
+      | null;
+    if (!session || session === this.frameRateSession) {
+      return;
+    }
+    this.frameRateSession = session;
+    const offered = session.supportedFrameRates ? Array.from(session.supportedFrameRates) : [];
+    if (!session.updateTargetFrameRate || !offered.includes(TARGET_FRAME_RATE_HZ)) {
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(
+          `frame rate: ${session.frameRate ?? 'unknown'} Hz (${TARGET_FRAME_RATE_HZ} Hz not offered: ` +
+            `${offered.length > 0 ? offered.join(', ') : 'no rates listed'})`,
+        );
+      }
+      return;
+    }
+    const before = session.frameRate;
+    session
+      .updateTargetFrameRate(TARGET_FRAME_RATE_HZ)
+      .then(() => {
+        if (import.meta.env.DEV && this.debug) {
+          this.debug.note(
+            `frame rate: asked for ${TARGET_FRAME_RATE_HZ} Hz (offered ${offered.join(', ')}; was ${before ?? '?'} Hz); ` +
+              `now ${session.frameRate ?? '?'} Hz`,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        if (import.meta.env.DEV && this.debug) {
+          this.debug.note(`frame rate: asking for ${TARGET_FRAME_RATE_HZ} Hz failed (${String(error)}); ${session.frameRate ?? '?'} Hz`);
+        }
+      });
+  }
+
+  /** Dev only: each background build as it finishes (how many frames, how much time in all). */
+  private noteFinishedBuilds(): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    for (const done of buildQueue.finished.splice(0)) {
+      this.debug.note(`build queue: ${done.name} built in ${done.frames} frame(s), ${done.ms.toFixed(1)} ms in all`);
+    }
+  }
+
   /** Dev only: a contact on `surface` that didn't press, once the fingertip is back out (why, its angle, how deep it went). */
   private notePokeMiss(hand: string, surface: string, poke: ContactPoke): void {
     if (!import.meta.env.DEV || !this.debug) {
@@ -2409,11 +2482,12 @@ export class JoinSystem
     this.glides.set(tableId, dockAnimation(HOME_GLIDE_SECONDS));
     this.layoutDirty = true;
     // Build every join direction's result slab ahead of any join (at startup,
-    // or while new tables arrive), one per frame from update(); a join that
-    // starts sooner builds its view on demand.
+    // or while new tables arrive), a step at a time in the background (kept
+    // ones are already built); a join that starts sooner finishes its view now.
     for (const other of this.sources.values()) {
       if (other.id !== tableId) {
-        this.pendingResults.push([tableId, other.id], [other.id, tableId]);
+        this.prefetchResultView(tableId, other.id);
+        this.prefetchResultView(other.id, tableId);
       }
     }
   }
@@ -2431,18 +2505,13 @@ export class JoinSystem
       this.dock.active = false;
       this.dock.slab = null;
     }
-    this.pendingResults = this.pendingResults.filter(([left, right]) => left !== source.id && right !== source.id);
-    for (const [key, view] of this.results) {
-      if (view.leftId !== source.id && view.rightId !== source.id) {
-        continue;
-      }
-      if (this.active === view) {
+    for (const view of this.results.values()) {
+      if ((view.leftId === source.id || view.rightId === source.id) && this.active === view) {
         this.active = null;
       }
-      view.cleanup.forEach((fn) => fn());
-      view.entity.dispose();
-      this.results.delete(key);
     }
+    // Its result slabs stay built (parked) if its dataset is kept; otherwise they go.
+    this.trimResultViews();
     this.layoutDirty = true;
   }
 
@@ -2464,16 +2533,86 @@ export class JoinSystem
     return null;
   }
 
+  /** The result slab for joining `leftId` with `rightId`: built (cached), or finished now if it's still building. */
   private resultViewFor(leftId: string, rightId: string): ResultView | null {
     const key = resultKey(leftId, rightId);
     const cached = this.results.get(key);
     if (cached) {
       return cached;
     }
-    const left = this.sources.get(leftId)?.table;
-    const right = this.sources.get(rightId)?.table;
-    if (!left || !right) {
+    if (!this.resultBuilds.has(key) && !this.startResultView(leftId, rightId)) {
       return null;
+    }
+    const pending = this.resultBuilds.get(key);
+    if (!pending) {
+      return this.results.get(key) ?? null;
+    }
+    // Needed now (a join that started before it was built ahead): the rest of it in this frame.
+    const start = performance.now();
+    pending.build.step(Infinity);
+    buildQueue.remove(pending.job);
+    const view = pending.finish();
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`perf: result slab ${key} finished on demand in ${(performance.now() - start).toFixed(1)} ms`);
+    }
+    return view;
+  }
+
+  /** Builds the result slab for `leftId` with `rightId` ahead, in the background (if it isn't built or building). */
+  private prefetchResultView(leftId: string, rightId: string): void {
+    const key = resultKey(leftId, rightId);
+    if (!this.results.has(key) && !this.resultBuilds.has(key)) {
+      this.startResultView(leftId, rightId);
+    }
+  }
+
+  /**
+   * The result slabs kept built: those of the tables on the desk and of the
+   * kept datasets (dataset-cache.ts); the rest are disposed (and their
+   * builds dropped). The kept datasets' slabs are built ahead.
+   */
+  private trimResultViews(): void {
+    const kept = keptDatasets();
+    const keep = (id: string) => this.sources.has(id) || kept.includes(datasetOfTable(id) ?? ('' as DatasetId));
+    for (const [key, view] of this.results) {
+      if (keep(view.leftId) && keep(view.rightId)) {
+        continue;
+      }
+      if (this.active === view) {
+        this.active = null;
+      }
+      view.cleanup.forEach((fn) => fn());
+      view.entity.dispose();
+      this.results.delete(key);
+    }
+    for (const [key, pending] of this.resultBuilds) {
+      const [leftId, rightId] = key.split('>');
+      if (!(keep(leftId) && keep(rightId))) {
+        buildQueue.remove(pending.job);
+        pending.build.doc.document.dispose();
+        this.resultBuilds.delete(key);
+      }
+    }
+    for (const dataset of kept) {
+      const [a, b] = DATASETS[dataset].tables;
+      if (a && b) {
+        this.prefetchResultView(a.id, b.id);
+        this.prefetchResultView(b.id, a.id);
+      }
+    }
+  }
+
+  /**
+   * Starts the result slab for `leftId` with `rightId`: its data now, its
+   * document a step at a time (build-queue.ts), the view itself once the
+   * last row is in. False if either table is unknown.
+   */
+  private startResultView(leftId: string, rightId: string): boolean {
+    const key = resultKey(leftId, rightId);
+    const left = tableById(leftId);
+    const right = tableById(rightId);
+    if (!left || !right) {
+      return false;
     }
 
     // The slab holds every LEFT JOIN row; INNER hides the trailing ghosts.
@@ -2486,7 +2625,7 @@ export class JoinSystem
     const whereLines = CHALLENGE_MODE
       ? result.columns.map((_, index) => buildWhereSql(left, right, filterForColumn(left, right, result, index)))
       : [];
-    const doc = buildTableSlabDocument(result.table, {
+    const build = startTableSlabBuild(result.table, {
       maxRows: MAX_RESULT_ROWS,
       hiddenRows: new Set(ghostRows),
       caption: CHALLENGE_MODE
@@ -2515,13 +2654,47 @@ export class JoinSystem
       // from their own source rows.
       cellSides: result.columns.map((column) => column.source),
     });
-
+    const doc = build.doc;
     doc.fade.value = 0;
     doc.document.visible = false;
     doc.document.position.set(0, PARKED_Y, 0);
     if (CHALLENGE_MODE && doc.captionOpacity[2]) {
       doc.captionOpacity[2].value = 0;
     }
+    const finish = (): ResultView => {
+      this.resultBuilds.delete(key);
+      const view = this.finishResultView(key, leftId, rightId, left, right, result, ghostRows, sql, doc);
+      // The group is laid out for the pair's result width.
+      this.layoutDirty = true;
+      return view;
+    };
+    const job: BuildJob = {
+      name: `result slab ${key}`,
+      step: (deadline) => {
+        const done = build.step(deadline);
+        if (done) {
+          finish();
+        }
+        return done;
+      },
+    };
+    this.resultBuilds.set(key, { build, job, finish });
+    buildQueue.add(job);
+    return true;
+  }
+
+  /** A result slab whose document is complete: its entity, listeners, tints and lineage, as a cached view. */
+  private finishResultView(
+    key: string,
+    leftId: string,
+    rightId: string,
+    left: Table,
+    right: Table,
+    result: JoinResultTable,
+    ghostRows: number[],
+    sql: Record<JoinType, [string, string]>,
+    doc: TableSlabDocument,
+  ): ResultView {
     const entity = this.world.createTransformEntity(doc.document);
 
     // Every NULL cell (stored, or a LEFT JOIN ghost) is a poke / ray target in

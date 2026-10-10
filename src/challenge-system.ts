@@ -119,6 +119,8 @@ import {
   type JoinControls,
   type NullFilterChoice,
 } from './join-bridge.js';
+import { buildQueue, type BuildJob } from './build-queue.js';
+import { keepDatasets } from './dataset-cache.js';
 import { PressDips } from './press-dip.js';
 import { sounds } from './sound.js';
 import { isTouchPointerClick, setRect, touchProbe, type PressPath } from './touch-probe.js';
@@ -136,7 +138,13 @@ import {
 } from './contact-poke.js';
 import { indexStraightness, readJointsPoint } from './pinch.js';
 import { HINT_PRESS_GAP_SECONDS, HintGate, SHOW_ANSWER_HOLD_SECONDS } from './hint-gate.js';
-import { buildTableSlabDocument, joinTypeControlSizeCm, MAX_RESULT_ROWS, type TableSlabDocument } from './table-slab-view.js';
+import {
+  joinTypeControlSizeCm,
+  MAX_RESULT_ROWS,
+  startTableSlabBuild,
+  type SlabBuild,
+  type TableSlabDocument,
+} from './table-slab-view.js';
 import { BAND_ARC_RADIUS_METERS, unrollArc } from './band-arc.js';
 import { cardMetrics } from './card-metrics.js';
 import { PLANNED_CONTROL_DISTANCE_METERS, PLANNED_RESULT_DISTANCE_METERS, slabTextSizeAt } from './view-comfort.js';
@@ -154,6 +162,8 @@ const WHERE_PULSE_SECONDS = 0.45;
 /** How long "Poke a NULL in the result above, or use Filter." shows in the message area. */
 const MESSAGE_FLASH_SECONDS = 3;
 /** The bar's touch-readout names for the filter chips (no per-frame strings). */
+/** Where cached documents wait out of sight (as the join system parks its result slabs). */
+const PARKED_Y = -100;
 const CHIP_NAMES = Array.from({ length: MAX_FILTER_CHIPS }, (_, i) => `chip ${i + 1}`);
 /** A bar target's name for the logs: a chip's or a picker tile's own name. */
 function targetName(name: BarButton, index: number): string {
@@ -194,7 +204,13 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   /** The card shows the one-time streak explanation, not yet marked as given (see update). */
   private streakExplainShowing = false;
   private barEntity!: Entity;
-  private silhouette: { doc: TableSlabDocument; entity: Entity } | null = null;
+  private silhouette: Silhouette | null = null;
+  /**
+   * Target outlines kept built (the puzzle on the desk, the previous and
+   * the next: `prefetchNeighbors`), each built a step at a time in the
+   * background (build-queue.ts); others are disposed.
+   */
+  private readonly silhouettes = new Map<PuzzleId, Silhouette>();
 
   /** The active puzzle (its tables are on the desk). */
   private puzzle!: Puzzle;
@@ -435,7 +451,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
 
     this.cleanupFuncs.push(() => {
-      this.silhouette?.entity.dispose();
+      for (const entry of this.silhouettes.values()) {
+        buildQueue.remove(entry.job);
+        entry.entity.dispose();
+      }
       this.cardEntity.dispose();
       this.barEntity.dispose();
       this.debug?.dispose();
@@ -895,8 +914,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     const puzzle = getPuzzle(id);
     this.showCardFor(puzzle);
     this.setMessage('');
-    this.silhouette?.entity.dispose();
-    this.silhouette = null;
+    this.parkSilhouette();
     this.join?.setSilhouette(null);
     this.lastComparison = null;
     setNextAvailable(this.bar, false);
@@ -965,14 +983,27 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.lastState = null;
 
     // The silhouette (target outline): the target's headers, one empty row and the row count, in the result slot.
-    this.silhouette?.entity.dispose();
-    const doc = buildSilhouette(this.puzzle, this.target);
+    // Built ahead (prefetchNeighbors), or now: only its header and one row, so it's quick.
+    this.parkSilhouette();
+    const buildStart = performance.now();
+    const entry = this.silhouetteFor(this.puzzle, this.target, true);
+    const prebuilt = entry.build.done;
+    if (!prebuilt) {
+      entry.build.step(Infinity);
+      buildQueue.remove(entry.job);
+    }
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(
+        `perf: target outline for ${id} ${prebuilt ? 'prebuilt (cached)' : `built now in ${(performance.now() - buildStart).toFixed(1)} ms`}`,
+      );
+    }
+    const doc = entry.doc;
     // It appears with the card: hidden until placed (after a switch the card
     // is faded out too), then they fade in together.
-    doc.fade.value = Math.min(doc.fade.peek(), this.card.fade.peek());
+    doc.fade.value = Math.min(1, this.card.fade.peek());
+    doc.document.visible = true;
     this.revealFrames = REVEAL_DELAY_FRAMES;
-    const entity = this.world.createTransformEntity(doc.document);
-    this.silhouette = { doc, entity };
+    this.silhouette = entry;
     // Its height as shown: one row (the rest are hidden; they only size the columns).
     join.setSilhouette({ object: doc.document, widthMeters: doc.widthMeters, heightMeters: doc.heightForRowsMeters(1) });
 
@@ -1021,6 +1052,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     this.save();
     this.updateNextLook();
+    this.prefetchNeighbors();
     if (import.meta.env.DEV && this.debug) {
       this.debug.note(
         `puzzle ${PRACTICE_ORDER.indexOf(id) + 1} (${id}) loaded on ${this.puzzle.datasetId}` +
@@ -1071,6 +1103,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         : markDailySolved(this.progress, this.today);
     }
     this.save();
+    // The next puzzle may have just unlocked: build it ahead.
+    this.prefetchNeighbors();
     this.introShown = false;
     this.introLines = [];
     this.messageFlashUntil = 0;
@@ -1637,6 +1671,70 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.dips.dip(barButtonContainer(this.bar, button, index), this.clock);
   }
 
+  // --- Target outlines, cached -------------------------------------------------------------
+
+  /** `puzzle`'s target outline: kept, or started now (hidden, parked; built in the background unless `urgent`). */
+  private silhouetteFor(puzzle: Puzzle, target: QueryOutput, urgent = false): Silhouette {
+    const cached = this.silhouettes.get(puzzle.id);
+    if (cached) {
+      return cached;
+    }
+    const build = startSilhouetteBuild(puzzle, target);
+    build.doc.fade.value = 0;
+    build.doc.document.visible = false;
+    build.doc.document.position.set(0, PARKED_Y, 0);
+    const entity = this.world.createTransformEntity(build.doc.document);
+    const job: BuildJob = { name: `target outline ${puzzle.id}`, step: (deadline) => build.step(deadline) };
+    const entry: Silhouette = { doc: build.doc, entity, build, job };
+    this.silhouettes.set(puzzle.id, entry);
+    if (!build.done) {
+      buildQueue.add(job, urgent);
+    }
+    return entry;
+  }
+
+  /** The outline on the desk leaves it (hidden; kept if it's a neighbor, see `prefetchNeighbors`). */
+  private parkSilhouette(): void {
+    const entry = this.silhouette;
+    if (!entry) {
+      return;
+    }
+    entry.doc.fade.value = 0;
+    entry.doc.document.visible = false;
+    this.silhouette = null;
+  }
+
+  /**
+   * Builds ahead, in the background, what the previous and the next puzzle
+   * need -- their target outlines, and their datasets' tables and result
+   * slabs (desk placement and the join system keep those) -- and lets go of
+   * everything else: the current puzzle and its neighbors stay cached.
+   */
+  private prefetchNeighbors(): void {
+    if (!this.puzzle) {
+      return;
+    }
+    const ids = [this.puzzle.id, this.prevId(), nextPuzzle(this.progress, this.puzzle.id, PLAYABLE)].filter(
+      (id): id is PuzzleId => id !== null,
+    );
+    for (const [id, entry] of this.silhouettes) {
+      if (!ids.includes(id) && entry !== this.silhouette) {
+        buildQueue.remove(entry.job);
+        entry.entity.dispose();
+        this.silhouettes.delete(id);
+      }
+    }
+    for (const id of ids) {
+      const puzzle = getPuzzle(id);
+      this.silhouetteFor(puzzle, puzzleTarget(puzzle));
+    }
+    const datasets = [...new Set(ids.map((id) => getPuzzle(id).datasetId))];
+    keepDatasets(datasets);
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`cache: puzzles ${ids.join(', ')}; datasets ${datasets.join(', ')} (built ahead in the background)`);
+    }
+  }
+
   private lastPinchDistance = Infinity;
 
   /**
@@ -1698,7 +1796,15 @@ function diffSummary(comparison: Comparison): string {
  * Its columns are sized from every target row (as the result's will be), but
  * only the first row shows, as an empty outline.
  */
-function buildSilhouette(puzzle: Puzzle, target: QueryOutput): TableSlabDocument {
+/** One cached target outline: its document, entity, and background build. */
+type Silhouette = { doc: TableSlabDocument; entity: Entity; build: SlabBuild; job: BuildJob };
+
+/**
+ * The target outline's build: its headers, one empty row and the row count.
+ * Only that row is built; the columns still fit every target row (the
+ * other rows only sized them, and building them cost up to 75 ms on the Quest).
+ */
+function startSilhouetteBuild(puzzle: Puzzle, target: QueryOutput): SlabBuild {
   const visible = visibleRowIndices(target);
   const columns = target.result.table.columns;
   const rows = visible.map((row) => target.result.table.rows[row]);
@@ -1712,9 +1818,9 @@ function buildSilhouette(puzzle: Puzzle, target: QueryOutput): TableSlabDocument
     rows,
   };
   const label = TARGET_OUTLINE.answerRows(visible.length);
-  return buildTableSlabDocument(table, {
+  return startTableSlabBuild({ ...table, rows: rows.slice(0, 1) }, {
     maxRows: MAX_RESULT_ROWS,
-    hiddenRows: new Set(rows.map((_, index) => index).filter((index) => index > 0)),
+    sizeRows: rows.slice(0, MAX_RESULT_ROWS),
     caption: { lines: [label], fitLines: [label] },
     anchorTop: true,
     text: slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS),
