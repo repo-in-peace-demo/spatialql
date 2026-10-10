@@ -31,26 +31,27 @@ import {
 import { CHALLENGE_MODE } from './challenge-mode.js';
 import { challengeStart, PLAYABLE, publishProgress, takePickedPuzzle } from './challenge-start.js';
 import {
+  type BarButton,
+  barButtonContainer,
+  type BarButtonTarget,
   buildPuzzleBar,
   buildPuzzleCard,
   MAX_FILTER_CHIPS,
+  type PickerTileView,
+  type PuzzleBarView,
+  type PuzzleCardView,
+  setArcLean,
   setBarContents,
+  setBarHover,
   setCardIntro,
   setCardTheme,
   setCardWin,
   setHintLabel,
-  setNextLabel,
   setNextAvailable,
+  setNextLabel,
   setNextWaiting,
   setPrevAvailable,
-  setArcLean,
-  setBarHover,
   setRecenterHover,
-  type BarButton,
-  type PickerTileView,
-  type BarButtonTarget,
-  type PuzzleBarView,
-  type PuzzleCardView,
 } from './challenge-view.js';
 import { compareToTarget, fanOutGroups, type Comparison } from './data/compare.js';
 import { BAR, CARD, COMPLETE, CONCEPT_INTROS, NULL_EXPLAINER, TARGET_OUTLINE, WELCOME } from './data/copy.js';
@@ -118,14 +119,20 @@ import {
   type JoinControls,
   type NullFilterChoice,
 } from './join-bridge.js';
+import { PressDips } from './press-dip.js';
 import { sounds } from './sound.js';
 import { isTouchPointerClick, setRect, touchProbe, type PressPath } from './touch-probe.js';
 import {
+  approachAngleDeg,
   BUTTON_PINCH_BACK_DEPTH_METERS,
   BUTTON_PINCH_FRONT_DEPTH_METERS,
+  CONTACT_DEPTH_METERS,
   ContactPoke,
+  MAX_POKE_APPROACH_DEG,
   MIN_INDEX_STRAIGHTNESS,
+  POKE_HOVER_DEPTH_METERS,
   POKE_TARGET_TOLERANCE_METERS,
+  pokeMissText,
 } from './contact-poke.js';
 import { indexStraightness, readJointsPoint } from './pinch.js';
 import { HINT_PRESS_GAP_SECONDS, HintGate, SHOW_ANSWER_HOLD_SECONDS } from './hint-gate.js';
@@ -240,6 +247,12 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private readonly barPoke = new ContactPoke();
   private _pokeSource: XRInputSource | null = null;
   private pokedTarget: BarButtonTarget | null = null;
+  /** Press feedback: the pressed button dips (press-dip.ts). */
+  private readonly dips = new PressDips();
+  /** Hover: the button a fingertip is just in front of (-1: none), the hand pointer's (from the join system), and the one shown. */
+  private fingerHover = -1;
+  private pointerHover = -1;
+  private shownHover = -1;
   private readonly _straightA = new Vector3();
   private readonly _straightB = new Vector3();
   /** Contact-poke hit test on the bar's shown buttons (the poke asks only at a contact). */
@@ -349,7 +362,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         onRecenterHover: (hovered) => setRecenterHover(this.bar.recenter, hovered),
         onExitHover: (hovered) => setRecenterHover(this.bar.exit, hovered),
         onArcLean: (leanRad) => setArcLean(this.bar, leanRad),
-        onPointerHover: (index, previous) => setBarHover(this.bar, index, previous),
+        onPointerHover: (index) => {
+          this.pointerHover = index;
+          this.applyBarHover();
+        },
       },
     };
     this.join.setChallengeLayout(this.layout);
@@ -437,6 +453,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       return;
     }
     this.clock += delta;
+    this.dips.update(this.clock);
     this.updateFade(delta);
     // The streak explanation counts as given once it's on the card in a session (not on the flat page).
     if (this.streakExplainShowing && this.world.visibilityState.peek() !== VisibilityState.NonImmersive) {
@@ -558,8 +575,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (bar.fade.peek() < 0.5 || this.pending) {
       this.barPoke.reset('left');
       this.barPoke.reset('right');
+      this.fingerHover = -1;
+      this.applyBarHover();
       return;
     }
+    let fingerHover = -1;
     bar.document.updateWorldMatrix(true, false);
     for (const hand of HANDS) {
       const source = this.input.xr.getPrimaryInputSource(hand);
@@ -579,6 +599,17 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       unrollArc(this._local, BAND_ARC_RADIUS_METERS, this.bar.leanRad);
       const verdict = this.barPoke.update(hand, this._local, this.pokeOnBar, this.pokeStraightness);
       const target = this.pokedTarget;
+      if (import.meta.env.DEV && this.debug) {
+        const miss = this.barPoke.takeMiss(hand);
+        if (miss) {
+          this.debug.note(`${hand} fingertip on the puzzle bar, no press: ${pokeMissText(miss)}`);
+        }
+      }
+      // Hover: the fingertip just in front of a button (the hand pointer's outline).
+      if (fingerHover < 0 && this._local.z <= POKE_HOVER_DEPTH_METERS && this._local.z >= -CONTACT_DEPTH_METERS && this.pokeOnBar()) {
+        fingerHover = this.pokedTarget ? bar.buttons.indexOf(this.pokedTarget) : -1;
+        this.pokedTarget = target;
+      }
       if (verdict === 'press' && target) {
         this.press(target.name, 'poke', target.chip);
       } else if (verdict !== 'none' && verdict !== 'press' && import.meta.env.DEV && this.debug) {
@@ -588,12 +619,14 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         this.debug.note(
           verdict === 'rejected-direction'
             ? `${hand} fingertip contact on ${name} rejected: it came in along the face (${cm(toward)} ` +
-                `toward it, ${cm(sideways)} sideways; needs at least as much toward the face as sideways)`
+                `toward it, ${cm(sideways)} sideways: ${approachAngleDeg(toward, sideways).toFixed(0)}° off straight, max ${MAX_POKE_APPROACH_DEG}°)`
             : `${hand} fingertip contact on ${name} rejected: index finger not extended (straightness ` +
                 `${straightness === null ? 'n/a' : straightness.toFixed(2)}, needs ${MIN_INDEX_STRAIGHTNESS})`,
         );
       }
     }
+    this.fingerHover = fingerHover;
+    this.applyBarHover();
   }
 
   /**
@@ -1383,6 +1416,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.barKey = key;
     // The bar resizes to its buttons; re-place it so it stays clear of the control.
     setBarContents(this.bar, { where, filter: this.filterChoices.length > 0, chips, picker });
+    // Its outlines were reset: the hover is drawn again for the new buttons.
+    this.shownHover = -1;
+    this.fingerHover = -1;
+    this.applyBarHover();
     this.layout.bar.extendLeftMeters = this.bar.extendLeftMeters;
     this.layout.bar.widthMeters = this.bar.widthMeters;
     this.layout.bar.heightMeters = this.bar.heightMeters;
@@ -1429,9 +1466,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     // Next on the last puzzle with every puzzle done: Finish, then Today or Done.
     const finish = button === 'next' ? this.finishAction() : null;
     if (finish) {
-      this.bar.document.updateWorldMatrix(true, false);
-      this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
-      sounds.playClick(this._point);
+      this.clickAndDip(button, chip);
       this.pressFinish(finish);
       return;
     }
@@ -1468,9 +1503,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         return;
       }
     }
-    this.bar.document.updateWorldMatrix(true, false);
-    this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
-    sounds.playClick(this._point);
+    this.clickAndDip(button, chip);
     if (button === 'prev') {
       this.prev();
     } else if (button === 'recenter') {
@@ -1561,9 +1594,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         return;
       }
     }
-    this.bar.document.updateWorldMatrix(true, false);
-    this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
-    sounds.playClick(this._point);
+    this.clickAndDip(button, index);
     if (button !== 'tile') {
       if (import.meta.env.DEV && this.debug) {
         this.debug.note(`picker ${button === 'puzzles' && !this.pickerOpen ? 'opened' : 'closed'} (${button}, ${path})`);
@@ -1587,6 +1618,23 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     this.join?.resetToHome();
     this.loadPuzzle(id);
+  }
+
+  /** The column's hover: a fingertip just in front of a button wins over the hand pointer; drawn only on a change. */
+  private applyBarHover(): void {
+    const hover = this.fingerHover >= 0 ? this.fingerHover : this.pointerHover;
+    if (hover !== this.shownHover) {
+      setBarHover(this.bar, hover, this.shownHover);
+      this.shownHover = hover;
+    }
+  }
+
+  /** A press felt: the click, and the pressed button dips (press-dip.ts). */
+  private clickAndDip(button: BarButton, index: number): void {
+    this.bar.document.updateWorldMatrix(true, false);
+    this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
+    sounds.playClick(this._point);
+    this.dips.dip(barButtonContainer(this.bar, button, index), this.clock);
   }
 
   private lastPinchDistance = Infinity;

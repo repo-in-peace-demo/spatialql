@@ -132,11 +132,16 @@ import {
   type PressBlock,
 } from './hand-pointer-math.js';
 import {
+  approachAngleDeg,
   BUTTON_PINCH_BACK_DEPTH_METERS,
   BUTTON_PINCH_FRONT_DEPTH_METERS,
+  CONTACT_DEPTH_METERS,
   ContactPoke,
+  MAX_POKE_APPROACH_DEG,
   MIN_INDEX_STRAIGHTNESS,
+  POKE_HOVER_DEPTH_METERS,
   POKE_TARGET_TOLERANCE_METERS,
+  pokeMissText,
   type PokeVerdict,
 } from './contact-poke.js';
 import { indexStraightness, readJointsPoint, readTargetRay, readWristPoint } from './pinch.js';
@@ -163,6 +168,7 @@ import {
   type JoinTypeControlView,
   type TableSlabDocument,
 } from './table-slab-view.js';
+import { PressDips } from './press-dip.js';
 import { sounds } from './sound.js';
 import {
   BOUNCE_FIRST_IMPACT,
@@ -417,8 +423,7 @@ const THUMB_TIP: readonly XRHandJoint[] = ['thumb-tip'];
  */
 const EMULATED_HANDS =
   import.meta.env.DEV && typeof location !== 'undefined' && (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
-/** A fingertip this close in front of a NULL cell hovers it (its outline strengthens)... */
-const NULL_HOVER_DEPTH_METERS = 0.04;
+/** A fingertip within POKE_HOVER_DEPTH_METERS in front of a NULL cell hovers it (its outline strengthens), as every poke target... */
 /** ...or up to this far behind its face (pressing into it). */
 const CONTACT_HOVER_BEHIND_METERS = 0.01;
 /** The first-time cue: the NULL cells' outlines stay strong this long, then settle. */
@@ -730,6 +735,10 @@ export class JoinSystem
   /** Contact pokes (contact-poke.ts) on the NULL cells and on the control's options. */
   private readonly nullPoke = new ContactPoke();
   private readonly controlPoke = new ContactPoke();
+  /** The INNER | LEFT option a fingertip is just in front of (its hover), or null. */
+  private controlFingerOption: JoinType | null = null;
+  /** Press feedback: the pressed option or NULL cell dips (press-dip.ts). */
+  private readonly dips = new PressDips();
   /** The input source whose fingertip is being tested (for the index-straightness check). */
   private _pokeSource: XRInputSource | null = null;
   private readonly _pokeLocal = new Vector3();
@@ -1136,6 +1145,7 @@ export class JoinSystem
 
   update(delta: number): void {
     this.tweens.update(delta);
+    this.dips.update(this.tweens.now);
     this.updateDock(delta);
     this.updateGlides(delta);
     sounds.update();
@@ -1306,6 +1316,7 @@ export class JoinSystem
       if (this.recenterPoke.update(hand, this._pokeLocal, this.pokeOnFreeBar, this.pokeStraightness) === 'press') {
         this.pressRecenter('poke');
       }
+      this.notePokeMiss(hand, 'the Recenter bar', this.recenterPoke);
     }
   }
 
@@ -1373,7 +1384,7 @@ export class JoinSystem
         unrollArc(this._rayLocal, BAND_ARC_RADIUS_METERS, this.bandLean);
         if (
           this._rayLocal.z >= -CONTACT_HOVER_BEHIND_METERS &&
-          this._rayLocal.z <= NULL_HOVER_DEPTH_METERS &&
+          this._rayLocal.z <= POKE_HOVER_DEPTH_METERS &&
           onButton(this._rayLocal, button, bar.buttonHeightMeters)
         ) {
           return true;
@@ -1815,11 +1826,12 @@ export class JoinSystem
         } else if (verdict !== 'none' && import.meta.env.DEV && this.debug) {
           this.notePokeRejected(hand, 'a NULL cell', verdict, this.nullPoke);
         }
+        this.notePokeMiss(hand, 'the result', this.nullPoke);
         // Hover: the fingertip just in front of a NULL cell.
         if (
           hoverRow < 0 &&
           this._a.z >= -CONTACT_HOVER_BEHIND_METERS &&
-          this._a.z <= NULL_HOVER_DEPTH_METERS &&
+          this._a.z <= POKE_HOVER_DEPTH_METERS &&
           this.nearestNullCell(view, this._pokeTip) &&
           this._nullHit.distance <= POKE_TARGET_TOLERANCE_METERS
         ) {
@@ -1928,9 +1940,11 @@ export class JoinSystem
     if (this.state.phase !== 'joined' || !control.document.visible || control.fade.peek() < 0.5) {
       this.controlPoke.reset('left');
       this.controlPoke.reset('right');
+      this.controlFingerOption = null;
       return;
     }
     control.document.updateWorldMatrix(true, false);
+    let fingerOption: JoinType | null = null;
     for (const hand of HANDS) {
       const source = this.input.xr.getPrimaryInputSource(hand);
       // A hand holding a slab doesn't poke the side column (the arm passes it on the way to the right slab).
@@ -1947,7 +1961,18 @@ export class JoinSystem
       } else if (verdict !== 'none' && import.meta.env.DEV && this.debug) {
         this.notePokeRejected(hand, `the ${this.pokedOption.toUpperCase()} option`, verdict, this.controlPoke);
       }
+      this.notePokeMiss(hand, 'the INNER | LEFT control', this.controlPoke);
+      // Hover: the fingertip just in front of an option (the hand pointer's outline).
+      if (
+        !fingerOption &&
+        this._pokeLocal.z <= POKE_HOVER_DEPTH_METERS &&
+        this._pokeLocal.z >= -CONTACT_DEPTH_METERS &&
+        this.pokeOnControl()
+      ) {
+        fingerOption = this.pokedOption;
+      }
     }
+    this.controlFingerOption = fingerOption;
   }
 
   /** The option a control poke landed on (set by `pokeOnControl`). */
@@ -1968,6 +1993,17 @@ export class JoinSystem
     this.requestJoinType(joinType);
   }
 
+  /** Dev only: a contact on `surface` that didn't press, once the fingertip is back out (why, its angle, how deep it went). */
+  private notePokeMiss(hand: string, surface: string, poke: ContactPoke): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    const miss = poke.takeMiss(hand);
+    if (miss) {
+      this.debug.note(`${hand} fingertip on ${surface}, no press: ${pokeMissText(miss)}`);
+    }
+  }
+
   /** Dev only: why a contact poke didn't count. */
   private notePokeRejected(hand: string, target: string, verdict: PokeVerdict, poke: ContactPoke): void {
     if (!import.meta.env.DEV || !this.debug) {
@@ -1977,7 +2013,7 @@ export class JoinSystem
     this.debug.note(
       verdict === 'rejected-direction'
         ? `${hand} fingertip contact on ${target} rejected: it came in along the face (${cm(toward)} toward it, ` +
-            `${cm(sideways)} sideways; needs at least as much toward the face as sideways)`
+            `${cm(sideways)} sideways: ${approachAngleDeg(toward, sideways).toFixed(0)}° off straight, max ${MAX_POKE_APPROACH_DEG}°)`
         : `${hand} fingertip contact on ${target} rejected: index finger not extended (straightness ` +
             `${straightness === null ? 'n/a' : straightness.toFixed(2)}, needs ${MIN_INDEX_STRAIGHTNESS})`,
     );
@@ -2155,6 +2191,7 @@ export class JoinSystem
   /** The single entry point for changing the join type, whatever the input. */
   requestJoinType(joinType: JoinType): void {
     this.clickControl();
+    this.dips.dip(joinType === 'inner' ? this.control.inner : this.control.left, this.tweens.now);
     this.applyTransition({ type: 'setJoinType', joinType });
   }
 
@@ -3032,6 +3069,7 @@ export class JoinSystem
     view.object.updateWorldMatrix(true, false);
     view.object.localToWorld(this._a);
     sounds.playClick(this._a);
+    this.dips.dip(view.doc.rowViews.get(row)?.nullOutlines?.get(column) ?? null, this.tweens.now);
     if (import.meta.env.DEV && this.debug) {
       this.debug.note(`NULL cell poked: row ${row}, ${view.result.columns[column].label} (${filter.tableId}.${filter.column})`);
     }
@@ -5209,6 +5247,8 @@ export class JoinSystem
       }
     }
     const hover = this.pointerHover;
+    // A fingertip just in front of an option hovers it too (updateControlPoke).
+    option ??= this.controlFingerOption;
     if (option !== hover.option) {
       setTargetHover(this.control.inner, option === 'inner');
       setTargetHover(this.control.left, option === 'left');

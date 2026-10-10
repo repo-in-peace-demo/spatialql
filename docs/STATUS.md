@@ -174,6 +174,15 @@ Since phase 4:
 
 **Built, not committed:**
 
+- **Pokes:** every poke target (column buttons, chips, picker tiles, INNER | LEFT,
+  NULL cells, free play's Recenter) takes approaches up to 60° off straight at
+  the face (was 45°: the 2026-10-10 tile and chip pokes came in at 47-58° and
+  were rejected, so the finger went through; slides along the face, 61-77° in
+  the logs, are still rejected). Presses still fire 1.0 cm in front of the
+  face. A fingertip within 3 cm in front of a target highlights it (the pointer's
+  outline), and a press dips the target with the click. Misses are logged with
+  their angle and how deep the fingertip went.
+
 - **In-XR puzzle picker:** a Puzzles button in the column (right above INNER |
   LEFT, in both modes) opens a 4 x 5 grid of puzzles 1-20 in the column's place
   (the welcome grid's status marks: solved, with answer, locked, Today; the

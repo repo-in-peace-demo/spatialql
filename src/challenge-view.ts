@@ -1108,9 +1108,12 @@ export function setNextWaiting(bar: PuzzleBarView): void {
 /** The container of a shown bar target (`bar.buttons[index]`), or null. */
 function barTargetContainer(bar: PuzzleBarView, index: number): Container | null {
   const target = bar.buttons[index];
-  if (!target) {
-    return null;
-  }
+  return target ? barButtonContainer(bar, target.name, target.chip) : null;
+}
+
+/** A bar button's container by name (`index`: which chip or tile), for press feedback. */
+export function barButtonContainer(bar: PuzzleBarView, name: BarButton, index: number): Container | null {
+  const target = { name, chip: index };
   switch (target.name) {
     case 'prev':
       return bar.prev;

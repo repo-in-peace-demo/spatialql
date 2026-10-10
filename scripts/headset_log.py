@@ -33,6 +33,7 @@ import argparse
 import glob
 import json
 import os
+import math
 import re
 import statistics
 import sys
@@ -353,6 +354,51 @@ def cmd_reach(files: list[str]) -> None:
                 last = line.split(' ', 2)[2]
 
 
+POKE_PRESS_RE = re.compile(
+    r'poke press on (?P<target>.+?) \((?P<hand>left|right) hand\): approached (?P<toward>[\d.]+) cm toward the face at '
+    r'(?P<speed>[\d.]+) cm/s, (?P<side>[\d.]+) cm sideways; contact (?P<depth>-?[\d.]+) cm (?P<where>in front of|behind) it'
+)
+POKE_REJECT_RE = re.compile(
+    r'(?P<hand>left|right) fingertip contact on (?P<target>.+?) rejected: (?:it came in along the face \((?P<toward>[\d.]+) cm '
+    r'toward it, (?P<side>[\d.]+) cm sideways|index finger not extended \(straightness (?P<straight>[\d.na/]+))'
+)
+POKE_NOPRESS_RE = re.compile(r'(?P<hand>left|right) fingertip poke on (?P<surface>.+?): (?P<target>.+?) (?P<off>[\d.]+) cm away in plane -> no press')
+
+
+def cmd_pokes(files: list[str], target: str | None) -> None:
+    """Every fingertip poke attempt: pressed (approach, contact depth), rejected (which rule), or no press (no contact on a target).
+
+    The approach angle is atan(sideways / toward): 0 = straight at the face; the rule needs <= 45 deg."""
+    rx = re.compile(target, re.I) if target else None
+    print(f"{'file':15} {'time':12} {'h':1} {'target':12} {'outcome':10} {'toward':>6} {'side':>5} {'angle':>5} {'depth':>6} {'cm/s':>5}")
+    for path in files:
+        for e in read_log(path):
+            row = None
+            m = POKE_PRESS_RE.search(e.text)
+            if m:
+                toward, side = float(m['toward']), float(m['side'])
+                depth = float(m['depth']) * (1 if m['where'] == 'in front of' else -1)
+                row = (m['hand'], m['target'], 'pressed', toward, side, depth, float(m['speed']))
+            m = m or POKE_REJECT_RE.search(e.text)
+            if not row and m and m.re is POKE_REJECT_RE:
+                if m['toward']:
+                    row = (m['hand'], m['target'], 'rej: dir', float(m['toward']), float(m['side']), None, None)
+                else:
+                    row = (m['hand'], m['target'], 'rej: finger', None, None, None, None)
+            if not row:
+                m = POKE_NOPRESS_RE.search(e.text)
+                if m:
+                    row = (m['hand'], m['target'], 'no press', None, None, None, None)
+            if not row or (rx and not rx.search(row[1])):
+                continue
+            hand, name, outcome, toward, side, depth, speed = row
+            angle = math.degrees(math.atan2(side, toward)) if toward is not None and side is not None else None
+            print(
+                f'{short(path):15} {e.clock:12} {hand[0]} {name:12} {outcome:10} {fmt(toward):>6} {fmt(side):>5} '
+                f"{('%.0f' % angle) if angle is not None else '-':>5} {fmt(depth):>6} {fmt(speed):>5}"
+            )
+
+
 # --- Output ----------------------------------------------------------------------------
 
 
@@ -433,7 +479,7 @@ def cmd_context(path: str, at: str, before: float, after: float, grep: str | Non
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('command', choices=['pinches', 'presses', 'summary', 'layout', 'recenter', 'context', 'reach'])
+    ap.add_argument('command', choices=['pinches', 'presses', 'summary', 'layout', 'recenter', 'context', 'reach', 'pokes'])
     ap.add_argument('files', nargs='*')
     ap.add_argument('--latest', type=int, help='the newest N headset logs (default 1 when no files are given)')
     ap.add_argument('--hand', choices=HANDS)
@@ -479,6 +525,10 @@ def main(argv: list[str]) -> int:
             print_pinches(rows)
         else:
             print_summary(rows)
+        return 0
+
+    if args.command == 'pokes':
+        cmd_pokes(files, args.target)
         return 0
 
     if args.command == 'presses':
