@@ -252,6 +252,9 @@ export const CARD = {
   completedHeadline: 'Completed',
   /** The title row's right-hand slot after "Show answer". */
   usedAllHints: 'You used all 3 hints.',
+  /** The daily win card's streak line on the day a milestone is reached; null on other days. */
+  streakMilestone: (days: number): string | null =>
+    days === 3 ? '3-day streak!' : days === 7 ? '7 days: a full week!' : days === 14 ? '14 days: two weeks strong!' : days === 30 ? '30-day streak!' : null,
   /** A daily completed after "Show answer": why the streak didn't grow. */
   streakNeedsSolve: 'Streak needs a solve without the answer.',
   /** A locked tile in the in-XR picker pressed (briefly, in the status line). */
@@ -309,8 +312,11 @@ export const COMPLETE = {
   summary: (solved: number, revealed: number) => `Solved: ${solved}. With the answer: ${revealed}.`,
   /** ...and when none were. */
   allSolved: 'All solved yourself!',
-  /** What's next, once today's daily is done. */
-  comeBackTomorrow: 'Come back tomorrow for a new daily puzzle.',
+  /**
+   * What's next, once today's daily is done. Every puzzle is done by now, and
+   * the daily cycles through them, so tomorrow's isn't new: the streak is the reason.
+   */
+  comeBackTomorrow: 'Come back tomorrow to keep your streak going.',
   /** What's next while today's daily is open (Next says "Today"). */
   dailyOpen: "Today's puzzle is still open.",
   /** The result slab's badge. */
@@ -359,6 +365,8 @@ export const BAR = {
   filterBack: 'Back',
   /** One chip: the column's header as the result slab shows it. */
   filterChip: (header: string) => `${header} is NULL`,
+  /** More than 4 chips: they go on pages of 3; this turns the page (`page` of `pages`, 1-based). */
+  filterMore: (page: number, pages: number) => `More (${page}/${pages})`,
   /** Opens (and closes) the in-XR puzzle picker: a grid of puzzles 1-20 in the column. */
   puzzles: 'Puzzles',
   /** On top of the open picker: closes it without switching. */
@@ -392,20 +400,14 @@ export const DIFF = {
 
 export const WELCOME = {
   title: 'SpatialQL',
+  /** The tagline, under the title. */
   description: 'Join two tables with your hands.',
-  descriptionPuzzles: 'A new SQL puzzle every day.',
-  descriptionFreePlay: 'Free play: no puzzles, just tables.',
-  /** Always shown, below the description. */
+  /** For screen readers: the row of dataset icons under the tagline. */
+  datasetsLabel: `Datasets: ${Object.values(DATASET_TITLES).join(', ')}`,
+  /** Always shown, above Start. */
   setup: 'Sit at a desk. No controllers needed.',
   /** The Enter XR button. */
   start: 'Start',
-  /** The Enter XR button in free play. */
-  startFreePlay: 'Start free play',
-  /** Free play only: shown prominently under the title. */
-  freePlayHeading: 'Free play',
-  freePlay: 'Free play',
-  /** In free play: back to challenge mode. */
-  puzzles: 'Puzzles',
   /** Before the daily is offered (practice 1-3 not all solved). */
   practiceFirst: 'Start with 3 short practice puzzles.',
   practiceProgress: (solved: number, total: number) => `Practice ${solved}/${total}`,
@@ -419,8 +421,29 @@ export const WELCOME = {
   dailyRevealed: "Today's puzzle: done with the answer.",
   dailyOpen: (dataset: DatasetId) => `Today's puzzle: ${DATASET_TITLES[dataset]}`,
   dailyDone: "Today's puzzle: solved. New one tomorrow.",
+  /** ...once all 20 are done: tomorrow's daily is one of them again, not a new one. */
+  dailyDoneAllDone: "Today's puzzle: solved. Come back tomorrow.",
   streak: (days: number) => (days === 1 ? 'Streak: 1 day' : `Streak: ${days} days`),
   streakAtRisk: 'Solve today to keep it.',
+  /** No streak yet, today's daily open: under the calendar's flame (grey). */
+  streakStart: "Solve today's puzzle to start your streak.",
+  /** No streak yet, the daily not offered (practice 1-3 first). */
+  streakAfterPractice: 'Then a daily puzzle builds your streak.',
+  /** The calendar's weekday initials, Monday first. */
+  weekdays: ['M', 'T', 'W', 'T', 'F', 'S', 'S'] as const,
+  /** The calendar's header: English month names (plain ASCII, like the rest of the copy). */
+  monthNames: [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ] as const,
+  /** `month`: 1-12. */
+  monthTitle: (year: number, month: number) => `${WELCOME.monthNames[month - 1]} ${year}`,
+  /** For screen readers: the arrows beside the month. */
+  previousMonth: 'Previous month',
+  nextMonth: 'Next month',
+  /** For screen readers: the calendar as a whole. */
+  calendarLabel: (title: string, solved: number, revealed: number) =>
+    `Daily puzzles in ${title}: ${solved} solved, ${revealed} with the answer`,
   saveUnavailable: "Progress can't be saved in this browser.",
   /** Opens the puzzle picker (a grid of 1-20) in place of the progress lines. */
   choosePuzzle: 'Choose puzzle',
@@ -428,6 +451,12 @@ export const WELCOME = {
   pickerBack: 'Back',
   /** Under today's daily's number in the picker. */
   pickerToday: 'Today',
+  /** For screen readers: the picker grid, and each tile. */
+  pickerLabel: 'Puzzles 1 to 20',
+  tileLabel: (number: number, status: 'solved' | 'revealed' | 'open' | 'locked', today: boolean) =>
+    `Puzzle ${number}${today ? ", today's puzzle" : ''}${
+      status === 'solved' ? ', solved' : status === 'revealed' ? ', done with the answer' : status === 'locked' ? ', locked' : ''
+    }`,
   /** The Start button once a puzzle is picked. */
   startPuzzle: (number: number) => `Start puzzle ${number}`,
   /**
@@ -438,4 +467,30 @@ export const WELCOME = {
   resetQuestion: "Reset all puzzles and your streak? This can't be undone.",
   resetCancel: 'Cancel',
   resetConfirm: 'Reset',
+};
+
+/**
+ * The browser-support notices (xr-support.ts): a full page where immersive
+ * AR is missing, a small note where it works outside the Quest Browser.
+ */
+export const BROWSER_NOTICE = {
+  unsupportedLead: 'SpatialQL is a mixed-reality app.',
+  unsupportedBody: 'Open this link in the Meta Quest Browser to try it.',
+  questNote: 'Best on Meta Quest Browser',
+  dismiss: 'Dismiss',
+};
+
+/**
+ * DORMANT: free play (the tables with no puzzle) is removed from the product
+ * for now (no button; production ignores ?mode=free). Its code stays in
+ * place, reachable in dev only with ?mode=free, and these are its strings,
+ * kept for when it returns (unlocked after puzzles 1-3, with a guide card
+ * and a dataset switcher; see docs/STATUS.md, Future).
+ */
+export const FREE_PLAY_DORMANT = {
+  heading: 'Free play',
+  description: 'Free play: no puzzles, just tables.',
+  start: 'Start free play',
+  /** Back to the puzzles. */
+  puzzles: 'Puzzles',
 };

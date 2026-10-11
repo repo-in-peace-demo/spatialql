@@ -1,0 +1,568 @@
+/*
+ * The welcome page (an HTML overlay over the canvas, shown outside XR) and
+ * the browser-support notices (xr-support.ts): one look, sized for the
+ * Quest Browser's default window (1280 x 670 CSS px) and scaled up to 1.3x
+ * on larger ones (--u: 1px at the Quest default). Short, wide windows (the
+ * Quest default) lay it out in two columns; taller ones in one.
+ *
+ * Contrast (WCAG AA): ink on the card 15.4:1, muted text 8.6:1, white on
+ * the Start indigo 7.5:1, indigo secondary buttons 6.8:1; day outlines
+ * 3.3:1 and today's ring 3.8:1 (non-text, 3:1).
+ */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/inter-latin-var.woff2') format('woff2');
+}
+
+.wl-root,
+.wl-note {
+  /* One column (taller windows) needs about 880 px of height at 1x: scale by that, too. */
+  --u: clamp(1px, min(100vw / 1280, (100vh - 40px) / 880), 1.3px);
+  --wl-ink: #1c1c1c;
+  --wl-muted: #4a4538;
+  --wl-card: #f5f3ef;
+  --wl-accent: #3b4f9c;
+  --wl-accent-soft: #cdd3ee;
+  --wl-flame: #c4600f;
+  --wl-line: #8c8476;
+  --wl-faint: #0000001a;
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color: var(--wl-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+.wl-root {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: calc(16 * var(--u));
+  box-sizing: border-box;
+  background:
+    radial-gradient(60vmax 50vmax at 8% 10%, #3b4f9c88, transparent 60%),
+    radial-gradient(55vmax 45vmax at 95% 12%, #7a3e8f77, transparent 60%),
+    radial-gradient(55vmax 45vmax at 10% 95%, #1f6f7877, transparent 60%),
+    radial-gradient(50vmax 40vmax at 92% 92%, #8a5a2b77, transparent 60%),
+    #10131f;
+}
+
+/* `hidden` wins over the display each class sets. */
+.wl-root[hidden],
+.wl-root [hidden],
+.wl-note [hidden] {
+  display: none !important;
+}
+
+.wl-root *,
+.wl-note * {
+  box-sizing: border-box;
+}
+
+.wl-icon,
+.wl-icon * {
+  fill: currentColor;
+  stroke: none;
+}
+
+.wl-card {
+  background: var(--wl-card);
+  border-radius: calc(28 * var(--u));
+  box-shadow: 0 calc(24 * var(--u)) calc(64 * var(--u)) #0008;
+  width: min(100%, calc(560 * var(--u)), 760px);
+  padding: calc(32 * var(--u)) calc(36 * var(--u));
+  display: grid;
+  gap: calc(14 * var(--u));
+  grid-template-columns: 1fr;
+  text-align: center;
+}
+
+/* Short, wide windows (the Quest default): two columns. */
+@media (max-height: 819px) and (min-aspect-ratio: 4/3) {
+  /* Two columns (the Quest default): the 670 px window is the 1x height. */
+  .wl-root,
+  .wl-note {
+    --u: clamp(1px, min(100vw / 1280, 100vh / 670), 1.3px);
+  }
+  .wl-card.wl-two {
+    width: min(100%, calc(980 * var(--u)), 1040px);
+    grid-template-columns: 1fr 1fr;
+    column-gap: calc(40 * var(--u));
+    text-align: left;
+    grid-template-areas:
+      'brand side'
+      'setup side'
+      'start side'
+      'more side';
+    /* The left column packs at the top; a tall right column's extra height goes below. */
+    grid-template-rows: auto auto auto 1fr;
+    align-items: start;
+  }
+  .wl-two .wl-brand {
+    grid-area: brand;
+  }
+  .wl-two .wl-setup {
+    grid-area: setup;
+  }
+  .wl-two .wl-start {
+    grid-area: start;
+  }
+  .wl-two .wl-more {
+    grid-area: more;
+  }
+  .wl-two .wl-side {
+    grid-area: side;
+    border-left: 1px solid #0001;
+    padding-left: calc(36 * var(--u));
+    min-height: 100%;
+  }
+  .wl-two .wl-picker {
+    justify-content: start;
+  }
+  .wl-two .wl-brandrow,
+  .wl-two .wl-datasets,
+  .wl-two .wl-more,
+  .wl-two .wl-streak {
+    justify-content: flex-start;
+  }
+}
+
+.wl-brandrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(14 * var(--u));
+}
+
+.wl-mark {
+  width: calc(76 * var(--u));
+  height: auto;
+  flex-shrink: 0;
+}
+
+.wl-title {
+  margin: 0;
+  font-size: calc(58 * var(--u));
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.wl-tagline {
+  margin: calc(10 * var(--u)) 0 0;
+  font-size: calc(24 * var(--u));
+  font-weight: 600;
+}
+
+.wl-pitch {
+  margin: calc(4 * var(--u)) 0 0;
+  font-size: calc(22 * var(--u));
+  color: var(--wl-muted);
+}
+
+.wl-datasets {
+  display: flex;
+  justify-content: center;
+  gap: calc(14 * var(--u));
+  margin-top: calc(12 * var(--u));
+}
+
+.wl-ds {
+  display: grid;
+  place-items: center;
+  width: calc(40 * var(--u));
+  height: calc(40 * var(--u));
+  border-radius: calc(10 * var(--u));
+  color: #fff;
+}
+
+.wl-ds .wl-icon {
+  width: calc(24 * var(--u));
+  height: calc(24 * var(--u));
+}
+
+.wl-setup {
+  margin: 0;
+  font-size: calc(22 * var(--u));
+  color: var(--wl-muted);
+}
+
+.wl-start {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(12 * var(--u));
+  border: 0;
+  border-radius: calc(20 * var(--u));
+  background: var(--wl-accent);
+  color: #fff;
+  font-family: inherit;
+  font-weight: 700;
+  font-size: calc(30 * var(--u));
+  line-height: 1;
+  height: calc(76 * var(--u));
+  width: 100%;
+  cursor: pointer;
+  box-shadow: 0 calc(6 * var(--u)) calc(18 * var(--u)) #3b4f9c66;
+}
+
+.wl-start:hover {
+  background: #33458a;
+}
+
+.wl-start:focus-visible,
+.wl-more button:focus-visible,
+.wl-tile:focus-visible,
+.wl-link:focus-visible {
+  outline: calc(3 * var(--u)) solid var(--wl-flame);
+  outline-offset: calc(3 * var(--u));
+}
+
+.wl-start .wl-icon {
+  width: calc(34 * var(--u));
+  height: calc(34 * var(--u));
+}
+
+.wl-side p {
+  margin: 0 0 calc(8 * var(--u));
+  font-size: calc(22 * var(--u));
+}
+
+.wl-daily {
+  font-weight: 700;
+}
+
+.wl-streak {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(8 * var(--u));
+  color: var(--wl-muted);
+}
+
+.wl-streak .wl-icon {
+  width: calc(26 * var(--u));
+  height: calc(26 * var(--u));
+  flex-shrink: 0;
+  color: #9a9284;
+}
+
+.wl-streak.wl-on {
+  color: var(--wl-ink);
+  font-weight: 600;
+}
+
+.wl-streak.wl-on .wl-icon {
+  color: var(--wl-flame);
+}
+
+.wl-cal {
+  /* A day and the gap between days: 6-row months must fit the Quest default's right column. */
+  --wl-day: calc(36 * var(--u));
+  --wl-gap: calc(6 * var(--u));
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--wl-gap);
+  margin: calc(6 * var(--u)) 0 calc(12 * var(--u));
+}
+
+.wl-weeks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wl-gap);
+}
+
+.wl-monthrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: calc(7 * var(--wl-day) + 6 * var(--wl-gap));
+}
+
+.wl-month {
+  font-size: calc(20 * var(--u));
+  font-weight: 700;
+}
+
+.wl-arrow {
+  display: grid;
+  place-items: center;
+  width: calc(36 * var(--u));
+  height: calc(36 * var(--u));
+  border: 0;
+  border-radius: calc(10 * var(--u));
+  background: transparent;
+  color: var(--wl-accent);
+  cursor: pointer;
+}
+
+.wl-arrow:hover:enabled {
+  background: #3b4f9c14;
+}
+
+/* No earlier month with history yet: shown, greyed out. */
+.wl-arrow:disabled {
+  color: #b7b0a2;
+  cursor: default;
+}
+
+.wl-arrow:focus-visible {
+  outline: calc(3 * var(--u)) solid var(--wl-flame);
+}
+
+.wl-arrow .wl-icon {
+  width: calc(24 * var(--u));
+  height: calc(24 * var(--u));
+}
+
+.wl-calrow {
+  display: flex;
+  gap: var(--wl-gap);
+}
+
+.wl-wd {
+  width: var(--wl-day);
+  font-size: calc(15 * var(--u));
+  font-weight: 700;
+  color: var(--wl-muted);
+  text-align: center;
+}
+
+.wl-day {
+  width: var(--wl-day);
+  height: var(--wl-day);
+  border-radius: calc(9 * var(--u));
+  border: calc(2 * var(--u)) solid var(--wl-line);
+  display: grid;
+  place-items: center;
+  font-size: calc(15 * var(--u));
+  font-weight: 600;
+  color: var(--wl-muted);
+}
+
+.wl-day .wl-icon {
+  width: calc(20 * var(--u));
+  height: calc(20 * var(--u));
+}
+
+.wl-day.wl-solved {
+  background: var(--wl-accent);
+  border-color: var(--wl-accent);
+  color: #fff;
+}
+
+.wl-day.wl-revealed {
+  background: var(--wl-accent-soft);
+  border-color: var(--wl-accent-soft);
+  color: var(--wl-accent);
+}
+
+.wl-day.wl-future {
+  border-color: transparent;
+  color: #6e6759;
+}
+
+/* Before the history starts, or today with nothing yet: a quiet fill, no outline. */
+.wl-day.wl-plain {
+  border-color: transparent;
+  background: #e9e5dc;
+}
+
+.wl-day.wl-blank {
+  border-color: transparent;
+}
+
+.wl-day.wl-today {
+  border: calc(3 * var(--u)) solid var(--wl-flame);
+}
+
+.wl-practice,
+.wl-save {
+  color: var(--wl-muted);
+}
+
+.wl-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: calc(10 * var(--u));
+}
+
+.wl-more button {
+  font-family: inherit;
+  font-weight: 600;
+  font-size: calc(22 * var(--u));
+  line-height: 1;
+  color: var(--wl-accent);
+  background: transparent;
+  border: calc(2 * var(--u)) solid var(--wl-accent);
+  border-radius: calc(14 * var(--u));
+  height: calc(56 * var(--u));
+  padding: 0 calc(20 * var(--u));
+  cursor: pointer;
+}
+
+.wl-more button:hover {
+  background: #3b4f9c14;
+}
+
+.wl-more button.wl-danger {
+  background: var(--wl-accent);
+  color: #fff;
+}
+
+.wl-more .wl-link {
+  font-family: inherit;
+  font-weight: 400;
+  height: auto;
+  font-size: calc(17 * var(--u));
+  color: var(--wl-muted);
+  background: none;
+  border: 0;
+  padding: calc(4 * var(--u));
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.wl-confirm-text {
+  flex-basis: 100%;
+  margin: 0 0 calc(4 * var(--u));
+  font-size: calc(20 * var(--u));
+  color: var(--wl-ink);
+}
+
+/* The puzzle picker: in place of the side's progress lines. */
+.wl-picker {
+  display: grid;
+  grid-template-columns: repeat(5, calc(64 * var(--u)));
+  gap: calc(10 * var(--u));
+  justify-content: center;
+}
+
+.wl-tile {
+  position: relative;
+  height: calc(64 * var(--u));
+  border-radius: calc(12 * var(--u));
+  border: calc(2 * var(--u)) solid #d8d2c4;
+  background: #fff;
+  color: var(--wl-ink);
+  font-family: inherit;
+  font-weight: 700;
+  font-size: calc(22 * var(--u));
+  line-height: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(3 * var(--u));
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.wl-tile::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(5 * var(--u));
+  background: var(--wl-tile-accent, transparent);
+}
+
+.wl-tile .wl-mark-row {
+  display: flex;
+  align-items: center;
+  height: calc(18 * var(--u));
+  font-size: calc(13 * var(--u));
+  font-weight: 700;
+  color: var(--wl-tile-accent, var(--wl-muted));
+}
+
+.wl-tile .wl-icon {
+  width: calc(16 * var(--u));
+  height: calc(16 * var(--u));
+  color: var(--wl-muted);
+}
+
+.wl-tile.wl-today-tile {
+  border-color: var(--wl-tile-accent);
+  border-width: calc(3 * var(--u));
+}
+
+.wl-tile.wl-picked {
+  background: var(--wl-accent);
+  color: #fff;
+}
+
+.wl-tile.wl-picked .wl-icon,
+.wl-tile.wl-picked .wl-mark-row {
+  color: #fff;
+}
+
+.wl-tile:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* The browser-support notices (xr-support.ts). The note sits along the top: the page below makes room for it. */
+body:has(.wl-note) .wl-root {
+  padding-top: calc(80 * var(--u));
+}
+
+.wl-card.wl-message {
+  width: min(100%, calc(660 * var(--u)), 860px);
+}
+
+.wl-message p {
+  margin: 0;
+  font-size: calc(22 * var(--u));
+  line-height: 1.45;
+}
+
+.wl-message .wl-lead {
+  font-weight: 700;
+  font-size: calc(24 * var(--u));
+}
+
+.wl-message .wl-url {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: calc(18 * var(--u));
+  word-break: break-all;
+  color: var(--wl-muted);
+}
+
+.wl-note {
+  position: fixed;
+  left: 50%;
+  top: calc(16 * var(--u));
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: calc(12 * var(--u));
+  max-width: calc(100vw - 32px);
+  padding: calc(12 * var(--u)) calc(16 * var(--u));
+  border-radius: calc(16 * var(--u));
+  background: var(--wl-card);
+  box-shadow: 0 calc(10 * var(--u)) calc(30 * var(--u)) #0007;
+  font-size: calc(18 * var(--u));
+}
+
+.wl-note button {
+  font-family: inherit;
+  font-weight: 600;
+  font-size: calc(16 * var(--u));
+  line-height: 1;
+  color: var(--wl-accent);
+  background: transparent;
+  border: calc(2 * var(--u)) solid var(--wl-accent);
+  border-radius: calc(10 * var(--u));
+  padding: calc(8 * var(--u)) calc(12 * var(--u));
+  cursor: pointer;
+}

@@ -20,7 +20,13 @@ import {
   HEADER_METRICS,
   MAX_FILTER_CHIPS,
   measureTextCm,
+  chipPages,
+  CHIPS_ONE_PAGE_MAX,
+  CHIPS_PER_PAGE,
+  filterAreaRows,
 } from '../slab-metrics.js';
+import { BAND_ARC_RADIUS_METERS } from '../band-arc.js';
+import { VIEW_MAX_ABOVE_GAZE_DEG } from '../view-comfort.js';
 import { PLANNED_CONTROL_DISTANCE_METERS, slabTextSizeAt } from '../text-angles.js';
 import { joinTypeControlSizeCm } from '../table-slab-view.js';
 import { BAR } from './copy.js';
@@ -159,14 +165,40 @@ describe('the Filter chips', () => {
     }
   });
 
-  it('the filter area adds at most 5 rows (the chips one per row, and Back), so the column stays under 33 cm', () => {
-    let rows = 2;
-    for (const { columns } of results) {
-      rows = Math.max(rows, columns.length > 0 ? columns.length + 1 : 0);
-    }
-    expect(rows).toBeLessThanOrEqual(5);
+  it('the filter area adds at most 5 rows for any chip count up to the cap (pages of 3 with More past 4), so the column stays under 33 cm', () => {
+    expect([0, 1, 2, 3, 4, 5, 6].map(filterAreaRows)).toEqual([0, 2, 3, 4, 5, 5, 5]);
+    expect(MAX_FILTER_CHIPS).toBe(6);
+    // Today's puzzles offer at most 4 chips (one per row).
+    const most = Math.max(...results.map(({ columns }) => columns.length));
+    expect(most).toBeLessThanOrEqual(CHIPS_ONE_PAGE_MAX);
+    expect([4, 5, 6].map(chipPages)).toEqual([1, 2, 2]);
+    expect(CHIPS_PER_PAGE * chipPages(MAX_FILTER_CHIPS)).toBeGreaterThanOrEqual(MAX_FILTER_CHIPS);
     const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, LABEL_FONT_CM * 1.2);
-    expect(columnHeightCm(buttonHeight, lead.heightCm, rows)).toBeLessThanOrEqual(33);
+    for (let chips = 0; chips <= MAX_FILTER_CHIPS; chips++) {
+      expect(columnHeightCm(buttonHeight, lead.heightCm, Math.max(1, filterAreaRows(chips))), `${chips} chips`).toBeLessThanOrEqual(33);
+    }
+  });
+
+  it("the column's top stays within 40° above the natural gaze for any chip count (its bottom logged up to +1.4°)", () => {
+    // The column stands on the 0.5 m arc from its bottom, which sits a little above or below the gaze.
+    const HIGHEST_COLUMN_BOTTOM_DEG = 1.4;
+    const MARGIN_DEG = 1;
+    const buttonHeight = Math.max(CONTROL_OPTION_MIN_HEIGHT_CM, LABEL_FONT_CM * 1.2);
+    const degrees = (cm: number) => (cm / 100 / BAND_ARC_RADIUS_METERS) * (180 / Math.PI);
+    for (let chips = 0; chips <= MAX_FILTER_CHIPS; chips++) {
+      const height = columnHeightCm(buttonHeight, lead.heightCm, Math.max(1, filterAreaRows(chips)));
+      expect(HIGHEST_COLUMN_BOTTOM_DEG + degrees(height) + MARGIN_DEG, `${chips} chips`).toBeLessThanOrEqual(VIEW_MAX_ABOVE_GAZE_DEG);
+    }
+    // One per row all the way to 6 would not have fit.
+    const sixOnePerRow = columnHeightCm(buttonHeight, lead.heightCm, MAX_FILTER_CHIPS + 1);
+    expect(HIGHEST_COLUMN_BOTTOM_DEG + degrees(sixOnePerRow)).toBeGreaterThan(VIEW_MAX_ABOVE_GAZE_DEG);
+  });
+
+  it('More fits the column for every page label, in plain ASCII', () => {
+    for (const label of [BAR.filterMore(1, 2), BAR.filterMore(2, 2)]) {
+      expect(measureTextCm(label, HEADER_METRICS, LABEL_FONT_CM) + 2 * padding, label).toBeLessThanOrEqual(width + 1e-9);
+      expect(label).toMatch(/^[\x20-\x7e]+$/);
+    }
   });
 
   describe('the in-XR puzzle picker', () => {

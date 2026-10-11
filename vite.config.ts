@@ -6,7 +6,8 @@
  */
 
 import { execSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { iwsdkDev } from '@iwsdk/vite-plugin-dev';
 import { defineConfig, type Plugin } from 'vite';
@@ -17,6 +18,9 @@ const LOG_BODY_LIMIT_BYTES = 256 * 1024;
 type LogBatch = {
   id: string;
   device: string;
+  /** The code the page runs (codeStamp at its load) and when it loaded. */
+  code?: string;
+  loadedAt?: string;
   header: Record<string, string> | null;
   lines: { t: number; kind: string; text: string }[];
 };
@@ -32,6 +36,28 @@ function lineStamp(ms: number): string {
   const date = new Date(ms);
   const p = (n: number, w = 2) => String(n).padStart(w, '0');
   return `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}.${p(date.getMilliseconds(), 3)}`;
+}
+
+/**
+ * The code's stamp: a short hash of every file under src/ (path, size, last
+ * change). A page fetches it once when it loads; a later batch from a page
+ * with another stamp ran code older than the server's: a stale tab.
+ */
+function codeStamp(root: string): string {
+  const hash = createHash('sha1');
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const full = path.join(dir, name);
+      const stat = statSync(full);
+      if (stat.isDirectory()) {
+        walk(full);
+      } else {
+        hash.update(`${path.relative(root, full)}:${stat.size}:${Math.round(stat.mtimeMs)}\n`);
+      }
+    }
+  };
+  walk(path.join(root, 'src'));
+  return hash.digest('hex').slice(0, 8);
 }
 
 /**
@@ -56,6 +82,15 @@ function spatialqlDebugLogs(): Plugin {
         // Not a git checkout: the header says "unknown".
       }
       const files = new Map<string, string>();
+      /** Files already told their page is stale. */
+      const staleNoted = new Set<string>();
+
+      server.middlewares.use('/__spatialql/code', (_req, res) => {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.setHeader('cache-control', 'no-store');
+        res.end(JSON.stringify({ code: codeStamp(server.config.root) }));
+      });
 
       const fileFor = (batch: LogBatch): string => {
         const known = files.get(batch.id);
@@ -74,7 +109,13 @@ function spatialqlDebugLogs(): Plugin {
           `# SpatialQL ${device} debug log`,
           `# started ${new Date().toISOString()}`,
           `# commit ${commit}`,
-          ...Object.entries(batch.header ?? {}).map(([key, value]) => `# ${key}: ${value}`),
+          `# server code: ${codeStamp(server.config.root)}`,
+          ...(batch.header
+            ? Object.entries(batch.header).map(([key, value]) => `# ${key}: ${value}`)
+            : [
+                `# page code: ${batch.code ?? 'unknown'} (page loaded ${batch.loadedAt ?? 'unknown'})`,
+                '# (no page header: this page started before this dev server; it may run old code)',
+              ]),
           '',
         ];
         appendFileSync(file, `${header.join('\n')}\n`);
@@ -108,6 +149,15 @@ function spatialqlDebugLogs(): Plugin {
               throw new Error('bad batch');
             }
             const file = fileFor(batch);
+            const serverCode = codeStamp(server.config.root);
+            if (batch.code && batch.code !== 'unknown' && batch.code !== serverCode && !staleNoted.has(file)) {
+              staleNoted.add(file);
+              appendFileSync(
+                file,
+                `${lineStamp(Date.now())} WARN  STALE PAGE: it runs code ${batch.code} (loaded ${batch.loadedAt ?? '?'}); ` +
+                  `the server has ${serverCode}. Reload the tab before trusting this log.\n`,
+              );
+            }
             const text = batch.lines
               .map((line) => {
                 const kind = (line.kind === 'warn' ? 'WARN ' : line.kind === 'error' ? 'ERROR' : 'INFO ').padEnd(5);
@@ -121,7 +171,7 @@ function spatialqlDebugLogs(): Plugin {
             // The file's name (relative to the project), so the page can say where its log goes.
             res.statusCode = 200;
             res.setHeader('content-type', 'application/json');
-            res.end(JSON.stringify({ file: path.relative(server.config.root, file) }));
+            res.end(JSON.stringify({ file: path.relative(server.config.root, file), serverCode }));
             return;
           } catch {
             res.statusCode = 400;
@@ -134,7 +184,10 @@ function spatialqlDebugLogs(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [iwsdkDev(), spatialqlDebugLogs()],
+  // Inter is the in-XR UIKit font (the card, the slabs, the bar). The plugin
+  // bundles the fonts its UIKitML files name; with the welcome page now HTML
+  // there are none, so Inter is listed here or production fails at startup.
+  plugins: [iwsdkDev({ bundle: { fonts: ['inter'] } }), spatialqlDebugLogs()],
   // `logs/` holds the debug logs written above: never watched or reloaded.
   server: { host: '0.0.0.0', port: 8081, open: false, watch: { ignored: ['**/logs/**'] } },
   build: {

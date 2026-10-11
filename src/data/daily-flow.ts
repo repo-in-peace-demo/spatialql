@@ -220,7 +220,101 @@ export type WelcomeLines = {
   practice: string;
   /** Shown only when progress can't be saved. */
   save: string | null;
+  /** The streak's days now (the flame is grey at 0). */
+  streakDays: number;
+  /** The calendar: this month, then the earlier months the history covers (calendarMonths). */
+  months: CalendarMonth[];
 };
+
+/**
+ * One calendar square: a day of the month and its daily (solved, with the
+ * answer or skipped, missed), a day before the history starts or today with
+ * nothing yet (plain), a day still to come this month (future), or a cell
+ * outside the month (blank, day null).
+ */
+export type CalendarCell = {
+  day: number | null;
+  state: 'solved' | 'revealed' | 'missed' | 'plain' | 'future' | 'blank';
+  today: boolean;
+};
+
+/** One month of the welcome calendar: its year, month (1-12) and cells in whole Monday-first weeks. */
+export type CalendarMonth = { year: number; month: number; cells: CalendarCell[] };
+
+/** Monday = 0 ... Sunday = 6, for a day number (days count UTC calendar dates: see daily.ts). */
+export function weekdayIndex(day: number): number {
+  return (new Date(day * 86_400_000).getUTCDay() + 6) % 7;
+}
+
+/** The day number of `year`-`month`-`date` (month 1-12). */
+function dayOf(year: number, month: number, date: number): number {
+  return Date.UTC(year, month - 1, date) / 86_400_000;
+}
+
+/** The year and month (1-12) a day number falls in. */
+export function monthOfDay(day: number): { year: number; month: number } {
+  const date = new Date(day * 86_400_000);
+  return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1 };
+}
+
+/** The first day with a recorded daily, or null with no history. */
+function firstHistoryDay(progress: Progress): number | null {
+  let first: number | null = null;
+  for (const key of Object.keys(progress.dailyHistory)) {
+    const day = Number(key);
+    if (first === null || day < first) {
+      first = day;
+    }
+  }
+  return first;
+}
+
+/**
+ * A wall calendar for `year`-`month` (1-12): Monday-first weeks (4 to 6),
+ * the cells before the 1st and after the last day blank. Days before the
+ * history starts (or with no history) are plain, not missed; today is
+ * ringed, plain until its daily is done; later days are future.
+ */
+export function monthCells(progress: Progress, year: number, month: number, today: number): CalendarCell[] {
+  const first = dayOf(year, month, 1);
+  const length = dayOf(month === 12 ? year + 1 : year, month === 12 ? 1 : month + 1, 1) - first;
+  const offset = weekdayIndex(first);
+  const weeks = Math.ceil((offset + length) / 7);
+  const historyStart = firstHistoryDay(progress);
+  return Array.from({ length: weeks * 7 }, (_, i): CalendarCell => {
+    const date = i - offset;
+    if (date < 0 || date >= length) {
+      return { day: null, state: 'blank', today: false };
+    }
+    const day = first + date;
+    const outcome = progress.dailyHistory[day];
+    const state: CalendarCell['state'] =
+      day > today
+        ? 'future'
+        : (outcome ?? (day === today || historyStart === null || day < historyStart ? 'plain' : 'missed'));
+    return { day, state, today: day === today };
+  });
+}
+
+/**
+ * The months the welcome calendar can show, this month first: then each
+ * earlier month while it has a recorded daily (the history keeps
+ * DAILY_HISTORY_DAYS days, so one or two back at most).
+ */
+export function calendarMonths(progress: Progress, today: number): CalendarMonth[] {
+  const months: CalendarMonth[] = [];
+  let { year, month } = monthOfDay(today);
+  for (;;) {
+    months.push({ year, month, cells: monthCells(progress, year, month, today) });
+    [year, month] = month === 1 ? [year - 1, 12] : [year, month - 1];
+    const first = dayOf(year, month, 1);
+    const end = dayOf(month === 12 ? year + 1 : year, month === 12 ? 1 : month + 1, 1);
+    const covered = Object.keys(progress.dailyHistory).some((key) => Number(key) >= first && Number(key) < end);
+    if (!covered) {
+      return months;
+    }
+  }
+}
 
 /** The welcome screen's progress lines (challenge mode). */
 export function welcomeLines(
@@ -234,7 +328,9 @@ export function welcomeLines(
   const daily = !dailyOffered(progress, order)
     ? WELCOME.practiceFirst
     : solvedToday
-      ? WELCOME.dailyDone
+      ? allPuzzlesDone(progress, order)
+        ? WELCOME.dailyDoneAllDone
+        : WELCOME.dailyDone
       : dailyRevealedToday(progress.daily, today)
         ? WELCOME.dailyRevealed
         : WELCOME.dailyOpen(getPuzzle(dailyPuzzleId(today)).datasetId);
@@ -244,7 +340,18 @@ export function welcomeLines(
   return {
     daily,
     // Done today (solved, or revealed on a bridged day): nothing to nudge.
-    streak: streak === 0 ? null : doneToday ? WELCOME.streak(streak) : `${WELCOME.streak(streak)}. ${WELCOME.streakAtRisk}`,
+    streak:
+      streak === 0
+        ? dailyOffered(progress, order)
+          ? doneToday
+            ? null
+            : WELCOME.streakStart
+          : WELCOME.streakAfterPractice
+        : doneToday
+          ? WELCOME.streak(streak)
+          : `${WELCOME.streak(streak)}. ${WELCOME.streakAtRisk}`,
+    streakDays: streak,
+    months: calendarMonths(progress, today),
     practice: allPuzzlesDone(progress, order)
       ? revealed > 0
         ? WELCOME.allDoneWithAnswers(order.length, revealed)

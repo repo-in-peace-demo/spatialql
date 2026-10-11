@@ -20,6 +20,12 @@
  * Only one day in a row: two revealed dailies in a row break it (otherwise
  * revealing every day would keep a streak forever without solving).
  *
+ * Daily history: each day's daily outcome by local day (`solved` without the
+ * answer, `revealed` after "Show answer" or a skip), for the welcome screen's
+ * calendar; only the last DAILY_HISTORY_DAYS days are kept. It's a record,
+ * not a rule: the streak doesn't read it. Saves from before it existed get
+ * their current streak backfilled (`parseProgress`).
+ *
  * A practice puzzle completed after "Show answer" is recorded as `revealed`.
  * It still unlocks the next one (hints never block progress), and a later
  * solve without the answer upgrades it to solved.
@@ -58,7 +64,40 @@ export type Progress = {
   lastPuzzle: PuzzleId | null;
   /** The card has explained the streak once (on the first daily with a free message slot); Reset clears it. */
   streakExplained?: true;
+  /** Each day's daily outcome, by local day number (the last DAILY_HISTORY_DAYS days). */
+  dailyHistory: DailyHistory;
 };
+
+/** One day's daily: solved without the answer, or completed after it (or skipped). */
+export type DailyOutcome = 'solved' | 'revealed';
+export type DailyHistory = Partial<Record<number, DailyOutcome>>;
+
+/** Days of history kept (the calendar shows four weeks). */
+export const DAILY_HISTORY_DAYS = 60;
+
+/** `history` with `day`'s outcome, trimmed to the DAILY_HISTORY_DAYS days ending at the latest one. */
+export function withDailyOutcome(history: DailyHistory, day: number, outcome: DailyOutcome): DailyHistory {
+  const next: DailyHistory = { ...history, [day]: outcome };
+  return trimHistory(next);
+}
+
+function trimHistory(history: DailyHistory): DailyHistory {
+  const days = Object.keys(history).map(Number);
+  if (days.length === 0) {
+    return history;
+  }
+  const oldest = Math.max(...days) - DAILY_HISTORY_DAYS + 1;
+  if (days.every((day) => day >= oldest)) {
+    return history;
+  }
+  const trimmed: DailyHistory = {};
+  for (const day of days) {
+    if (day >= oldest) {
+      trimmed[day] = history[day];
+    }
+  }
+  return trimmed;
+}
 
 export function emptyProgress(): Progress {
   return {
@@ -67,6 +106,7 @@ export function emptyProgress(): Progress {
     daily: { lastSolvedDay: null, streak: 0, best: 0 },
     seenConcepts: [],
     lastPuzzle: null,
+    dailyHistory: {},
   };
 }
 
@@ -170,13 +210,17 @@ export function markSolved(
 
 export function markDailySolved(progress: Progress, day: number): Progress {
   const daily = recordDailySolve(progress.daily, day);
-  return daily === progress.daily ? progress : { ...progress, daily };
+  return daily === progress.daily
+    ? progress
+    : { ...progress, daily, dailyHistory: withDailyOutcome(progress.dailyHistory, day, 'solved') };
 }
 
 /** Today's daily completed after "Show answer": no streak credit (see `recordDailyReveal`). */
 export function markDailyRevealed(progress: Progress, day: number): Progress {
   const daily = recordDailyReveal(progress.daily, day);
-  return daily === progress.daily ? progress : { ...progress, daily };
+  return daily === progress.daily
+    ? progress
+    : { ...progress, daily, dailyHistory: withDailyOutcome(progress.dailyHistory, day, 'revealed') };
 }
 
 /**
@@ -361,12 +405,41 @@ export function parseProgress(raw: string | null, isKnownPuzzle: (id: string) =>
   if (data.streakExplained === true) {
     progress.streakExplained = true;
   }
+  if (isRecord(data.dailyHistory)) {
+    const history: DailyHistory = {};
+    for (const [key, outcome] of Object.entries(data.dailyHistory)) {
+      const day = Number(key);
+      if (isDayNumber(day) && (outcome === 'solved' || outcome === 'revealed')) {
+        history[day] = outcome;
+      }
+    }
+    progress.dailyHistory = trimHistory(history);
+  } else {
+    // A save from before the history: its current streak is that many solved
+    // days ending on the last solve (what the count means); a revealed day
+    // after it, too. Older days stay empty.
+    progress.dailyHistory = backfillHistory(progress.daily);
+  }
   return progress;
 }
 
 /** The streak has been explained (shown once; `emptyProgress`, i.e. Reset, forgets it). */
 export function markStreakExplained(progress: Progress): Progress {
   return progress.streakExplained ? progress : { ...progress, streakExplained: true };
+}
+
+/** An old save's history, from its streak: the streak's days as solved, ending on the last solve; a later revealed day. */
+export function backfillHistory(daily: DailyProgress): DailyHistory {
+  let history: DailyHistory = {};
+  if (daily.lastSolvedDay !== null) {
+    for (let i = Math.min(daily.streak, DAILY_HISTORY_DAYS) - 1; i >= 0; i--) {
+      history = withDailyOutcome(history, daily.lastSolvedDay - i, 'solved');
+    }
+  }
+  if (daily.revealedDay !== undefined && (daily.lastSolvedDay === null || daily.revealedDay > daily.lastSolvedDay)) {
+    history = withDailyOutcome(history, daily.revealedDay, 'revealed');
+  }
+  return history;
 }
 
 export function serializeProgress(progress: Progress): string {

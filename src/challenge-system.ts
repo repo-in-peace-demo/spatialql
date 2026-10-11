@@ -29,6 +29,7 @@ import {
   type UIKit,
 } from '@iwsdk/core';
 import { CHALLENGE_MODE } from './challenge-mode.js';
+import { chipPages, CHIPS_PER_PAGE } from './slab-metrics.js';
 import { challengeStart, PLAYABLE, publishProgress, takePickedPuzzle } from './challenge-start.js';
 import {
   type BarButton,
@@ -121,6 +122,8 @@ import {
 } from './join-bridge.js';
 import { buildQueue, type BuildJob } from './build-queue.js';
 import { keepDatasets } from './dataset-cache.js';
+import { allowMoves } from './move-guard.js';
+import { disposeUIKitDocument } from './uikit-dispose.js';
 import { PressDips } from './press-dip.js';
 import { sounds } from './sound.js';
 import { isTouchPointerClick, setRect, touchProbe, type PressPath } from './touch-probe.js';
@@ -250,6 +253,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private completionShowing = false;
   /** The Filter chips are open (Back and one chip per choice). */
   private filterOpen = false;
+  /** The page of chips shown (more than CHIPS_ONE_PAGE_MAX: pages of CHIPS_PER_PAGE, turned by More). */
+  private filterPage = 0;
   /** The chips' columns, in the order shown (from the join, at the last bar update). */
   private filterChoices: NullFilterChoice[] = [];
   /** The bar's contents as last set (only a change resizes and re-places it). */
@@ -338,6 +343,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       [this.bar.clear, 'clear', -1],
       [this.bar.filter, 'filter', -1],
       [this.bar.filterBack, 'filterBack', -1],
+      [this.bar.filterMore, 'filterMore', -1],
       ...this.bar.filterChips.map((chip, i): [InstanceType<typeof UIKit.Container>, BarButton, number] => [
         chip.container,
         'chip',
@@ -400,6 +406,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         ['clear', bar.clear],
         ['filter', bar.filter],
         ['filterBack', bar.filterBack],
+        ['filterMore', bar.filterMore],
         ['puzzles', bar.puzzles],
         ['pickerBack', bar.pickerBack],
         ...bar.filterChips.map((chip, i) => [CHIP_NAMES[i], chip.container] as const),
@@ -486,7 +493,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (this.awaitingRecenter && deskBridge.desk?.recenterGliding) {
       this.awaitingRecenter = false;
       if (!this.pending) {
-        this.card.status.setProperties({ text: CARD.recentered });
+        this.setStatus(CARD.recentered);
         this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
       }
     }
@@ -520,7 +527,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     // "Solve it first" (an inactive Next) gives way to the status it covered.
     if (this.statusFlashUntil > 0 && this.clock >= this.statusFlashUntil) {
       this.statusFlashUntil = 0;
-      this.card.status.setProperties({ text: this.restingStatus() });
+      this.setStatus(this.restingStatus());
     }
     // "Poke a NULL in the result above" gives way to the message it covered.
     if (this.messageFlashUntil > 0 && this.clock >= this.messageFlashUntil) {
@@ -696,7 +703,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       join.applyDiff(null, 0);
       join.setWinLook(false);
       join.setResultBadge(null, 'neutral');
-      this.card.status.setProperties({ text: '' });
+      this.setStatus('');
       return;
     }
     const output = runPuzzleQuery(this.puzzle, {
@@ -710,7 +717,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     join.applyDiff(comparison.rowStatus, comparison.missing.length);
     // The gold win look only for a real solve, never after "Show answer".
     join.setWinLook(comparison.solved && !answerRevealed(this.session));
-    this.card.status.setProperties({ text: this.session.solved ? this.solvedStatus() : diffSummary(comparison) });
+    this.setStatus(this.session.solved ? this.solvedStatus() : diffSummary(comparison));
 
     // The antijoin intro: the first time a LEFT result shows NULLs.
     if (this.nullCoachPending && state.joinType === 'left' && join.hasVisibleNull()) {
@@ -766,7 +773,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this.lastComparison = null;
       this.filterOpen = false;
       if (this.statusFlashUntil === 0) {
-        this.card.status.setProperties({ text: this.restingStatus() });
+        this.setStatus(this.restingStatus());
       }
     }
   }
@@ -816,7 +823,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   onHoldCancelled(name: string): void {
     // Let go before its time: nothing happened, and the card says why.
     if (name === 'hint' && this.nextHintRevealsAnswer() && !this.pending) {
-      this.card.status.setProperties({ text: CARD.holdForAnswer });
+      this.setStatus(CARD.holdForAnswer);
       this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
     }
   }
@@ -897,6 +904,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
    * arrived). The card shows the coming puzzle right away.
    */
   private loadPuzzle(id: PuzzleId): void {
+    if (import.meta.env.DEV) {
+      // A puzzle switch places its card and outline for the new puzzle (move-guard.ts).
+      allowMoves('puzzle-switch', performance.now() / 1000, 1);
+    }
     // Any switch closes the picker (a tile closes it first; the debug keys may not).
     if (this.pickerOpen) {
       this.pickerOpen = false;
@@ -1086,7 +1097,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         : CARD.practiceTitle(PRACTICE_ORDER.indexOf(puzzle.id) + 1, puzzle.datasetId),
     });
     this.card.goal.setProperties({ text: puzzleText(puzzle).goal });
-    this.card.status.setProperties({ text: this.beforeStatus(puzzle.id) });
+    this.setStatus(this.beforeStatus(puzzle.id));
     if (fresh) {
       this.card.fade.value = 0;
     }
@@ -1136,13 +1147,14 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       setCardWin(this.card, { headline: CARD.headline, takeaway: this.text.takeaway, query: CARD.win, note: lastNote });
     }
     // The title row's right-hand slot (the diff summary while playing).
-    this.card.status.setProperties({ text: this.solvedStatus() });
+    this.setStatus(this.solvedStatus());
     this.card.document.updateWorldMatrix(true, false);
     this._point.setFromMatrixPosition(this.card.document.matrixWorld);
     if (revealed) {
       sounds.playComplete(this._point);
     } else {
-      sounds.playWin(this._point);
+      const milestone = this.isDaily && CARD.streakMilestone(currentStreak(this.progress.daily, this.today)) !== null;
+      sounds.playWin(this._point, 0, milestone);
     }
     // A fan-out win explains its surprise: the rows that repeat pulse while
     // the takeaway says why.
@@ -1298,6 +1310,14 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
    * The status line once finished: after "Show answer", that all three hints
    * were used; for a solved daily, the streak; else how many hints it took.
    */
+  /** The card's status line; its flame shows only while it's the daily streak (solvedStatus sets `streakStatus`). */
+  private setStatus(text: string): void {
+    this.card.status.setProperties({ text });
+    this.card.statusFlame.setProperties({ display: text !== '' && text === this.streakStatus ? 'flex' : 'none' });
+  }
+  /** The streak line solvedStatus last gave (its flame shows with it). */
+  private streakStatus = '';
+
   private solvedStatus(): string {
     if (this.completionShowing) {
       return completionLines(this.progress, PLAYABLE, this.today).streak ?? '';
@@ -1306,7 +1326,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       return CARD.usedAllHints;
     }
     if (this.isDaily && dailySolvedToday(this.progress.daily, this.today)) {
-      return WELCOME.streak(currentStreak(this.progress.daily, this.today));
+      // The day a milestone is reached (3, 7, 14, 30): a short celebration in place of the count.
+      const days = currentStreak(this.progress.daily, this.today);
+      this.streakStatus = CARD.streakMilestone(days) ?? WELCOME.streak(days);
+      return this.streakStatus;
     }
     return this.session.hintsShown > 0 ? CARD.solvedWithHints(this.session.hintsShown) : '';
   }
@@ -1386,7 +1409,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     this.introShown = false;
     this.introLines = [];
     setCardWin(this.card, { headline: lines.headline, takeaway: lines.summary, query: lines.next, note: null });
-    this.card.status.setProperties({ text: lines.streak ?? '' });
+    this.setStatus(lines.streak ?? '');
     this.updateBadge();
     this.card.document.updateWorldMatrix(true, false);
     this._point.setFromMatrixPosition(this.card.document.matrixWorld);
@@ -1446,17 +1469,22 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (this.filterChoices.length === 0) {
       this.filterOpen = false;
     }
-    const chips = this.filterOpen ? this.filterChoices.map((choice) => BAR.filterChip(choice.header)) : null;
+    const pages = chipPages(this.filterChoices.length);
+    if (!this.filterOpen || this.filterPage >= pages) {
+      this.filterPage = 0;
+    }
+    const chips = this.filterOpen ? this.pageChoices().map((choice) => choice.header) : null;
+    const chipsMore = this.filterOpen && pages > 1 ? BAR.filterMore(this.filterPage + 1, pages) : null;
     const picker = this.pickerOpen ? this.pickerTileViews() : null;
     const key =
-      `${where ?? ''}|${this.filterChoices.length > 0}|${chips ? chips.join('|') : '-'}|` +
+      `${where ?? ''}|${this.filterChoices.length > 0}|${chips ? chips.join('|') : '-'}|${chipsMore ?? ''}|` +
       (picker ? picker.map((t) => `${t.status[0]}${t.today ? 't' : ''}${t.current ? 'c' : ''}${t.selectable ? '' : 'x'}`).join('') : '-');
     if (key === this.barKey) {
       return;
     }
     this.barKey = key;
     // The bar resizes to its buttons; re-place it so it stays clear of the control.
-    setBarContents(this.bar, { where, filter: this.filterChoices.length > 0, chips, picker });
+    setBarContents(this.bar, { where, filter: this.filterChoices.length > 0, chips, chipsMore, picker });
     // Its outlines were reset: the hover is drawn again for the new buttons.
     this.shownHover = -1;
     this.fingerHover = -1;
@@ -1486,12 +1514,12 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     // Only what's shown can be pressed (a ray click can come from a hidden button's last frame).
     const pickerHides = button === 'prev' || button === 'next' || button === 'hint' || button === 'clear' || button === 'filter';
     if (
-      (this.pickerOpen && (pickerHides || button === 'filterBack' || button === 'chip')) ||
+      (this.pickerOpen && (pickerHides || button === 'filterBack' || button === 'filterMore' || button === 'chip')) ||
       (!this.pickerOpen && (button === 'tile' || button === 'pickerBack')) ||
       (button === 'clear' && !hasFilter) ||
       (button === 'filter' && (!joined || hasFilter || this.filterChoices.length === 0)) ||
-      (button === 'filterBack' && !this.filterOpen) ||
-      (button === 'chip' && (!this.filterOpen || !this.filterChoices[chip]))
+      ((button === 'filterBack' || button === 'filterMore') && !this.filterOpen) ||
+      (button === 'chip' && (!this.filterOpen || !this.pageChoices()[chip]))
     ) {
       return;
     }
@@ -1517,7 +1545,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     if (button === 'next' && !this.nextAvailable()) {
       const done = !!this.puzzle && (this.session.solved || isSolved(this.progress, this.puzzle.id));
       if (!this.pending) {
-        this.card.status.setProperties({ text: done ? CARD.morePuzzlesSoon : CARD.solveFirst });
+        this.setStatus(done ? CARD.morePuzzlesSoon : CARD.solveFirst);
         this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
       }
       if (import.meta.env.DEV && this.debug) {
@@ -1563,15 +1591,30 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         );
       }
       this.updateBar();
+    } else if (button === 'filterMore') {
+      this.filterPage = (this.filterPage + 1) % chipPages(this.filterChoices.length);
+      if (import.meta.env.DEV && this.debug) {
+        this.debug.note(`Filter page ${this.filterPage + 1}/${chipPages(this.filterChoices.length)} (${path})`);
+      }
+      this.updateBar();
     } else if (button === 'chip') {
-      // Exactly the filter a poke on one of that column's NULLs makes.
-      const column = this.filterChoices[chip].column;
+      // Exactly the filter a poke on one of that column's NULLs makes (`chip`: its place on this page).
+      const column = this.pageChoices()[chip].column;
       this.filterOpen = false;
       this.join?.applyNullFilter(column, path);
       this.updateBar();
     } else {
       this.join?.requestClearFilter();
     }
+  }
+
+  /** The chips on the page shown: all of them up to CHIPS_ONE_PAGE_MAX, else CHIPS_PER_PAGE from the page's start. */
+  private pageChoices(): typeof this.filterChoices {
+    if (chipPages(this.filterChoices.length) === 1) {
+      return this.filterChoices;
+    }
+    const start = this.filterPage * CHIPS_PER_PAGE;
+    return this.filterChoices.slice(start, start + CHIPS_PER_PAGE);
   }
 
   // --- The puzzle picker ------------------------------------------------------------------
@@ -1620,7 +1663,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       }
       if (!data.selectable) {
         if (!this.pending) {
-          this.card.status.setProperties({ text: CARD.tileLocked });
+          this.setStatus(CARD.tileLocked);
           this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
         }
         if (import.meta.env.DEV && this.debug) {
@@ -1749,6 +1792,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     for (const [id, entry] of this.silhouettes) {
       if (!ids.includes(id) && entry !== this.silhouette) {
         buildQueue.remove(entry.job);
+        disposeUIKitDocument(entry.doc?.document);
         entry.entity?.dispose();
         this.silhouettes.delete(id);
       }

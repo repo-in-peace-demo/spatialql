@@ -40,11 +40,13 @@ export const VIEW_MAX_ABOVE_GAZE_DEG = GROUP_MAX_VERTICAL_FOV_DEG / 2;
  */
 export const TOUCH_REACH_MAX_METERS = 0.6;
 /**
- * Where the source slabs' centers sit from the eyes, floating or on a desk:
- * out of the near field, so a seated player sees the whole group without
- * leaning back. Text is sized by angle for it (PLANNED_SOURCE_DISTANCE_METERS).
+ * Where the source slabs' centers sit from the eyes, floating or on a desk
+ * (their home): close enough to read and reach comfortably (0.6 m since
+ * 2026-10-12, where the player kept pulling them), far enough that a seated
+ * player sees the whole group. Text is sized by angle for it
+ * (PLANNED_SOURCE_DISTANCE_METERS).
  */
-export const SLAB_VIEW_DISTANCE_METERS = 0.7;
+export const SLAB_VIEW_DISTANCE_METERS = 0.6;
 /** The band (control and bar) sits this far from the eyes, in view between the pair and the result. */
 export const BAND_DISTANCE_METERS = 0.5;
 /** Where touchable content should ideally sit (for the debug readout). */

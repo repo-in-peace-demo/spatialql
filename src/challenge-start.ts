@@ -75,7 +75,14 @@ export function challengeStart(): ChallengeStart {
   const saveWorks = saveProgress(storage, progress);
   let today = localDay(new Date());
   if (import.meta.env.DEV) {
-    const day = params.get('day');
+    // Dev only: `?day=YYYY-MM-DD`, or the stored `spatialql.day` (the managed browser window has no address bar).
+    let stored: string | null = null;
+    try {
+      stored = storage?.getItem('spatialql.day') ?? null;
+    } catch {
+      stored = null;
+    }
+    const day = params.get('day') ?? stored;
     const override = day ? dayFromIso(day) : null;
     if (override !== null) {
       today = override;

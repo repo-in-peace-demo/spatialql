@@ -40,7 +40,7 @@ events and logged state. "Headset" means a Quest 3S session over Wi-Fi with
 | Pull apart | Dragging a docked slab > 10 cm separates. | Emulator |
 | Feel | Approach glow and hum, dock snap with overshoot, line ticks and pulses, rows flying in from their source rows (row backgrounds fade in only as the cells land), unmatched rows dropping 12% of a row within their slot, resolve; ~1.15–1.2 s. Synthesized spatial sound (`src/sound.ts`), balanced: ticks 11–14 dB and the resolve ~9 dB below the snap. | Emulator: sound order and output peaks from the log; drop offsets for J / Shift+J, INNER / LEFT and five toggles (no drift); mid-flight screenshots; frame times; no long tasks at join start. Approach glow/hum not yet tried by hand. |
 | Browser support | "Open in the Meta Quest Browser" message on non-AR browsers; dismissible note on AR browsers that aren't the Quest Browser. | Unit test for detection; production preview |
-| Welcome screen | Browser entry point: SpatialQL, today's puzzle, streak, practice progress, Start (enters XR) and Free play; hidden in XR, back (updated) after exit. | Emulator: screenshots in and after XR, Free play and back |
+| Welcome screen | Browser entry point (HTML over the canvas): SpatialQL, today's puzzle, streak, practice progress, Start (enters XR), Choose puzzle, Reset progress; hidden in XR, back (updated) after exit. | Emulator: Start enters XR, hidden in XR, back after exit; screenshots at 1280 x 670 and 1920 x 1080 |
 | Production build | No dev-only code. | Grep of `dist/` and of the deployed bundle |
 | Deployment | Vercel from GitHub `main`. | Site, bundle and assets return 200 over HTTPS |
 
@@ -109,8 +109,9 @@ Phase 4 (the daily puzzle after practice 1-3, its streak, and the SpatialQL
 welcome screen with Start and Free play) is implemented and emulator-checked
 (start on the daily, win, streak, Next back to practice, welcome screen,
 Free play and back); the streak across days with `?day=` isn't checked yet.
-Challenge mode is now the default everywhere; Free play (`?mode=free`) gives
-the sandbox, labeled as such on the welcome screen ("Start free play").
+Challenge mode is now the only mode in production. Free play is removed for
+now (2026-10-11, item 10 below): no button, and production ignores
+`?mode=free`; its code stays, dormant, reachable in dev with `?mode=free`.
 
 Since phase 4:
 
@@ -231,9 +232,128 @@ Since phase 4:
   chips, NULL cells) get a pointer hover highlight; a table, the card and the
   result between NULL cells show only the cursor dot.
 
-**Then:**
+**Built, not committed:**
 
-- **9.** The streak calendar, the flame icon, and the 3/7/14-day milestone lines.
+- **9.** The streak calendar (now a month view: see 10): each day's daily recorded by local day (solved, or
+  revealed after Show answer or a skip; the last 60 days; old saves get their
+  current streak backfilled; Reset clears it). The welcome screen shows the last
+  four weeks, Monday first (solved: indigo with a check; with the answer: light
+  indigo with an eye; missed: an outline; today: an orange ring; the rest of this
+  week faint), with a flame before the streak line (grey at 0; "Solve today's
+  puzzle to start your streak.", or "Then a daily puzzle builds your streak."
+  before the daily unlocks). The panel grew from 422 to 549 px, so its
+  screen-space height went from 40% to 52% and nothing on it shrank; only the
+  buttons below moved down. The daily win card's status line gets the flame and,
+  on the day a milestone is reached, "3-day streak!", "7 days: a full week!",
+  "14 days: two weeks strong!" or "30-day streak!" with a brighter win sound.
+  Dev: Option+Shift+Right / Up / 0 (or `spatialql.day`) moves the day.
+- **10.** The welcome screen redesign: rebuilt as an HTML/CSS page over the
+  canvas (`src/welcome-page.ts`, `src/welcome.css`) in place of the UIKit
+  screen-space panel (`welcome.uikitml` and its scene node removed), so the
+  browser draws its text crisply in the Quest Browser. Centered on a deep navy
+  page with glows in the four dataset accents; a cream card with a two-slab mark,
+  the tagline, the dataset icons, the setup line, a big indigo Start, then
+  today's puzzle, the streak with its flame, the four-week calendar and practice;
+  Choose puzzle (the picker replaces the progress lines) and Reset progress (with
+  its confirmation). Two columns on short, wide windows (the Quest Browser
+  default, 1280 x 670), one column on taller ones; sizes are floors at the Quest
+  default (title 58 px, body 22, Start 30 px text and 76 px tall) and scale up
+  to 1.3x. Inter is self-hosted (`src/fonts/`, OFL); icons are the app's Lucide
+  set as inline SVG; no new image files. The non-XR message and the "Best on
+  Meta Quest Browser" note share the look. Copy in `copy.ts`, width-tested at
+  the Quest default. `vite.config.ts` now lists Inter in the plugin's bundled
+  fonts: with no UIKitML file left, production otherwise failed at startup.
+  **The calendar shows the current month** (2026-10-11 addendum): the month and
+  year (English names), Monday-first weeks (4 to 6 rows; cells outside the month
+  empty), and the date on days without a mark (missed: outlined; before the
+  first daily, or today with nothing yet: a plain fill; later this month: the
+  date alone). The back arrow goes to an earlier month while the history covers
+  it (at most two, with its 60 days); with no history there yet it's still
+  shown, greyed out and disabled. A forward arrow returns, never past this month.
+  A 6-row month (November 2026) fits the Quest default: the right column is
+  459 px tall (the calendar 313) and the card 523 of 670 px, with 36 px days.
+  In one column the scale also respects the window's height (1920 x 1080: 1.18x,
+  card 1015 px).
+  **Free play removed for now:** no button anywhere, production always runs
+  the puzzles (`?mode=free` ignored), and its code and copy (`FREE_PLAY_DORMANT`)
+  stay dormant; dev only: `?mode=free`.
+
+- **11.** Back to 72 Hz, and a UIKit leak fixed (2026-10-12). The 80 Hz
+  headset session held 12.5 ms for about a minute, then frames averaged 14-16 ms:
+  per-frame work rose from 7 to 10-11 ms while stepping through all four
+  datasets and never came back. Production asks for 72 Hz again (`?hz=` still
+  overrides in dev). Cause: dropped slabs, result slabs and target outlines were
+  disposed as entities only; UIKit's reactive effects live until each
+  component's own `dispose()`, so every dropped document stayed subscribed
+  (about 6,000 effect listeners per puzzle step; 157,000 live JS listeners after
+  15 puzzles). `disposeUIKitDocument` (src/uikit-dispose.ts) now disposes every
+  component, then the document, wherever one is dropped. Emulator, same run of
+  about 15 puzzles across all four datasets: live effect listeners 84,239 after
+  8 puzzles before, 31,706 after 16 with the fix (fewer than at load); idle work
+  after the run 2.9-3.3 ms before (from 2.1 at the start), 1.8-1.9 ms with the
+  fix (from 2.0). Dev logging added: a scene census (objects, meshes, UIKit
+  roots, draws, geometries, textures, heap) whenever the kept datasets change
+  and once their builds settle, and a major-GC sentinel on the long-task lines
+  ("major GC N ms ago"), to tell whether stalls like the 226 ms idle one are
+  garbage collection (likely, with the leak's growing heap; not proven).
+- **12.** All 20 done: the completion card says "Come back tomorrow to keep your
+  streak going." and the welcome screen "Today's puzzle: solved. Come back
+  tomorrow." (the daily repeats the 20 now); before then, unchanged.
+
+- **13.** One layout rule: the session layout anchor (src/layout-anchor.ts; eye
+  position and yaw), set only at session start, Recenter, the headset coming back
+  on, and a reference-space reset. Every placement (the slabs and their homes,
+  the result, the card, the column, the reach banner; every puzzle, dataset and
+  joined state) is computed from it, never from the live head or a stored head
+  pose, so head movement never moves anything. Cause found 2026-10-12: opening
+  Filter on puzzle 17 (4 chips, the column 18.9 -> 31.3 cm) re-planned the
+  result, column and card around a head pose left from the end of a Recenter
+  glide 28 s earlier: the control jumped 37 cm toward the player and 5 cm up
+  (the source slabs didn't move). Dataset switches also placed the slabs from
+  the live head. The live head is now read only for sensing (facing, the
+  Recenter countdown and its prompt, reach, hand pointers); a source test fails
+  on any other head read, and the anchor may be set only where a session starts
+  or recenters. Emulator: puzzles 15 -> 11 (school -> shop) and back with the
+  head at the anchor, then again with it 0.35 m right, 0.45 m back, 0.35 m down
+  and turned 35°: every slab, result, card, column and control position matched
+  to the millimetre, idle and joined. Dev: L logs the layout; the log notes each
+  anchor set.
+
+- **14.** The move guard and the chip budget (2026-10-12). Dev: a warning
+  whenever a source slab, the result (its bottom edge) or the card moves more
+  than 1 mm in a frame with no allowed reason active (placement, Recenter, a
+  dataset or puzzle switch, the join, dock, pull-apart, the glide home, grabs;
+  src/move-guard.ts). Emulator: no warning across start, switches, a join,
+  INNER | LEFT, a filter, pull-apart and Recenter; a slab moved by hand through
+  the ECS warned ("the customers slab by 8.0 cm in a frame"). Not yet run
+  with a real grab. The countdown prompt still follows the gaze (by choice).
+  Filter chips: six one per row would top the column at about 44° above the
+  natural gaze (limit 40°; five, 40.8°); today's puzzles offer at most four
+  (37.3° at worst). Half-width chips don't fit every header ("PRODUCT"), so
+  five or six now go on pages of three with "More (1/2)": as tall as four.
+  The unattributed Filter press in the 2026-10-12 log was a real poke: the
+  column it opened jumped (the stale-pose re-plan), so the touch log's
+  attempt matcher no longer found the finger near a button.
+
+- **15.** The anchor on the headset (2026-10-12). The 04:20 headset session
+  ran a stale tab (code from before the anchor: 80 Hz, no anchor lines), so it
+  didn't test the anchor. Now: (1) a code stamp (a hash of src/) in every log
+  header and the page's console, and "STALE PAGE ... reload the tab" in the log
+  and on the debug panel when the server has newer code. (2) The placement mode
+  (floating, on the desk, at its edge; and the desk) is decided once when the
+  anchor is set (src/pair-placement.ts, pure); dataset switches only resize in
+  that mode. (3) A reference-space reset in the first 3 s of a session is part
+  of its start (nothing moves); one with a correction keeps everything in place
+  in the room (anchor, slabs, homes corrected); one without is the system
+  recenter (logged as such). Headset back on still needs 5 s hidden. (4) The
+  home is 0.6 m from the eyes (was 0.7), text sized for it (rows 1.20 cm, same
+  angle). Emulator, seated, floating, all four datasets joined: slabs 0.57-0.60
+  m, text on target, group 49-57° of 80° tall, ±42.2° wide at most (limit ±42,
+  0.5° tolerance), reach paths at least 10.4 cm (5 required), farthest column
+  button 0.60 m from the nearer shoulder. On a desk: slab bottoms reach 45°
+  below the gaze (5° under the window; the approved desk exception). (5) A
+  replay of the 04:20 session's events through the placement: positions change
+  only at the anchor events (the old way moved them at every switch).
 
 **Not started** (submission):
 
@@ -244,15 +364,24 @@ Since phase 4:
 
 **To verify:**
 
-- **14.** Free play's labels: the welcome screen has "Free play", "Free play: no puzzles, just tables." and "Start free play" in the copy. Confirm on a Quest.
+- **14.** Dropped with free play (removed for now; see 10).
+- **Welcome page on a Quest:** crisp text and the two-column layout at the
+  browser's default window; Start enters XR; the page returns after exit.
 - **15.** The Hint labels (Hint → Another hint → Show answer): in the copy and tested. Confirm on a Quest.
 - **16.** Start as the only entry: the welcome panel's only XR button is Start. The "Enter XR" pill seen at the top of the dev page is most likely the emulator's (dev config). Confirm on the production link on a Quest.
 - **17.** Answered (2026-10-11): with the panel off, frame times matched the
   earlier panel-on sessions; the panel's cost is small. Being joined (1-2.5 ms a
   frame) and puzzle loads (now under 50 ms) were the real costs.
-- **80 Hz holds:** a 3+ minute session with joins; the joined windows' frame gap
+- **72 Hz with the leak fixed, then 80 Hz again:** a 5+ minute session through
+  all four datasets: work should stay near its first-minute level; check long
+  tasks for "major GC". If it holds with room, retry 80 Hz.
+- **80 Hz holds (superseded by the line above):** a 3+ minute session with joins; the joined windows' frame gap
   p95 should stay near 12.5 ms (`scripts/headset_log.py frames`). If not, consider
   an automatic one-way fallback to 72 Hz after sustained misses.
+- **Reload the headset tab first** (the log's first lines name the page's code; a STALE PAGE warning means reload).
+- **The 0.6 m home on a Quest:** comfortable reading and reach across Prev, Next and dataset switches, joined and not.
+- **Head movement moves nothing:** lean, turn and sit back while opening Filter,
+  the picker and switching puzzles; nothing should move until Recenter.
 - **Recenter facing the button:** recenter while facing about where the Recenter
   button is (the case that cancelled on 2026-10-11); it should complete there.
 - **Picker by hand:** tiles, Back and Puzzles by pinch and poke; a locked tile;
@@ -263,6 +392,11 @@ Since phase 4:
 **Dropped:** 6 (distance grab) and 18 (a playtest with other people).
 
 ## Future
+
+- **Free play, back as a guided mode:** unlocked after practice puzzles 1-3,
+  with a "things to try" card and a dataset switcher (it was removed on
+  2026-10-11 because, with no goal or guidance, a newcomer didn't know what to
+  do in it). Its code and copy are dormant, ready to restore.
 
 - **Three-table datasets** (e.g. borrowers, books and loans): more puzzle
   variety and a longer daily cycle than 20 days; needs a three-slab layout.

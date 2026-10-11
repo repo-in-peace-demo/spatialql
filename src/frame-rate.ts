@@ -1,12 +1,12 @@
 /**
  * The display rate a session asks for, kept pure (no IWSDK imports) so it's
- * tested in Node. 80 Hz gives a 12.5 ms budget: the 2026-10-11 headset logs
- * measured joined frames' work at p50 9.4 ms, p95 12.4 ms (inside it, if
- * only just), where 90 Hz (11.1 ms) would miss and 72 Hz (13.9 ms) leaves
- * motion less smooth than it needs to be.
+ * tested in Node. 72 Hz gives a 13.9 ms budget. 80 Hz (12.5 ms) was tried:
+ * the 2026-10-12 headset session held it for about a minute, then frames
+ * averaged 14-16 ms as per-frame work rose to 10-11 ms (see docs/STATUS.md);
+ * back to 72 Hz until that's understood. `?hz=` (dev) still asks for another.
  */
 
-export const PREFERRED_FRAME_RATE_HZ = 80;
+export const PREFERRED_FRAME_RATE_HZ = 72;
 
 /**
  * The rate to ask for: `preferred` if offered; else the highest offered rate

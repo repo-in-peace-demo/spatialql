@@ -17,6 +17,7 @@ import {
   Grabbed,
   MathUtils,
   OneHandGrabbable,
+  Matrix4,
   Quaternion,
   Vector3,
   VisibilityState,
@@ -29,7 +30,7 @@ import { challengeStart } from './challenge-start.js';
 import { DATASETS, type DatasetId } from './data/datasets.js';
 import { deskTransition, type DeskState } from './data/desk-session.js';
 import { tableLabel } from './data/join-result.js';
-import { DESK_EDGE_BEYOND_REACH_MAX_METERS, surfacePlacementCase, type SurfacePlacementCase } from './surface-placement.js';
+import { DESK_EDGE_BEYOND_REACH_MAX_METERS, type SurfacePlacementCase } from './surface-placement.js';
 import type { Table } from './data/types.js';
 import { deskBridge, type DeskControls } from './desk-bridge.js';
 import {
@@ -47,6 +48,10 @@ import { JoinDocked, TableSlab, TableSlabRuntime } from './table-slab-component.
 import { buildTableSlabDocument, startTableSlabBuild, type SlabBuild, type TableSlabDocument } from './table-slab-view.js';
 import { BUILD_BUDGET_MS, buildQueue, type BuildJob } from './build-queue.js';
 import { keptDatasets, onKeptDatasets } from './dataset-cache.js';
+import { anchorEyes, layoutAnchor, setLayoutAnchor, type AnchorReason } from './layout-anchor.js';
+import { allowMoves } from './move-guard.js';
+import { decidePlacementMode, planPair, type Footprint, type P3, type PlacementMode, type SlabSize } from './pair-placement.js';
+import { disposeUIKitDocument } from './uikit-dispose.js';
 import { easeInCubic, easeInOutCubic, easeOutCubic } from './tween.js';
 import {
   RECENTER_AFTER_HIDDEN_SECONDS,
@@ -55,10 +60,7 @@ import {
   type SessionVisibility,
 } from './recenter-trigger.js';
 import {
-  eyeFacingLean,
-  eyeFacingLeanFromBottom,
   measureSlabEdges,
-  minDistanceForDrop,
   NATURAL_GAZE_PITCH_RAD,
   PLANNED_SOURCE_DISTANCE_METERS,
   slabTextSizeAt,
@@ -68,7 +70,6 @@ import {
   type SlabEdgeAngles,
 } from './view-comfort.js';
 
-const UP_AXIS = new Vector3(0, 1, 0);
 
 const SEARCH_TIMEOUT_SECONDS = 5;
 const STABLE_COMMIT_SECONDS = 1;
@@ -88,19 +89,7 @@ const SURFACE_HEIGHT_BELOW_HEAD = { min: 0.3, max: 0.95 };
 // A slab rotated by a negative angle around its local X axis ("leaning back
 // from vertical") has its +Z-facing normal raised toward eyes above it.
 
-// Floating fallback: slab centers at SLAB_VIEW_DISTANCE_METERS from the
-// eyes, this far below them (at least this far ahead), so the group (slabs,
-// control band, result with the card beside it) sits about centered on the
-// natural gaze (4 deg down) and out of the near field.
-const FLOATING_FORWARD_METERS = 0.65;
-const FLOATING_BELOW_HEAD_METERS = 0.25;
-
-// On a surface: the slabs' bottom edges rest on it, at least this far ahead
-// of the head (horizontally; in practice where their centers sit
-// SLAB_VIEW_DISTANCE_METERS from the eyes), propped up to face the eyes.
-const SURFACE_FORWARD_METERS = 0.32;
-// Keeps the bottom edge from z-fighting with the surface it rests on.
-const SURFACE_LIFT_METERS = 0.002;
+// Where the pair goes, floating or on a surface: pair-placement.ts.
 /**
  * One kept table of another dataset: its background job, and once that has
  * taken its first step (or a switch needs it now), its slab and build.
@@ -111,18 +100,6 @@ type ParkedTable = { table: Table; job: BuildJob; slab: Slab | null; build: Slab
 const PARKED_Y_METERS = -100;
 /** Slabs are grabbed by one hand and carried level: they keep their tilt (no rotation with the wrist). */
 const SLAB_GRAB = { rotate: false };
-
-// Field-of-view guard (view-comfort.ts): every slab's top and bottom edges
-// should sit inside the group's view window around the natural seated gaze;
-// if one wouldn't, the slabs move farther forward (floating: never past
-// SLAB_VIEW_DISTANCE_METERS; on a surface, farther if the view needs it).
-// Distance and tilt depend on each other; this many alternations settle both.
-const FIT_ITERATIONS = 3;
-
-// Well outside the join system's preview range (6 cm, 9 cm to exit), so a
-// join always takes a deliberate push; merely grabbing and releasing a slab
-// in place never joins.
-const SLAB_GAP_METERS = 0.15;
 
 // Dev-only `forceSurface` flag (see dev-flags.ts): forces the "surface found"
 // outcome at a fixed head-relative height (a realistic seated desk) so the
@@ -140,6 +117,12 @@ const SWITCH_SINK_METERS = 0.06;
 const SWITCH_LEAVE_SECONDS = 0.35;
 const SWITCH_ARRIVE_SECONDS = 0.35;
 const SWITCH_ARRIVE_STAGGER_SECONDS = 0.08;
+
+/** A reference-space reset this soon after a session starts (or before its first placement) is part of the start. */
+const SESSION_START_RESET_SECONDS = 3;
+
+/** Which layout-anchor reason each recenter trigger is (layout-anchor.ts). */
+const ANCHOR_REASON: Record<RecenterReason, AnchorReason> = { button: 'recenter', 'headset-on': 'headset-on', reset: 'reset' };
 
 /** Recenter: the group glides to its re-placed pose over this long. */
 const RECENTER_GLIDE_SECONDS = 0.4;
@@ -287,6 +270,8 @@ export class DeskPlacementSystem
   private readonly _p = new Vector3();
 
   private sessionActive = false;
+  /** When this XR session started (ms): resets right after it are part of its start. */
+  private sessionStartMs = -Infinity;
   private headPoseValid = false;
   private headPoseWaitElapsed = 0;
 
@@ -301,12 +286,16 @@ export class DeskPlacementSystem
 
   // Reusable scratch objects -- allocated once, never inside update().
   private _headPos = new Vector3();
+  /** The placement mode decided at the layout anchor (decideMode); dataset switches keep it. */
+  private anchoredMode: PlacementMode = { kind: 'floating' };
+  private readonly _footprintPoint = new Vector3();
+  /** The layout anchor's eyes and yaw (useAnchor): what every placement reads. */
+  private readonly _eyes = new Vector3(0, 1.6, 0);
+  private eyesYaw = 0;
   private _headQuat = new Quaternion();
   private _headEuler = new Euler();
   private _headYaw = 0;
   private _headPitchDown = 0;
-  private _forward = new Vector3();
-  private _right = new Vector3();
   private _local = new Vector3();
   private _anchor = new Vector3();
   private _slabCenter = new Vector3();
@@ -356,7 +345,8 @@ export class DeskPlacementSystem
     this._headPos.set(0, 1.6, 0);
     this._headYaw = 0;
     this._headPitchDown = 0;
-    this.placeFloating();
+    this.anchoredMode = { kind: 'floating' };
+    this.placeAnchored();
     this.reportPlacement('cold start (floating, default head pose)', 'floating', null);
 
     this.queries.grabbedSlabs.subscribe('qualify', (entity) => {
@@ -480,6 +470,7 @@ export class DeskPlacementSystem
     }
     for (const entry of entries) {
       buildQueue.remove(entry.job);
+      disposeUIKitDocument(entry.slab?.doc.document);
       entry.slab?.entity.dispose();
     }
     this.parked.delete(dataset);
@@ -665,10 +656,32 @@ export class DeskPlacementSystem
         );
       }
     };
-    const onReset = () => {
-      const queued = this.recenter.onReset(performance.now());
-      if (import.meta.env.DEV && this.debug) {
-        console.log(`[DeskPlacement debug] reference space reset (recenter)${queued ? '; recenter queued' : '; merged with the last trigger'}`);
+    const onReset = (event: Event) => {
+      const now = performance.now();
+      // The new origin in the previous space (WebXR: optional; null when the platform doesn't know it).
+      const transform = (event as unknown as { transform?: { inverse: { matrix: Float32Array } } | null }).transform ?? null;
+      const debug = import.meta.env.DEV && this.debug;
+      // The Quest resets the space as a session starts: part of the session-start anchoring, not a second anchor.
+      if (!this.headPoseValid || now - this.sessionStartMs < SESSION_START_RESET_SECONDS * 1000) {
+        if (debug) {
+          console.log(
+            `[DeskPlacement debug] reference space reset ${((now - this.sessionStartMs) / 1000).toFixed(1)} s into the session ` +
+              `(${transform ? 'with' : 'without'} a correction): part of the session start; nothing moved, the anchor stays`,
+          );
+        }
+        return;
+      }
+      if (transform) {
+        // Tracking corrected itself: keep everything where it is in the room (the same correction for all of it).
+        this.applyTrackingCorrection(this._correction.fromArray(transform.inverse.matrix));
+        return;
+      }
+      const queued = this.recenter.onReset(now);
+      if (debug) {
+        console.log(
+          `[DeskPlacement debug] reference space reset without a correction (the system recenter, or tracking lost): ` +
+            `${queued ? 'recenter queued: the layout comes back in front, from a new anchor' : 'merged with the last trigger'}`,
+        );
       }
     };
     session.addEventListener('visibilitychange', onVisibility);
@@ -741,6 +754,9 @@ export class DeskPlacementSystem
    * the join system re-places the band, result and card as the pair glides.
    */
   private runRecenter(reason: RecenterReason): void {
+    if (import.meta.env.DEV) {
+      allowMoves('recenter', performance.now() / 1000, RECENTER_GLIDE_SECONDS + 0.3);
+    }
     this.readHeadPose();
     // The button's recenter faces where the head looked at the end of its countdown.
     const groupYawBefore = this.groupYaw();
@@ -748,6 +764,10 @@ export class DeskPlacementSystem
       this._headYaw = this.recenterYaw;
     }
     this.recenterYaw = null;
+    // The new layout anchor: everything is placed from it until the next one.
+    setLayoutAnchor(this._headPos, this._headYaw, ANCHOR_REASON[reason]);
+    this.useAnchor();
+    this.noteAnchor();
     for (const slab of this.slabs) {
       const object = slab.entity.object3D;
       slab.glide.fromPos.copy(object?.position ?? slab.glide.fromPos);
@@ -761,25 +781,27 @@ export class DeskPlacementSystem
     let kind: PlacementKind = 'floating';
     let placement: SurfacePlacementCase | null = 'floating';
     const surfaceEntity = this.lastSurface?.entity ?? null;
+    // The new anchor decides the placement mode (desk or floating) afresh; switches keep it.
     if (surfaceEntity) {
       const surfaceKind = surfaceEntity.hasComponent(XRMesh) ? 'mesh' : 'plane';
       if (this.assessSurface(surfaceEntity, surfaceKind, this._best)) {
         this.lastSurface = this._best;
         this.lastSurfaceY = this._best.surfaceY;
-        placement = this.placeOnSurface(this._best.surfaceY, this._best);
+        placement = this.decideMode(this._best.surfaceY, this._best);
         kind = placement === 'floating' ? 'floating' : 'surface';
       } else {
-        this.placeFloating();
+        this.decideMode(null, null);
       }
       this.surfaceTooFar = placement === 'floating';
     } else if (this.lastSurfaceY !== null) {
       // The dev-forced desk: at the same height below the eyes.
-      this.lastSurfaceY = this._headPos.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD;
-      placement = this.placeOnSurface(this.lastSurfaceY, null);
+      this.lastSurfaceY = this._eyes.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD;
+      placement = this.decideMode(this.lastSurfaceY, null);
       kind = 'synthetic';
     } else {
-      this.placeFloating();
+      this.decideMode(null, null);
     }
+    this.placeAnchored();
     this.collectingTargets = false;
 
     // The normal side-by-side poses are the slabs' new homes (a later
@@ -843,6 +865,9 @@ export class DeskPlacementSystem
    */
   private updateSwitch(delta: number): void {
     const state = this.deskStateValue;
+    if (import.meta.env.DEV && state.phase !== 'ready') {
+      allowMoves('dataset-switch', performance.now() / 1000);
+    }
     if (state.phase === 'ready') {
       const target = this.pendingDataset;
       const docked = this.slabs.some((slab) => slab.entity.hasComponent(JoinDocked));
@@ -883,6 +908,7 @@ export class DeskPlacementSystem
           );
         } else {
           for (const slab of this.slabs) {
+            disposeUIKitDocument(slab.doc.document);
             slab.entity.dispose();
           }
         }
@@ -928,12 +954,9 @@ export class DeskPlacementSystem
         );
       }
       // Both built: place them for their sizes, then start them one sink-depth down.
+      // In the mode decided at the anchor (never re-decided here): only resized for these slabs.
       this.placingForSwitch = true;
-      if (this.lastSurfaceY !== null) {
-        this.placeOnSurface(this.lastSurfaceY, this.lastSurface);
-      } else {
-        this.placeFloating();
-      }
+      this.placeAnchored();
       this.placingForSwitch = false;
       for (const slab of this.slabs) {
         const object = slab.entity.object3D;
@@ -1019,7 +1042,62 @@ export class DeskPlacementSystem
     }
   }
 
+  /**
+   * A reference-space reset with its correction (`correction` maps the old
+   * space's points to the new one): the anchor, every slab and the homes
+   * move by it, so nothing moves in the room; the mode's desk height too.
+   * The join system re-reads the homes and re-places the result, card and
+   * column from the corrected anchor (placementEpoch).
+   */
+  private applyTrackingCorrection(correction: Matrix4): void {
+    const now = performance.now() / 1000;
+    if (import.meta.env.DEV) {
+      allowMoves('tracking-correction', now, 0.5);
+    }
+    this._correctionQuat.setFromRotationMatrix(correction);
+    this._correctionEuler.setFromQuaternion(this._correctionQuat, 'YXZ');
+    const anchor = layoutAnchor();
+    const before = this._footprintPoint.set(anchor.x, anchor.y, anchor.z).clone();
+    const eyes = this._footprintPoint.applyMatrix4(correction);
+    setLayoutAnchor(eyes, anchor.yaw + this._correctionEuler.y, 'reset');
+    this.useAnchor();
+    // The desk's height in the corrected space (rigid: yaw and a shift).
+    const surfaceShift = eyes.y - before.y;
+    if (this.anchoredMode.kind !== 'floating') {
+      this.anchoredMode = { ...this.anchoredMode, surfaceY: this.anchoredMode.surfaceY + surfaceShift };
+    }
+    if (this.lastSurfaceY !== null) {
+      this.lastSurfaceY += surfaceShift;
+    }
+    if (this.deskSurfaceY !== null) {
+      this.deskSurfaceY += surfaceShift;
+    }
+    for (const slab of this.slabs) {
+      const object = slab.entity.object3D;
+      if (object) {
+        object.position.applyMatrix4(correction);
+        object.quaternion.premultiply(this._correctionQuat);
+      }
+    }
+    for (const home of this.recenterHomes.values()) {
+      home.pos.applyMatrix4(correction);
+      home.quat.premultiply(this._correctionQuat);
+    }
+    this.placementEpoch++;
+    if (import.meta.env.DEV && this.debug) {
+      console.log(
+        `[DeskPlacement debug] reference space reset with a correction (${before.distanceTo(eyes).toFixed(3)} m, ` +
+          `${yawRightDeg(-this._correctionEuler.y)} turn): everything kept in place in the room; the anchor corrected (#${layoutAnchor().epoch})`,
+      );
+      this.noteAnchor();
+    }
+  }
+  private readonly _correction = new Matrix4();
+  private readonly _correctionQuat = new Quaternion();
+  private readonly _correctionEuler = new Euler();
+
   private onSessionStart(): void {
+    this.sessionStartMs = performance.now();
     for (const slab of this.slabs) {
       slab.touched = false;
     }
@@ -1048,8 +1126,15 @@ export class DeskPlacementSystem
   }
 
   private beginSessionPlacement(): void {
+    if (import.meta.env.DEV) {
+      allowMoves('placement', performance.now() / 1000, 0.5);
+    }
     this.readHeadPose();
-    this.placeFloating();
+    setLayoutAnchor(this._headPos, this._headYaw, 'session-start');
+    this.noteAnchor();
+    // Floating until the surface search (part of this session-start anchoring) commits.
+    this.decideMode(null, null);
+    this.placeAnchored();
     this.reportPlacement('session start (floating, before surface search)', 'floating', null);
 
     this.searching = true;
@@ -1074,8 +1159,7 @@ export class DeskPlacementSystem
       return;
     }
 
-    this.player.head.updateWorldMatrix(true, false);
-    this._headPos.setFromMatrixPosition(this.player.head.matrixWorld);
+    this.useAnchor();
 
     const previousBest = this.bestCandidateEntity;
     this.bestCandidateEntity = null;
@@ -1095,7 +1179,7 @@ export class DeskPlacementSystem
     }
 
     if (import.meta.env.DEV && this.debug && this.bestCandidateEntity !== previousBest) {
-      this.debug.logChosenChange(this._headPos, this.collectCandidates(), this.bestCandidateEntity);
+      this.debug.logChosenChange(this._eyes, this.collectCandidates(), this.bestCandidateEntity);
     }
 
     const stable =
@@ -1188,7 +1272,7 @@ export class DeskPlacementSystem
       out.surfaceY = this._local.y;
 
       // Nearest point of the surface's footprint to the head.
-      this._local.copy(this._headPos);
+      this._local.copy(this._eyes);
       object.worldToLocal(this._local);
       this._local.x = MathUtils.clamp(this._local.x, out.minX, out.maxX);
       this._local.z = MathUtils.clamp(this._local.z, out.minZ, out.maxZ);
@@ -1198,10 +1282,10 @@ export class DeskPlacementSystem
       this._local.setFromMatrixPosition(object.matrixWorld);
       out.surfaceY = this._local.y;
     }
-    const dx = this._local.x - this._headPos.x;
-    const dz = this._local.z - this._headPos.z;
+    const dx = this._local.x - this._eyes.x;
+    const dz = this._local.z - this._eyes.z;
     out.distance = Math.sqrt(dx * dx + dz * dz);
-    out.heightBelowHead = this._headPos.y - out.surfaceY;
+    out.heightBelowHead = this._eyes.y - out.surfaceY;
 
     // Label is only checked after geometry so the debug readout still shows
     // where a rejected surface sits. Meshes and planes alike: only a table or
@@ -1227,9 +1311,12 @@ export class DeskPlacementSystem
   }
 
   private commitSearch(): void {
+    if (import.meta.env.DEV) {
+      allowMoves('placement', performance.now() / 1000, 0.5);
+    }
     this.searching = false;
     const candidate = this.bestCandidateEntity;
-    this.readHeadPose();
+    this.useAnchor();
 
     const kind = candidate?.hasComponent(XRMesh) ? 'mesh' : 'plane';
     if (!candidate || !this.assessSurface(candidate, kind, this._best)) {
@@ -1242,7 +1329,8 @@ export class DeskPlacementSystem
 
     this.lastSurfaceY = this._best.surfaceY;
     this.lastSurface = this._best;
-    const placement = this.placeOnSurface(this._best.surfaceY, this._best);
+    const placement = this.decideMode(this._best.surfaceY, this._best);
+    this.placeAnchored();
     this.surfaceTooFar = placement === 'floating';
     this.reportPlacement(
       placement === 'floating'
@@ -1256,15 +1344,136 @@ export class DeskPlacementSystem
   }
 
   private commitForcedSurface(): void {
+    if (import.meta.env.DEV) {
+      allowMoves('placement', performance.now() / 1000, 0.5);
+    }
     this.searching = false;
-    this.readHeadPose();
-    this.lastSurfaceY = this._headPos.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD;
+    this.useAnchor();
+    this.lastSurfaceY = this._eyes.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD;
     this.lastSurface = null;
-    this.placeOnSurface(this.lastSurfaceY, null);
+    this.decideMode(this.lastSurfaceY, null);
+    this.placeAnchored();
     this.reportPlacement('forced surface (SYNTHETIC, ?forceSurface)', 'synthetic', null);
   }
 
   /** Reads head position, flattened yaw, and pitch (positive = looking down). */
+  /**
+   * Placement's eyes and facing: the session layout anchor (layout-anchor.ts),
+   * never the live head. Every placement and surface assessment reads these.
+   */
+  /** The pair's sizes as built (meters), for pair-placement.ts. */
+  private pairSizes(): [SlabSize, SlabSize] {
+    const size = (slab: Slab): SlabSize => ({
+      width: slab.doc.widthMeters,
+      height: this.slabHeightMeters(slab.doc),
+      tab: slab.doc.tabHeightMeters,
+    });
+    return [size(this.slabs[0]), size(this.slabs[1])];
+  }
+
+  /** A detected surface's footprint in its own frame (pair-placement.ts), or null without bounds. */
+  private footprintOf(surface: SurfaceAssessment | null): Footprint | null {
+    const object = surface?.entity?.object3D;
+    if (!surface || !surface.hasBounds || !object) {
+      return null;
+    }
+    object.updateWorldMatrix(true, false);
+    const convert = (p: P3, toLocal: boolean): P3 => {
+      this._footprintPoint.set(p.x, p.y, p.z);
+      if (toLocal) {
+        object.worldToLocal(this._footprintPoint);
+      } else {
+        object.localToWorld(this._footprintPoint);
+      }
+      return { x: this._footprintPoint.x, y: this._footprintPoint.y, z: this._footprintPoint.z };
+    };
+    return {
+      toLocal: (p) => convert(p, true),
+      toWorld: (p) => convert(p, false),
+      minX: surface.minX,
+      maxX: surface.maxX,
+      minZ: surface.minZ,
+      maxZ: surface.maxZ,
+      topY: surface.topY,
+    };
+  }
+
+  /**
+   * Decides the placement mode (floating, on the desk, or at its edge) for the
+   * layout anchor just set -- the only place it's decided. Dataset switches
+   * keep it (placeAnchored), so a new dataset's sizes never tip it.
+   */
+  private decideMode(surfaceY: number | null, surface: SurfaceAssessment | null): PlacementMode['kind'] {
+    if (this.slabs.length !== 2) {
+      this.anchoredMode = { kind: 'floating' };
+      return 'floating';
+    }
+    this.useAnchor();
+    const [left, right] = this.pairSizes();
+    const decision = decidePlacementMode(
+      this._eyes,
+      this.eyesYaw,
+      surfaceY === null ? null : { y: surfaceY, footprint: this.footprintOf(surface) },
+      left,
+      right,
+    );
+    this.anchoredMode = decision.mode;
+    if (import.meta.env.DEV && this.debug) {
+      console.log(
+        `[DeskPlacement debug] placement mode decided at the anchor (#${layoutAnchor().epoch}): ${decision.mode.kind}` +
+          (decision.surfaceForward === null
+            ? ' (no surface)'
+            : ` (the surface puts the slabs' bottom edges ${decision.surfaceForward.toFixed(2)} m ahead; the ` +
+              `${SLAB_VIEW_DISTANCE_METERS} m view distance puts them ${decision.reachForward?.toFixed(2)} m ahead; ` +
+              `desk-edge up to ${DESK_EDGE_BEYOND_REACH_MAX_METERS} m beyond that)`) +
+          '; kept until the next anchor',
+      );
+    }
+    return decision.mode.kind;
+  }
+
+  /** Places the pair from the layout anchor, in the mode decided at it (pair-placement.ts). */
+  private placeAnchored(): void {
+    if (!this.canPlace()) {
+      return;
+    }
+    this.useAnchor();
+    const [leftSlab, rightSlab] = this.slabs;
+    const [left, right] = this.pairSizes();
+    const plan = planPair(this._eyes, this.eyesYaw, this.anchoredMode, left, right);
+    this.deskSurfaceY = plan.deskY;
+    // The pair's middle (the dev placement report's synthetic-desk center).
+    const l = plan.left.center;
+    const rc = plan.right.center;
+    this._anchor.set((l.x + rc.x) / 2, (l.y + rc.y) / 2, (l.z + rc.z) / 2);
+    if (!this.isFrozen(leftSlab.entity, leftSlab.touched)) {
+      const c = plan.left.center;
+      this.applySlabTransform(leftSlab.entity, this._slabCenter.set(c.x, c.y, c.z), plan.left.lean);
+    }
+    if (!this.isFrozen(rightSlab.entity, rightSlab.touched)) {
+      const c = plan.right.center;
+      this.applySlabTransform(rightSlab.entity, this._slabCenter.set(c.x, c.y, c.z), plan.right.lean);
+    }
+    this.warnIfOutOfView();
+  }
+
+  /** Dev: the layout anchor just set (everything is placed from it until the next one). */
+  private noteAnchor(): void {
+    if (import.meta.env.DEV && this.debug) {
+      const a = layoutAnchor();
+      console.log(
+        `[DeskPlacement debug] layout anchor set (${a.reason}, #${a.epoch}): eyes (${a.x.toFixed(2)}, ${a.y.toFixed(2)}, ` +
+          `${a.z.toFixed(2)}), facing ${yawRightDeg(a.yaw)}; every placement is computed from it until the next one`,
+      );
+    }
+  }
+
+  private useAnchor(): void {
+    anchorEyes(this._eyes);
+    this.eyesYaw = layoutAnchor().yaw;
+  }
+
+  /** The live head, for sensing only (facing, the Recenter countdown, the session-start wait); never for placement. */
   private readHeadPose(): void {
     this.player.head.updateWorldMatrix(true, false);
     this._headPos.setFromMatrixPosition(this.player.head.matrixWorld);
@@ -1272,11 +1481,6 @@ export class DeskPlacementSystem
     this._headEuler.setFromQuaternion(this._headQuat, 'YXZ');
     this._headYaw = this._headEuler.y;
     this._headPitchDown = -this._headEuler.x;
-  }
-
-  private setYawAxes(yaw: number): void {
-    this._forward.set(0, 0, -1).applyAxisAngle(UP_AXIS, yaw);
-    this._right.set(1, 0, 0).applyAxisAngle(UP_AXIS, yaw);
   }
 
   /**
@@ -1301,246 +1505,13 @@ export class DeskPlacementSystem
     return size && size.height > 0 ? size.height / 100 : doc.heightMeters;
   }
 
-  /**
-   * Horizontal head distance for a reference point such that an edge `drop`
-   * meters below eye level (negative = above), lying `edgeOffset` meters
-   * farther away than that reference point, is inside the comfortable view.
-   */
-  private edgeFitDistance(drop: number, edgeOffset: number): number {
-    // Against the natural seated gaze, not the head's pitch at placement time.
-    return minDistanceForDrop(drop, NATURAL_GAZE_PITCH_RAD) - edgeOffset;
-  }
-
-  /** Horizontal center distance putting a center `drop` below the eyes (and `lateral` aside) at the slabs' view distance. */
-  private floatingReachForward(drop: number, lateral: number): number {
-    const r2 = SLAB_VIEW_DISTANCE_METERS * SLAB_VIEW_DISTANCE_METERS - drop * drop - lateral * lateral;
-    return r2 > 0 ? Math.sqrt(r2) : 0;
-  }
-
-  /**
-   * Bottom-edge distance putting a propped slab's center at the slabs'
-   * view distance, for a given lean: its center sits `half` up the slab
-   * from the bottom edge, which rests `eyeRise` below the eyes.
-   */
-  private surfaceReachForward(eyeRise: number, half: number, lean: number, lateral: number): number {
-    const centerDrop = eyeRise - half * Math.cos(lean);
-    const r2 = SLAB_VIEW_DISTANCE_METERS * SLAB_VIEW_DISTANCE_METERS - centerDrop * centerDrop - lateral * lateral;
-    return r2 > 0 ? Math.sqrt(r2) - half * Math.sin(lean) : 0;
-  }
-
-  /** Center distance keeping both edges of a floating slab in view. */
-  private floatingForwardToFit(half: number, sinLean: number, cosLean: number): number {
-    // Leaning back, the bottom edge is lower and nearer; the top edge higher and farther.
-    return Math.max(
-      this.edgeFitDistance(FLOATING_BELOW_HEAD_METERS + half * cosLean, -half * sinLean),
-      this.edgeFitDistance(FLOATING_BELOW_HEAD_METERS - half * cosLean, half * sinLean),
-    );
-  }
-
-  /**
-   * Floating fallback: ahead of and below the head, sharing the head's yaw
-   * and lean, with both slabs' bottom edges on one line (the taller slab's
-   * center at FLOATING_BELOW_HEAD_METERS), pushed forward if either edge of
-   * either slab would leave the comfortable view -- but never past the
-   * slabs' view distance (the farther slab's center sits at it).
-   */
-  private placeFloating(): void {
-    if (!this.canPlace()) {
-      return;
-    }
-    this.deskSurfaceY = null;
-    const [leftSlab, rightSlab] = this.slabs;
-    this.setYawAxes(this._headYaw);
-    const customersHalf = this.slabHeightMeters(leftSlab.doc) / 2;
-    const ordersHalf = this.slabHeightMeters(rightSlab.doc) / 2;
-    const leftOffset = SLAB_GAP_METERS / 2 + leftSlab.doc.widthMeters / 2;
-    const rightOffset = SLAB_GAP_METERS / 2 + rightSlab.doc.widthMeters / 2;
-    // Both centers at most the view distance away, even if that's nearer
-    // than FLOATING_FORWARD_METERS (a wide slab off to the side).
-    const reachForward = Math.min(
-      this.floatingReachForward(FLOATING_BELOW_HEAD_METERS, leftOffset),
-      this.floatingReachForward(FLOATING_BELOW_HEAD_METERS, rightOffset),
-    );
-    // Both centers sit at the same height and distance, so they share a lean.
-    let forward = FLOATING_FORWARD_METERS;
-    let lean = eyeFacingLean(FLOATING_BELOW_HEAD_METERS, forward);
-    for (let i = 0; i < FIT_ITERATIONS; i++) {
-      const sinLean = Math.sin(lean);
-      const cosLean = Math.cos(lean);
-      forward = Math.min(
-        reachForward,
-        Math.max(
-          FLOATING_FORWARD_METERS,
-          this.floatingForwardToFit(customersHalf, sinLean, cosLean),
-          this.floatingForwardToFit(ordersHalf, sinLean, cosLean),
-        ),
-      );
-      lean = eyeFacingLean(FLOATING_BELOW_HEAD_METERS, forward);
-    }
-    // `_anchor` is the taller slab's center; each slab's center sits its own
-    // half-height up the leaning plane from the shared bottom line.
-    this._anchor.copy(this._headPos).addScaledVector(this._forward, forward);
-    this._anchor.y = this._headPos.y - FLOATING_BELOW_HEAD_METERS;
-    const tallerHalf = Math.max(customersHalf, ordersHalf);
-    // Up along a slab leaning back by `lean`: up, and away from the viewer.
-    this._local.set(0, Math.cos(lean), 0).addScaledVector(this._forward, Math.sin(lean));
-
-    if (!this.isFrozen(leftSlab.entity, leftSlab.touched)) {
-      this._slabCenter
-        .copy(this._anchor)
-        .addScaledVector(this._right, -leftOffset)
-        .addScaledVector(this._local, customersHalf - tallerHalf);
-      this.applySlabTransform(leftSlab.entity, this._slabCenter, lean);
-    }
-    if (!this.isFrozen(rightSlab.entity, rightSlab.touched)) {
-      this._slabCenter
-        .copy(this._anchor)
-        .addScaledVector(this._right, rightOffset)
-        .addScaledVector(this._local, ordersHalf - tallerHalf);
-      this.applySlabTransform(rightSlab.entity, this._slabCenter, lean);
-    }
-    this.warnIfOutOfView();
-  }
-
-  /**
-   * Surface placement: both slabs share the head's yaw and stand side by
-   * side with their bottom edges on the surface along one line
-   * where their centers sit SLAB_VIEW_DISTANCE_METERS from the eyes (farther
-   * if needed to stay in view), each propped up so its face points at the eyes.
-   * With a detected surface, that line's midpoint is clamped to the
-   * surface's footprint.
-   */
-  private placeOnSurface(surfaceY: number, surface: SurfaceAssessment | null): SurfacePlacementCase | null {
-    if (!this.canPlace()) {
-      return null;
-    }
-    const [leftSlab, rightSlab] = this.slabs;
-    this.setYawAxes(this._headYaw);
-
-    const customersHeight = this.slabHeightMeters(leftSlab.doc);
-    const ordersHeight = this.slabHeightMeters(rightSlab.doc);
-    const eyeRise = this._headPos.y - (surfaceY + SURFACE_LIFT_METERS);
-    const leftOffset = SLAB_GAP_METERS / 2 + leftSlab.doc.widthMeters / 2;
-    const rightOffset = SLAB_GAP_METERS / 2 + rightSlab.doc.widthMeters / 2;
-
-    // Each slab leans to face the eyes from its own center; the bottom-edge
-    // line puts their centers at the view distance, farther if both edges of
-    // both slabs need it to stay in view. They depend on each other, so
-    // alternate a few times.
-    let forward = SURFACE_FORWARD_METERS;
-    for (let i = 0; i < FIT_ITERATIONS; i++) {
-      const customersLean = eyeFacingLeanFromBottom(eyeRise, forward, customersHeight);
-      const ordersLean = eyeFacingLeanFromBottom(eyeRise, forward, ordersHeight);
-      const reachForward = Math.max(
-        SURFACE_FORWARD_METERS,
-        Math.min(
-          this.surfaceReachForward(eyeRise, customersHeight / 2, customersLean, leftOffset),
-          this.surfaceReachForward(eyeRise, ordersHeight / 2, ordersLean, rightOffset),
-        ),
-      );
-      forward = Math.max(
-        reachForward,
-        this.surfaceForwardToFit(surfaceY, customersHeight / 2, Math.sin(customersLean), Math.cos(customersLean)),
-        this.surfaceForwardToFit(surfaceY, ordersHeight / 2, Math.sin(ordersLean), Math.cos(ordersLean)),
-      );
-    }
-
-    this._anchor.copy(this._headPos).addScaledVector(this._forward, forward);
-    this._anchor.y = surfaceY;
-
-    const object = surface?.entity?.object3D;
-    if (surface && surface.hasBounds && object) {
-      object.updateWorldMatrix(true, false);
-      object.worldToLocal(this._anchor);
-      this._anchor.x = MathUtils.clamp(this._anchor.x, surface.minX, surface.maxX);
-      this._anchor.z = MathUtils.clamp(this._anchor.z, surface.minZ, surface.maxZ);
-      this._anchor.y = surface.topY;
-      object.localToWorld(this._anchor);
-    }
-
-    // The view distance wins over the surface: the clamp to the footprint may
-    // have pushed the bottom edges past the line (a desk whose near edge is
-    // far away). A little past: sit at the line, at the desk's height, just
-    // in front of its edge. Farther: don't use the surface at all (floating).
-    this._local.subVectors(this._anchor, this._headPos);
-    let anchorForward = Math.max(0.05, this._local.dot(this._forward));
-    const anchorEyeRise = this._headPos.y - (this._anchor.y + SURFACE_LIFT_METERS);
-    let reachForward = anchorForward;
-    for (let i = 0; i < FIT_ITERATIONS; i++) {
-      reachForward = Math.min(
-        this.surfaceReachForward(
-          anchorEyeRise,
-          customersHeight / 2,
-          eyeFacingLeanFromBottom(anchorEyeRise, reachForward, customersHeight),
-          leftOffset,
-        ),
-        this.surfaceReachForward(
-          anchorEyeRise,
-          ordersHeight / 2,
-          eyeFacingLeanFromBottom(anchorEyeRise, reachForward, ordersHeight),
-          rightOffset,
-        ),
-      );
-    }
-    const placement = surfacePlacementCase(anchorForward, reachForward);
-    if (import.meta.env.DEV && this.debug) {
-      console.log(
-        `[DeskPlacement debug] surface placement: ${placement} (the surface puts the slabs' bottom edges ` +
-          `${anchorForward.toFixed(2)} m ahead; the ${SLAB_VIEW_DISTANCE_METERS} m view distance puts them ` +
-          `${reachForward.toFixed(2)} m ahead; desk-edge up to ${DESK_EDGE_BEYOND_REACH_MAX_METERS} m beyond that; surface ${(this._headPos.y - surfaceY).toFixed(2)} m below the eyes)`,
-      );
-    }
-    if (placement === 'floating') {
-      this.placeFloating();
-      return placement;
-    }
-    if (placement === 'desk-edge') {
-      this._anchor.addScaledVector(this._forward, reachForward - anchorForward);
-      anchorForward = reachForward;
-    }
-    this.deskSurfaceY = this._anchor.y;
-    if (!this.isFrozen(leftSlab.entity, leftSlab.touched)) {
-      const lean = eyeFacingLeanFromBottom(anchorEyeRise, anchorForward, customersHeight);
-      this.proppedCenter(-leftOffset, customersHeight / 2, Math.sin(lean), Math.cos(lean));
-      this.applySlabTransform(leftSlab.entity, this._slabCenter, lean);
-    }
-    if (!this.isFrozen(rightSlab.entity, rightSlab.touched)) {
-      const lean = eyeFacingLeanFromBottom(anchorEyeRise, anchorForward, ordersHeight);
-      this.proppedCenter(rightOffset, ordersHeight / 2, Math.sin(lean), Math.cos(lean));
-      this.applySlabTransform(rightSlab.entity, this._slabCenter, lean);
-    }
-    this.warnIfOutOfView();
-    return placement;
-  }
-
-  /** Bottom-edge distance keeping both edges of a propped slab in view. */
-  private surfaceForwardToFit(surfaceY: number, half: number, sinLean: number, cosLean: number): number {
-    const bottomY = surfaceY + SURFACE_LIFT_METERS;
-    // The highest point is the name tab's top (the taller of the two).
-    const tab = Math.max(0, ...this.slabs.map((slab) => slab.doc.tabHeightMeters));
-    const topY = bottomY + (2 * half + tab) * cosLean;
-    // Only the top edge is fitted: a slab resting on a desk keeps its bottom
-    // edge on the desk even when that's a few degrees under the view window
-    // (looking down at a desk is natural; approved 2026-10-07). The debug
-    // readout still warns when it is.
-    return this.edgeFitDistance(this._headPos.y - topY, (2 * half + tab) * sinLean);
-  }
-
-  private proppedCenter(lateral: number, half: number, sinLean: number, cosLean: number): void {
-    this._slabCenter
-      .copy(this._anchor)
-      .addScaledVector(this._right, lateral)
-      .addScaledVector(this._forward, half * sinLean);
-    this._slabCenter.y += SURFACE_LIFT_METERS + half * cosLean;
-  }
-
   private applySlabTransform(entity: Entity, center: Vector3, leanFromVertical: number): void {
     // A recenter records the target for its glide instead of moving the slab.
     if (this.collectingTargets) {
       const slab = this.slabs.find((s) => s.entity === entity);
       if (slab) {
         slab.glide.toPos.copy(center);
-        this._headEuler.set(-leanFromVertical, this._headYaw, 0, 'YXZ');
+        this._headEuler.set(-leanFromVertical, this.eyesYaw, 0, 'YXZ');
         slab.glide.toQuat.setFromEuler(this._headEuler);
       }
       return;
@@ -1552,7 +1523,7 @@ export class DeskPlacementSystem
     object.position.copy(center);
     // Shared yaw for both slabs: the head's flattened yaw makes each slab's
     // +Z face point back toward the viewer, like two sheets side by side.
-    object.rotation.set(-leanFromVertical, this._headYaw, 0, 'YXZ');
+    object.rotation.set(-leanFromVertical, this.eyesYaw, 0, 'YXZ');
   }
 
   /** Measures a placed slab's top/bottom edges into `_edges`. */
@@ -1564,7 +1535,7 @@ export class DeskPlacementSystem
     const half = this.slabHeightMeters(doc) / 2;
     // The top edge is the name tab's top: the highest thing on the slab.
     return measureSlabEdges(
-      this._headPos,
+      this._eyes,
       NATURAL_GAZE_PITCH_RAD,
       object,
       half + doc.tabHeightMeters,
@@ -1582,7 +1553,7 @@ export class DeskPlacementSystem
     }
     object.updateWorldMatrix(true, false);
     this._center.setFromMatrixPosition(object.matrixWorld);
-    return this._center.distanceTo(this._headPos);
+    return this._center.distanceTo(this._eyes);
   }
 
   /**
@@ -1621,13 +1592,13 @@ export class DeskPlacementSystem
     const slabs: SlabReport[] = this.slabs.map((slab) =>
       this.slabReport(slab.table.id, slab.entity, slab.doc, slab.touched),
     );
-    const syntheticY = kind === 'synthetic' ? this._headPos.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD : null;
-    this._basePos.copy(this._headPos);
+    const syntheticY = kind === 'synthetic' ? this._eyes.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD : null;
+    this._basePos.copy(this._eyes);
     this.debug.logPlacement({
       event,
       kind,
       headPosition: this._basePos,
-      headYawDeg: MathUtils.radToDeg(this._headYaw),
+      headYawDeg: MathUtils.radToDeg(this.eyesYaw),
       headPitchDownDeg: MathUtils.radToDeg(this._headPitchDown),
       candidates: this.collectCandidates(),
       chosen: chosen?.entity ?? null,
@@ -1638,7 +1609,7 @@ export class DeskPlacementSystem
               y: syntheticY,
               heightBelowHead: FORCE_SURFACE_HEIGHT_BELOW_HEAD,
               center: this._anchor.clone(),
-              yaw: this._headYaw,
+              yaw: this.eyesYaw,
             },
       slabs,
     });

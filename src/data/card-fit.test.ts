@@ -7,8 +7,9 @@ import {
   cardMetrics,
   wrappedLines,
 } from '../card-metrics.js';
-import { DATA_METRICS, HEADER_METRICS } from '../slab-metrics.js';
-import { CARD, CONCEPT_INTROS, NULL_EXPLAINER, WELCOME } from './copy.js';
+import { DATA_METRICS, HEADER_METRICS, measureTextCm } from '../slab-metrics.js';
+import { BROWSER_NOTICE, CARD, CONCEPT_INTROS, FREE_PLAY_DORMANT, NULL_EXPLAINER, WELCOME } from './copy.js';
+import { WELCOME_LAYOUT as L } from '../welcome-layout.js';
 import { DATASET_IDS } from './datasets.js';
 import { PRACTICE_ORDER, PUZZLES } from './puzzles.js';
 import { puzzleText } from './puzzle-text.js';
@@ -59,6 +60,22 @@ describe('the puzzle card fits its text', () => {
     }
   });
 
+  it('the daily streak and its milestone lines fit the status line after the flame', () => {
+    const flame = m.smallFont * 1.35;
+    for (const days of [1, 2, 3, 7, 14, 30, 365]) {
+      const text = CARD.streakMilestone(days) ?? WELCOME.streak(days);
+      expect(measureTextCm(text, DATA_METRICS, m.smallFont) + flame, text).toBeLessThanOrEqual(m.innerWidthCm);
+      expect(text).toMatch(/^[\x20-\x7e]+$/);
+    }
+    expect([3, 7, 14, 30].map((days) => CARD.streakMilestone(days))).toEqual([
+      '3-day streak!',
+      '7 days: a full week!',
+      '14 days: two weeks strong!',
+      '30-day streak!',
+    ]);
+    expect(CARD.streakMilestone(4)).toBeNull();
+  });
+
   it('every hint, intro and coach line fits the message area', () => {
     for (const puzzle of PUZZLES) {
       for (const hint of puzzleText(puzzle).hints) {
@@ -107,6 +124,89 @@ describe('the puzzle card fits its text', () => {
       expect(cardMessageLines(takeaway) + queryLines + noteLines, `${puzzle.id}: ${takeaway}`).toBeLessThanOrEqual(
         CARD_MESSAGE_LINES,
       );
+    }
+  });
+});
+
+/**
+ * The welcome page (HTML) at the Quest Browser's default window, where its
+ * sizes are smallest (welcome-layout.ts). Measured with the slab fonts'
+ * Inter metrics (light for regular text, bold for bold), with a margin for
+ * the page's regular and extra-bold weights being a little wider.
+ */
+describe('the welcome page fits its text at the Quest default window', () => {
+  const WEIGHT_MARGIN = 1.08;
+  const regular = (text: string, px: number) => measureTextCm(text, DATA_METRICS, px) * WEIGHT_MARGIN;
+  const bold = (text: string, px: number) => measureTextCm(text, HEADER_METRICS, px) * WEIGHT_MARGIN;
+  const lines = (text: string, px: number, width: number, isBold = false) =>
+    wrappedLines(text, isBold ? HEADER_METRICS : DATA_METRICS, px * WEIGHT_MARGIN, width);
+  const f = L.fontPx;
+
+  it('the title row, the tagline and the setup line each fit one line of the left column', () => {
+    expect(bold(WELCOME.title, f.title) + L.markPx).toBeLessThanOrEqual(L.columnPx);
+    expect(bold(WELCOME.description, f.tagline)).toBeLessThanOrEqual(L.columnPx);
+    expect(regular(WELCOME.setup, f.body)).toBeLessThanOrEqual(L.columnPx);
+    expect(regular(FREE_PLAY_DORMANT.description, f.body)).toBeLessThanOrEqual(L.columnPx);
+  });
+
+  it('every Start label fits the button beside its icon', () => {
+    for (const label of [WELCOME.start, WELCOME.startPuzzle(20), FREE_PLAY_DORMANT.start]) {
+      expect(bold(label, f.start) + L.startIconPx + 40, label).toBeLessThanOrEqual(L.columnPx);
+    }
+  });
+
+  it('the secondary actions fit one row; the reset question at most two lines above Cancel and Reset', () => {
+    const buttonWidth = (label: string) => bold(label, f.secondary) + 2 * L.secondaryPaddingPx + 4;
+    const linkWidth = regular(WELCOME.resetLink, f.link) + 8;
+    for (const label of [WELCOME.choosePuzzle, WELCOME.pickerBack]) {
+      expect(buttonWidth(label) + 10 + linkWidth, label).toBeLessThanOrEqual(L.columnPx);
+    }
+    expect(buttonWidth(WELCOME.resetCancel) + 10 + buttonWidth(WELCOME.resetConfirm)).toBeLessThanOrEqual(L.columnPx);
+    expect(lines(WELCOME.resetQuestion, 20, L.columnPx)).toBeLessThanOrEqual(2);
+  });
+
+  it('the progress lines fit the right column (at most two lines each), with the calendar', () => {
+    const daily = [WELCOME.practiceFirst, WELCOME.dailyDone, WELCOME.dailyDoneAllDone, WELCOME.dailyRevealed, ...DATASET_IDS.map((id) => WELCOME.dailyOpen(id))];
+    for (const text of daily) {
+      expect(lines(text, f.body, L.sidePx, true), text).toBeLessThanOrEqual(2);
+    }
+    const plain = [
+      WELCOME.practiceProgress(20, 20),
+      WELCOME.practiceProgressWithAnswers(20, 20, 19),
+      WELCOME.allDone(20),
+      WELCOME.allDoneWithAnswers(20, 19),
+      WELCOME.saveUnavailable,
+    ];
+    for (const text of plain) {
+      expect(lines(text, f.body, L.sidePx), text).toBeLessThanOrEqual(2);
+    }
+    for (const text of [WELCOME.streakStart, WELCOME.streakAfterPractice, `${WELCOME.streak(365)}. ${WELCOME.streakAtRisk}`]) {
+      expect(lines(text, f.body, L.sidePx - L.flamePx), text).toBeLessThanOrEqual(2);
+    }
+    // Seven 36 px days, 6 apart; the month's title between its two 36 px arrows.
+    const calendarWidth = 7 * 36 + 6 * 6;
+    expect(calendarWidth).toBeLessThanOrEqual(L.sidePx);
+    for (let month = 1; month <= 12; month++) {
+      const title = WELCOME.monthTitle(2026, month);
+      expect(bold(title, 20) + 2 * 36 + 8, title).toBeLessThanOrEqual(calendarWidth);
+    }
+    expect(WELCOME.weekdays.join('')).toBe('MTWTFSS');
+  });
+
+  it('is plain ASCII, like the rest of the copy', () => {
+    const all = [
+      WELCOME.datasetsLabel,
+      WELCOME.calendarLabel(WELCOME.monthTitle(2026, 9), 30, 30),
+      ...WELCOME.monthNames,
+      WELCOME.previousMonth,
+      WELCOME.nextMonth,
+      WELCOME.pickerLabel,
+      WELCOME.tileLabel(20, 'revealed', true),
+      ...Object.values(BROWSER_NOTICE),
+      ...Object.values(FREE_PLAY_DORMANT),
+    ];
+    for (const text of all) {
+      expect(text).toMatch(/^[\x20-\x7e]+$/);
     }
   });
 });

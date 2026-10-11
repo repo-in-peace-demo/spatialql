@@ -172,7 +172,11 @@ import {
 import { buildQueue, type BuildJob } from './build-queue.js';
 import { chooseFrameRate, PREFERRED_FRAME_RATE_HZ } from './frame-rate.js';
 import { keptDatasets, onKeptDatasets } from './dataset-cache.js';
+import { anchorEyes, layoutAnchor } from './layout-anchor.js';
+import { allowMoves, checkMove, type Tracked } from './move-guard.js';
 import { PressDips } from './press-dip.js';
+import { censusText, sceneCensus } from './scene-census.js';
+import { disposeUIKitDocument } from './uikit-dispose.js';
 import { sounds } from './sound.js';
 import {
   BOUNCE_FIRST_IMPACT,
@@ -901,6 +905,8 @@ export class JoinSystem
   private control!: JoinTypeControlView;
   private controlEntity!: Entity;
   private debug: JoinDebug | null = null;
+  /** Dev: the kept datasets whose settled census is still to log (scene-census.ts). */
+  private censusPending: string | null = null;
   /** Which hand holds a slab (a hand holding one doesn't poke or pinch the side column). */
   private grabSystem: GrabSystem | undefined;
 
@@ -920,6 +926,8 @@ export class JoinSystem
   private readonly _euler = new Euler();
   private readonly _color = new Color();
   private readonly _head = new Vector3();
+  /** The reach banner's eyes (the layout anchor's), below which it sits. */
+  private readonly _reachBannerEyes = new Vector3();
   /** Where placeAboveBand put a slab's bottom edge, and its up axis. */
   private readonly _placedBottom = new Vector3();
   /** Band-arc scratch (arcWorld). */
@@ -1092,7 +1100,16 @@ export class JoinSystem
     );
     // The kept datasets (challenge mode: the current puzzle's and its neighbors'):
     // build their result slabs ahead, dispose the rest.
-    this.cleanupFuncs.push(onKeptDatasets(() => this.trimResultViews()));
+    this.cleanupFuncs.push(
+      onKeptDatasets((kept) => {
+        this.trimResultViews();
+        if (import.meta.env.DEV && this.debug) {
+          // What's alive now (desk placement has trimmed its parked slabs already), and again once the builds settle.
+          this.censusPending = kept.join(', ');
+          this.debug.note(`kept datasets: ${this.censusPending}; now ${this.censusLine()}`);
+        }
+      }),
+    );
 
     this.cleanupFuncs.push(
       () => this.control.inner.removeEventListener('click', onInner),
@@ -1182,9 +1199,16 @@ export class JoinSystem
     }
     if (import.meta.env.DEV && this.debug) {
       this.noteFinishedBuilds();
+      if (this.censusPending !== null && buildQueue.pending === 0) {
+        this.debug.note(`kept datasets settled (${this.censusPending}): ${this.censusLine()}`);
+        this.censusPending = null;
+      }
     }
     this.updateDock(delta);
     this.updateGlides(delta);
+    if (import.meta.env.DEV && this.debug) {
+      this.guardMoves();
+    }
     sounds.update();
     this.unlockSoundOnPinch();
     this.samplePinchMotion();
@@ -1258,6 +1282,15 @@ export class JoinSystem
         this.debug.note(`recenter: new home poses (${ids.join(', ')})`);
       }
       this.layoutDirty = true;
+      // A new placement while joined and not gliding (a tracking correction): the result, card and column from the anchor now.
+      const joined = this.active && this.state.phase === 'joined' ? this.active : null;
+      if (joined && !desk.recenterGliding) {
+        const left = this.sources.get(joined.leftId);
+        const right = this.sources.get(joined.rightId);
+        if (left && right) {
+          this.placeResult(joined, left, right);
+        }
+      }
     }
     const gliding = desk.recenterGliding;
     const view = this.active;
@@ -1265,7 +1298,7 @@ export class JoinSystem
       const left = this.sources.get(view.leftId);
       const right = this.sources.get(view.rightId);
       if (left && right) {
-        this.readHead();
+        this.readAnchor();
         this.placeResult(view, left, right);
       }
     }
@@ -1317,7 +1350,7 @@ export class JoinSystem
     this._layoutA.copy(a.object.position);
     this._layoutB.copy(b.object.position);
     this.layoutDirty = false;
-    this.readHead();
+    this.readAnchor();
     // The column where it will be beside the result (the control joins it once joined).
     this.planGroup(a, b, false, 0);
     this.placeColumn(false);
@@ -1445,7 +1478,7 @@ export class JoinSystem
   private updateReach(delta: number): void {
     this.reachBanner.update(delta);
     if (this.reachBanner.shown && this.reachBelowGaze) {
-      this.reachBanner.placeBelowGaze(this.player.head);
+      this.reachBanner.placeBelowAnchor(anchorEyes(this._reachBannerEyes), layoutAnchor().yaw);
     }
     this.reachClock += delta;
     if (this.reachClock < 1 / REACH_CHECK_HZ) {
@@ -1550,9 +1583,8 @@ export class JoinSystem
    * Returns a dev note on where it went.
    */
   private placeReachBanner(): string {
-    const head = this.player.head;
-    head.updateWorldMatrix(true, false);
-    head.getWorldPosition(this._reachA);
+    // From the layout anchor's eyes, like every placement: the banner stays put as the head moves.
+    anchorEyes(this._reachA);
     let lower = -Infinity;
     let slabTopDistance = 0;
     let pairTop = -Infinity;
@@ -1595,7 +1627,7 @@ export class JoinSystem
     if (!Number.isFinite(band) || band < REACH_BANNER_MIN_DEG) {
       this.reachBelowGaze = true;
       this.reachBannerDeg = 0;
-      this.reachBanner.placeBelowGaze(head);
+      this.reachBanner.placeBelowAnchor(this._reachA, layoutAnchor().yaw);
       if (!import.meta.env.DEV) {
         return '';
       }
@@ -2042,6 +2074,87 @@ export class JoinSystem
    * gliding, no join animation, no switch or recenter, the card and outline
    * not fading -- for BACKGROUND_QUIET_SECONDS in a row.
    */
+  /** Dev: each element's last position, for guardMoves (move-guard.ts). */
+  private readonly moveTracks = new Map<string, Tracked>();
+
+  /**
+   * Dev: the source slabs, the result (its bottom edge: it grows upward from
+   * it) and the card may move only for an allowed reason (move-guard.ts);
+   * warns when one moved without one. The reasons this system sees itself
+   * are noted here; the others where they start.
+   */
+  private guardMoves(): void {
+    if (!import.meta.env.DEV) {
+      return;
+    }
+    const now = performance.now() / 1000;
+    if (this.dock.active) {
+      allowMoves('dock', now);
+    }
+    for (const glide of this.glides.values()) {
+      if (glide.active) {
+        allowMoves('glide-home', now);
+        break;
+      }
+    }
+    if (this.queries.held.entities.size > 0) {
+      // A little past the release: the card and outline follow the slab once it's let go.
+      allowMoves('grab', now, 0.6);
+    }
+    if (this.state.phase === 'separating') {
+      allowMoves('pull-apart', now);
+    }
+    if (deskBridge.desk?.recenterGliding) {
+      allowMoves('recenter', now);
+    }
+    const seen = new Set<string>();
+    const check = (name: string, position: Vector3) => {
+      seen.add(name);
+      let track = this.moveTracks.get(name);
+      if (!track) {
+        track = { last: null, warned: false };
+        this.moveTracks.set(name, track);
+      }
+      const moved = checkMove(track, position, now);
+      if (moved !== null && this.debug) {
+        const desk = deskBridge.desk;
+        this.debug.warn(
+          `moved without an allowed reason: ${name} by ${(moved * 100).toFixed(1)} cm in a frame (join ${this.state.phase}, ` +
+            `desk ${desk?.recenterGliding ? 'recentering' : 'still'}, layout anchor #${layoutAnchor().epoch}); only placement, Recenter, ` +
+            `a dataset or puzzle switch, the join, dock, pull-apart, the glide home and grabs may move it`,
+        );
+      }
+    };
+    for (const [id, slab] of this.sources) {
+      slab.object.updateWorldMatrix(true, false);
+      check(`the ${id} slab`, this._guardP.setFromMatrixPosition(slab.object.matrixWorld));
+    }
+    const view = this.active && this.state.phase === 'joined' && this.resultPlaced === this.active ? this.active : null;
+    if (view) {
+      check(`the result (${view.key})`, this._resultBottom);
+    }
+    const card = this.challengeLayout?.card.object;
+    if (card?.visible) {
+      card.updateWorldMatrix(true, false);
+      check('the card', this._guardP.setFromMatrixPosition(card.matrixWorld));
+    }
+    // Gone (a dataset switched, a join ended): seen fresh next time.
+    for (const name of [...this.moveTracks.keys()]) {
+      if (!seen.has(name)) {
+        this.moveTracks.delete(name);
+      }
+    }
+  }
+  private readonly _guardP = new Vector3();
+
+  /** Dev: the scene census plus this system's result slabs (built, and being built). */
+  private censusLine(): string {
+    if (!import.meta.env.DEV) {
+      return '';
+    }
+    return `${censusText(sceneCensus(this.scene, this.renderer))}${this.debug?.gcText() ?? ''}; result slabs ${this.results.size} (+${this.resultBuilds.size} building)`;
+  }
+
   private backgroundQuiet(delta: number): boolean {
     const desk = deskBridge.desk;
     const still =
@@ -2338,6 +2451,29 @@ export class JoinSystem
   }
 
   /** Dev (`R`): replays the join animation and sounds on the docked pair, without separating. */
+  debugLayoutSnapshot(): void {
+    if (!import.meta.env.DEV || !this.debug) {
+      return;
+    }
+    const at = (object: Object3D | null | undefined) => {
+      if (!object || !object.visible) {
+        return '-';
+      }
+      object.updateWorldMatrix(true, false);
+      const p = new Vector3().setFromMatrixPosition(object.matrixWorld);
+      return `(${p.x.toFixed(3)}, ${p.y.toFixed(3)}, ${p.z.toFixed(3)})`;
+    };
+    const anchor = layoutAnchor();
+    const sources = [...this.sources.entries()].map(([id, slab]) => `${id} ${at(slab.object)}`);
+    const view = this.active && this.state.phase === 'joined' ? this.active : null;
+    this.debug.note(
+      `layout snapshot (${this.state.phase}): ${sources.join(', ')}; result ${at(view?.object)}; ` +
+        `card ${at(this.challengeLayout?.card.object)}; column ${at(this.challengeLayout?.bar.object)}; ` +
+        `control ${view ? at(this.control.document) : '-'}; anchor (${anchor.x.toFixed(3)}, ${anchor.y.toFixed(3)}, ` +
+        `${anchor.z.toFixed(3)}) yaw ${MathUtils.radToDeg(anchor.yaw).toFixed(1)}° (${anchor.reason ?? 'unset'}, #${anchor.epoch})`,
+    );
+  }
+
   debugReplay(): void {
     const view = this.active;
     if (this.state.phase !== 'joined' || !view) {
@@ -2640,6 +2776,7 @@ export class JoinSystem
         this.active = null;
       }
       view.cleanup.forEach((fn) => fn());
+      disposeUIKitDocument(view.doc.document);
       view.entity.dispose();
       this.results.delete(key);
     }
@@ -2647,7 +2784,7 @@ export class JoinSystem
       const [leftId, rightId] = key.split('>');
       if (!(keep(leftId) && keep(rightId))) {
         buildQueue.remove(pending.job);
-        pending.build?.doc.document.dispose();
+        disposeUIKitDocument(pending.build?.doc.document);
         this.resultBuilds.delete(key);
       }
     }
@@ -3669,6 +3806,10 @@ export class JoinSystem
   // --- Join / toggle / separate -----------------------------------------------------
 
   private beginJoin(leftId: string, rightId: string, joinType: JoinType): void {
+    if (import.meta.env.DEV) {
+      // The join places the result and card and runs its sequence (about 1.2 s).
+      allowMoves('join', performance.now() / 1000, 2);
+    }
     const left = this.sources.get(leftId);
     const right = this.sources.get(rightId);
     const view = this.resultViewFor(leftId, rightId);
@@ -3713,7 +3854,7 @@ export class JoinSystem
       const rows = view.matchedRowCount + (joinType === 'left' ? view.ghostRows.length : 0) + view.placeholdersShown;
       this.tweens.set(view.doc.panelHeightCm, view.doc.heightForRowsMeters(rows) * 100);
     }
-    this.readHead();
+    this.readAnchor();
     this.placeResult(view, left, right);
     // A pair joined high (lifted toward the eyes) stacks the control, result
     // and card above the view's top: the pair glides down, with the dock,
@@ -4275,6 +4416,7 @@ export class JoinSystem
    * stay world-locked while the head moves.
    */
   private placeResult(view: ResultView, left: SourceSlab, right: SourceSlab): void {
+    this.readAnchor();
     left.object.updateWorldMatrix(true, false);
     left.object.getWorldQuaternion(this._q1);
 
@@ -4562,6 +4704,7 @@ export class JoinSystem
     if (!bar) {
       return;
     }
+    this.readAnchor();
     const r = BAND_ARC_RADIUS_METERS;
     // The bar's origin (its left edge's middle) on the arc, facing the eyes.
     const elevation = MathUtils.degToRad(this.plan.floorDeg) - this.headPitchDown + bar.heightMeters / 2 / r;
@@ -4753,7 +4896,7 @@ export class JoinSystem
 
   /** Dev: both shoulders and every grab point of the source slabs (reach-path.ts), from the eyes now. */
   private reachPaths(): { from: Vector3[]; to: Vector3[] } {
-    this.readHead();
+    this.readAnchor();
     const right = new Vector3().copy(this._colRight).setY(0).normalize();
     const from = shoulders(this._head, right).map((p) => new Vector3(p.x, p.y, p.z));
     const to: Vector3[] = [];
@@ -4918,7 +5061,7 @@ export class JoinSystem
    * pose read now, and again only when the slabs come to rest somewhere new.
    */
   private placePreJoin(a: SourceSlab, b: SourceSlab, layout: ChallengeLayout): void {
-    this.readHead();
+    this.readAnchor();
     a.object.updateWorldMatrix(true, false);
     b.object.updateWorldMatrix(true, false);
     // B's center in A's frame: the midpoint between them, at the higher top edge.
@@ -5844,12 +5987,12 @@ export class JoinSystem
   }
 
   /**
-   * Eye position, and the natural seated gaze that every view angle is
-   * measured from (not the head's actual pitch at join time).
+   * The eyes every placement is computed from: the session layout anchor
+   * (layout-anchor.ts), never the live head nor a head pose kept from
+   * earlier; and the natural seated gaze every view angle is measured from.
    */
-  private readHead(): void {
-    this.player.head.updateWorldMatrix(true, false);
-    this._head.setFromMatrixPosition(this.player.head.matrixWorld);
+  private readAnchor(): void {
+    anchorEyes(this._head);
     this.headPitchDown = NATURAL_GAZE_PITCH_RAD;
   }
 

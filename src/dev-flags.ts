@@ -61,12 +61,38 @@ export function devFlag(name: DevFlag): boolean {
 }
 
 /** Dev-only: logs the effective flags and installs the toggle hotkeys. */
+/**
+ * Dev only: the stored day (`spatialql.day`, read like `?day=`; the managed
+ * browser window has no address bar): Option+Shift+Right one day on,
+ * Option+Shift+Up a week on, Option+Shift+0 back to the real date. Each reloads.
+ */
+const DAY_HOTKEYS: Record<string, number> = { ArrowRight: 1, ArrowUp: 7, Digit0: 0 };
+const DAY_STORAGE_KEY = `${DEV_FLAG_STORAGE_PREFIX}day`;
+
+function shiftDevDay(storage: Storage, days: number): void {
+  const base = storage.getItem(DAY_STORAGE_KEY) ?? new Date().toLocaleDateString('en-CA');
+  const [y, m, d] = base.split('-').map(Number);
+  const next = new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+  try {
+    if (days === 0) {
+      storage.removeItem(DAY_STORAGE_KEY);
+    } else {
+      storage.setItem(DAY_STORAGE_KEY, next);
+    }
+  } catch {
+    console.warn(`${LOG_PREFIX} couldn't write localStorage; the day is unchanged.`);
+    return;
+  }
+  console.info(`${LOG_PREFIX} day ${days === 0 ? 'back to the real date' : `now ${next}`}; reloading.`);
+  window.location.reload();
+}
+
 export function installDevFlagHotkeys(): void {
   if (!import.meta.env.DEV) {
     return;
   }
   const states = ALL_FLAGS.map((flag) => `${flag}=${devFlag(flag) ? 'on' : 'off'}`).join(', ');
-  console.info(`${LOG_PREFIX} ${states}. Toggle with Option+Shift+D / S / F / M (Alt+Shift on Windows/Linux).`);
+  console.info(`${LOG_PREFIX} ${states}. Toggle with Option+Shift+D / S / F / M (Alt+Shift on Windows/Linux); the day: Option+Shift+Right / Up / 0.`);
 
   window.addEventListener('keydown', (event: KeyboardEvent) => {
     if (!event.altKey || !event.shiftKey || event.ctrlKey || event.metaKey || event.repeat) {
@@ -78,6 +104,11 @@ export function installDevFlagHotkeys(): void {
     }
     const flag = HOTKEY_CODES[event.code];
     const storage = safeLocalStorage();
+    if (storage && DAY_HOTKEYS[event.code] !== undefined) {
+      event.preventDefault();
+      shiftDevDay(storage, DAY_HOTKEYS[event.code]);
+      return;
+    }
     if (!flag || !storage) {
       return;
     }

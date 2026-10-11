@@ -28,11 +28,6 @@ export default defineAssets({
     name: 'Environment Desk',
     priority: 'lazy',
   },
-  'welcome-panel': {
-    url: publicAssetUrl('ui/welcome.uikitml'),
-    type: AssetType.UIKitML,
-    name: 'Welcome Panel',
-  },
   'webxr-banner': {
     url: publicAssetUrl('gltf/webxr-banner/banner.gltf'),
     type: AssetType.GLTF,

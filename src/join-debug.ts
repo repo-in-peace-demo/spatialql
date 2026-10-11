@@ -7,6 +7,7 @@
 
 import type { JoinEvent, JoinState } from './data/join-state.js';
 import type { JoinType } from './data/types.js';
+import { heapText } from './scene-census.js';
 
 export type JoinStats = {
   left: string;
@@ -23,6 +24,8 @@ export interface JoinDebugHost {
   toggleJoinType(): void;
   debugSeparate(): void;
   debugReplay(): void;
+  /** Logs every placed element's world position (slabs, result, card, column, control) and the layout anchor. */
+  debugLayoutSnapshot(): void;
 }
 
 const LOG_PREFIX = '[Join debug]';
@@ -34,6 +37,7 @@ const KEY_HELP = [
   'T        toggle INNER / LEFT',
   'U        un-join: slide the RIGHT slab away and separate',
   'R        replay the join animation and sounds (while joined)',
+  'L        log the layout: every placed element\'s world position, and the layout anchor',
 ];
 
 function describe(state: JoinState): string {
@@ -47,11 +51,37 @@ function describe(state: JoinState): string {
       return `${state.phase} (${state.left} ${state.joinType.toUpperCase()} JOIN ${state.right})`;
   }
 }
+/** How long a GC sentinel is held before it's dropped (it must survive the minor GCs meanwhile). */
+const GC_SENTINEL_MS = 2000;
+/** FinalizationRegistry (ES2021; this project's TypeScript lib predates it), where the browser has it. */
+const Registry = (
+  globalThis as { FinalizationRegistry?: new (onFinalize: (held: number) => void) => { register(target: object, held: number): void } }
+).FinalizationRegistry;
 
 export class JoinDebug {
   private readonly host: JoinDebugHost;
   private longTasks: PerformanceObserver | null = null;
   private joinStartMs = -1;
+  /**
+   * Major garbage collections, seen through a sentinel: an object held
+   * GC_SENTINEL_MS (long enough to be promoted to the old generation) and
+   * then dropped can only be reclaimed by a major GC, whose finalization
+   * callback follows shortly after it. One live sentinel at a time.
+   */
+  private sentinel: object | null = null;
+  private lastMajorGcMs = -Infinity;
+  private majorGcs = 0;
+  private readonly gcRegistry = Registry
+    ? new Registry(() => {
+        this.lastMajorGcMs = performance.now();
+        this.majorGcs++;
+      })
+    : null;
+  private readonly sentinelTimer = window.setInterval(() => {
+    // The old one is dropped here; the new one is held until the next tick.
+    this.sentinel = {};
+    this.gcRegistry?.register(this.sentinel, 0);
+  }, GC_SENTINEL_MS);
 
   constructor(host: JoinDebugHost) {
     this.host = host;
@@ -62,7 +92,13 @@ export class JoinDebug {
       this.longTasks = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
           const since = this.joinStartMs < 0 ? '' : ` at +${((entry.startTime - this.joinStartMs) / 1000).toFixed(3)} s from join start`;
-          console.warn(`${LOG_PREFIX} long task: ${entry.duration.toFixed(0)} ms${since}`);
+          // A major GC finalized within a second of the task's end: the stall was most likely that collection.
+          const gcAgo = performance.now() - this.lastMajorGcMs;
+          const gc =
+            gcAgo < entry.duration + 1000
+              ? `; major GC ${gcAgo.toFixed(0)} ms ago (${this.majorGcs} so far)`
+              : `; no major GC near it (${this.majorGcs} so far)`;
+          console.warn(`${LOG_PREFIX} long task: ${entry.duration.toFixed(0)} ms${since}${heapText()}${gc}`);
         }
       });
       this.longTasks.observe({ type: 'longtask', buffered: false });
@@ -96,9 +132,16 @@ export class JoinDebug {
     console.warn(`${LOG_PREFIX} ${message}`);
   }
 
+  /** `, major GCs N (last S s ago)`, for the scene census line. */
+  gcText(): string {
+    const ago = this.majorGcs > 0 ? ` (last ${((performance.now() - this.lastMajorGcMs) / 1000).toFixed(1)} s ago)` : '';
+    return `, major GCs ${this.majorGcs}${ago}`;
+  }
+
   dispose(): void {
     window.removeEventListener('keydown', this.onKeyDown);
     this.longTasks?.disconnect();
+    window.clearInterval(this.sentinelTimer);
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
@@ -121,6 +164,9 @@ export class JoinDebug {
         break;
       case 'r':
         this.host.debugReplay();
+        break;
+      case 'l':
+        this.host.debugLayoutSnapshot();
         break;
     }
   };

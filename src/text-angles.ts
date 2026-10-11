@@ -16,11 +16,11 @@ export const MIN_ROW_FONT_CM = 0.9;
  * (slab documents aren't rebuilt when placed). The placement and join
  * readouts log the actual distance and resulting angle.
  */
-// The group sits back, out of the near field (headset logs of 2026-10-07:
-// players leaned back, or pushed the slabs to 0.60-0.70 m themselves); the
-// slabs are grabbed by ray from there, and only the side column (control,
-// bar) stays within near reach.
-export const PLANNED_SOURCE_DISTANCE_METERS = 0.7;
+// The slabs' home (SLAB_VIEW_DISTANCE_METERS): 0.6 m since 2026-10-12 (the
+// player kept pulling them to 0.50-0.63 m before joining, and each switch's
+// glide home to 0.7 m felt like the group backing away); text keeps its
+// angle, so it's a little smaller physically (rows 1.20 cm, from 1.41).
+export const PLANNED_SOURCE_DISTANCE_METERS = 0.6;
 /**
  * The result slab follows the pair, above it and set back behind it (with
  * the controls moved to the side column, it no longer sits right over a

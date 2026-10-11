@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  backfillHistory,
   currentStreak,
+  DAILY_HISTORY_DAYS,
   dailySolvedToday,
   emptyProgress,
   isUnlocked,
   loadProgress,
   markConceptSeen,
+  markDailyRevealed,
   markDailySolved,
   markSolved,
   markStreakExplained,
@@ -219,5 +222,52 @@ describe('loadProgress / saveProgress', () => {
     expect(loadProgress(broken, isPuzzleId)).toEqual(emptyProgress());
     expect(saveProgress(null, emptyProgress())).toBe(false);
     expect(saveProgress(broken, emptyProgress())).toBe(false);
+  });
+});
+
+describe('daily history', () => {
+  it('records each day\'s daily: solved, or revealed; one outcome per day', () => {
+    let progress = markDailySolved(emptyProgress(), DAY);
+    progress = markDailyRevealed(progress, DAY + 1);
+    // A second completion the same day changes nothing (as the streak).
+    progress = markDailySolved(progress, DAY + 1);
+    expect(progress.dailyHistory).toEqual({ [DAY]: 'solved', [DAY + 1]: 'revealed' });
+  });
+
+  it('is only a record: the streak and its bridge rule are unchanged', () => {
+    let progress = markDailySolved(emptyProgress(), DAY);
+    progress = markDailyRevealed(progress, DAY + 1);
+    progress = markDailySolved(progress, DAY + 2);
+    expect(progress.daily.streak).toBe(2);
+    expect(currentStreak(progress.daily, DAY + 2)).toBe(2);
+  });
+
+  it(`keeps only the last ${DAILY_HISTORY_DAYS} days`, () => {
+    let progress = emptyProgress();
+    for (let day = DAY; day < DAY + 75; day++) {
+      progress = markDailySolved(progress, day);
+    }
+    const days = Object.keys(progress.dailyHistory).map(Number);
+    expect(days).toHaveLength(DAILY_HISTORY_DAYS);
+    expect(Math.min(...days)).toBe(DAY + 75 - DAILY_HISTORY_DAYS);
+  });
+
+  it('round-trips, drops malformed entries, and Reset (empty progress) clears it', () => {
+    const progress = markDailyRevealed(markDailySolved(emptyProgress(), DAY), DAY + 1);
+    expect(parseProgress(serializeProgress(progress), isPuzzleId).dailyHistory).toEqual(progress.dailyHistory);
+    const raw = JSON.stringify({ ...JSON.parse(serializeProgress(progress)), dailyHistory: { [DAY]: 'solved', x: 'solved', [DAY + 3]: 'won' } });
+    expect(parseProgress(raw, isPuzzleId).dailyHistory).toEqual({ [DAY]: 'solved' });
+    expect(emptyProgress().dailyHistory).toEqual({});
+  });
+
+  it('migration: an old save gets its current streak as solved days ending on the last solve, and a later revealed day', () => {
+    const old = JSON.stringify({ version: 1, daily: { lastSolvedDay: DAY, streak: 3, best: 5, revealedDay: DAY + 1, bridgedDay: DAY + 1 } });
+    expect(parseProgress(old, isPuzzleId).dailyHistory).toEqual({
+      [DAY - 2]: 'solved',
+      [DAY - 1]: 'solved',
+      [DAY]: 'solved',
+      [DAY + 1]: 'revealed',
+    });
+    expect(backfillHistory({ lastSolvedDay: null, streak: 0, best: 0 })).toEqual({});
   });
 });

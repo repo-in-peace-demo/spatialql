@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { CARD_MESSAGE_LINES, cardHeadlineFontCm, cardMessageLines, cardMetrics, wrappedLines } from '../card-metrics.js';
 import { HEADER_METRICS } from '../slab-metrics.js';
-import { CARD, COMPLETE, CONCEPT_INTROS, WELCOME } from './copy.js';
-import { DAILY_EPOCH_DAY, dailyPuzzleId } from './daily.js';
+import { CARD, COMPLETE, CONCEPT_INTROS, FREE_PLAY_DORMANT, WELCOME } from './copy.js';
+import { DAILY_EPOCH_DAY, dailyPuzzleId, dayFromIso, isoFromDay } from './daily.js';
 import {
   advanceResume,
   aheadConcepts,
   allPuzzlesDone,
+  calendarMonths,
+  monthCells,
+  type CalendarCell,
   completionLines,
   dailyOffered,
   finishAction,
@@ -15,6 +18,7 @@ import {
   prevPuzzle,
   puzzleTiles,
   startPuzzle,
+  weekdayIndex,
   welcomeLines,
 } from './daily-flow.js';
 import { DATASET_IDS } from './datasets.js';
@@ -23,8 +27,10 @@ import {
   emptyProgress,
   isUnlocked,
   loadProgress,
+  markDailyRevealed,
   markDailySolved,
   markSolved,
+  recordSkip,
   sanitizeProgress,
   saveProgress,
   type KeyValueStorage,
@@ -286,12 +292,21 @@ describe('progress across days', () => {
 });
 
 describe('welcome screen lines', () => {
-  it('before the daily is offered: start with practice, no streak', () => {
-    expect(welcomeLines(solved(['shop-match']), DAILY_EPOCH_DAY, ORDER, true)).toEqual({
+  it('before the daily is offered: start with practice; the streak line says the daily comes next', () => {
+    expect(welcomeLines(solved(['shop-match']), DAILY_EPOCH_DAY, ORDER, true)).toMatchObject({
       daily: WELCOME.practiceFirst,
-      streak: null,
+      streak: WELCOME.streakAfterPractice,
+      streakDays: 0,
       practice: 'Practice 1/20',
       save: null,
+    });
+  });
+
+  it('daily open with no streak yet: "Solve today\'s puzzle to start your streak."', () => {
+    const today = dayFor(LATE_DAILY);
+    expect(welcomeLines(solved(FIRST_THREE), today, ORDER, true)).toMatchObject({
+      streak: WELCOME.streakStart,
+      streakDays: 0,
     });
   });
 
@@ -318,13 +333,14 @@ describe('welcome screen lines', () => {
     const lines = [
       WELCOME.title,
       WELCOME.description,
-      WELCOME.descriptionPuzzles,
-      WELCOME.descriptionFreePlay,
-      WELCOME.freePlayHeading,
-      WELCOME.startFreePlay,
+      // Dormant free play's lines: kept fitting for when it returns.
+      FREE_PLAY_DORMANT.description,
+      FREE_PLAY_DORMANT.heading,
+      FREE_PLAY_DORMANT.start,
       WELCOME.setup,
       WELCOME.practiceFirst,
       WELCOME.dailyDone,
+      WELCOME.dailyDoneAllDone,
       WELCOME.saveUnavailable,
       WELCOME.practiceProgress(20, 20),
       WELCOME.allDone(20),
@@ -388,6 +404,17 @@ describe('finishing all 20 puzzles', () => {
     });
   });
 
+  it('says to come back for the streak, not for a new puzzle (the daily repeats them now)', () => {
+    expect(COMPLETE.comeBackTomorrow).toBe('Come back tomorrow to keep your streak going.');
+    expect(welcomeLines(markDailySolved(all, today), today, ORDER, true).daily).toBe("Today's puzzle: solved. Come back tomorrow.");
+    // Not all done yet: tomorrow's daily can still be new.
+    const notAll = markDailySolved(solved(ORDER.slice(0, 19)), today);
+    expect(welcomeLines(notAll, today, ORDER, true).daily).toBe(WELCOME.dailyDone);
+    for (const text of [COMPLETE.comeBackTomorrow, WELCOME.dailyDoneAllDone]) {
+      expect(text).not.toMatch(/new/i);
+    }
+  });
+
   it('the welcome screen says so in place of the practice count', () => {
     expect(welcomeLines(all, today, ORDER, true).practice).toBe('All 20 puzzles done');
     expect(welcomeLines(withAnswers(['cafe-no-milk']), today, ORDER, true).practice).toBe('All 20 puzzles done (1 with answer)');
@@ -406,6 +433,111 @@ describe('finishing all 20 puzzles', () => {
     expect(Math.max(...summaries) + Math.max(...nexts)).toBeLessThanOrEqual(CARD_MESSAGE_LINES);
     for (const text of [headline, COMPLETE.allSolved, COMPLETE.summary(18, 2), COMPLETE.comeBackTomorrow, COMPLETE.dailyOpen, COMPLETE.badge]) {
       expect(text).toMatch(/^[\x20-\x7e]+$/);
+    }
+  });
+});
+
+describe('the welcome calendar (a month)', () => {
+  // 2026-10-15 is a Thursday; October 2026 starts on a Thursday.
+  const thursday = dayFromIso('2026-10-15') as number;
+  const days = (cells: CalendarCell[]) => cells.filter((cell) => cell.day !== null);
+  const iso = (cell: CalendarCell) => isoFromDay(cell.day as number);
+
+  it('lays the month in Monday-first weeks, blank outside it', () => {
+    const october = monthCells(emptyProgress(), 2026, 10, thursday);
+    expect(october).toHaveLength(35);
+    expect(october.slice(0, 3).every((cell) => cell.state === 'blank' && cell.day === null)).toBe(true);
+    expect(iso(october[3])).toBe('2026-10-01');
+    expect(weekdayIndex(october[3].day as number)).toBe(3);
+    expect(iso(days(october)[30])).toBe('2026-10-31');
+    expect(october.slice(34).every((cell) => cell.state === 'blank')).toBe(true);
+  });
+
+  it('has each month\'s length (28 to 31 days, February 29 in a leap year)', () => {
+    for (const [year, month, length] of [
+      [2026, 2, 28],
+      [2028, 2, 29],
+      [2100, 2, 28],
+      [2000, 2, 29],
+      [2026, 4, 30],
+      [2026, 10, 31],
+      [2026, 12, 31],
+    ] as const) {
+      const cells = monthCells(emptyProgress(), year, month, thursday);
+      expect(days(cells), `${year}-${month}`).toHaveLength(length);
+      expect(cells.length % 7).toBe(0);
+    }
+  });
+
+  it('takes 4 to 6 weeks: February 2027 starts on a Monday (4), November 2026 on a Sunday (6)', () => {
+    const february = monthCells(emptyProgress(), 2027, 2, thursday);
+    expect(february).toHaveLength(28);
+    expect(iso(february[0])).toBe('2027-02-01');
+    const november = monthCells(emptyProgress(), 2026, 11, thursday);
+    expect(november).toHaveLength(42);
+    expect(november.slice(0, 6).every((cell) => cell.state === 'blank')).toBe(true);
+    expect(iso(november[6])).toBe('2026-11-01');
+    expect(iso(november[35])).toBe('2026-11-30');
+  });
+
+  it('rings today only, plain until its daily is done; later days are future', () => {
+    const cells = days(monthCells(emptyProgress(), 2026, 10, thursday));
+    expect(cells.filter((cell) => cell.today).map(iso)).toEqual(['2026-10-15']);
+    expect(cells[14].state).toBe('plain');
+    expect(cells.slice(15).every((cell) => cell.state === 'future')).toBe(true);
+    const done = markDailySolved(solved(FIRST_THREE), thursday);
+    expect(days(monthCells(done, 2026, 10, thursday))[14]).toMatchObject({ state: 'solved', today: true });
+  });
+
+  it('shows days before the history starts as plain, not missed', () => {
+    // No history: every past day is plain.
+    const empty = days(monthCells(emptyProgress(), 2026, 10, thursday));
+    expect(empty.slice(0, 14).every((cell) => cell.state === 'plain')).toBe(true);
+    // First daily on the 12th: the 11th and before are plain, the 13th (no daily) missed.
+    const progress = markDailySolved(solved(FIRST_THREE), thursday - 3);
+    const cells = days(monthCells(progress, 2026, 10, thursday));
+    expect(cells.slice(0, 11).every((cell) => cell.state === 'plain')).toBe(true);
+    expect(cells[11].state).toBe('solved');
+    expect(cells[12].state).toBe('missed');
+  });
+
+  it('shows each day as solved, with the answer (or skipped), or missed', () => {
+    let progress = solved(FIRST_THREE);
+    progress = markDailySolved(progress, thursday - 3);
+    progress = markDailyRevealed(progress, thursday - 1);
+    progress = recordSkip(progress, dailyPuzzleId(thursday), thursday, 3, true);
+    const byDay = new Map(monthCells(progress, 2026, 10, thursday).map((cell) => [cell.day, cell.state]));
+    expect(byDay.get(thursday - 3)).toBe('solved');
+    expect(byDay.get(thursday - 2)).toBe('missed');
+    expect(byDay.get(thursday - 1)).toBe('revealed');
+    expect(byDay.get(thursday)).toBe('revealed');
+  });
+
+  it('offers earlier months only while the history covers them', () => {
+    expect(calendarMonths(emptyProgress(), thursday).map(({ year, month }) => [year, month])).toEqual([[2026, 10]]);
+    const lateSeptember = markDailySolved(solved(FIRST_THREE), dayFromIso('2026-09-28') as number);
+    expect(calendarMonths(lateSeptember, thursday).map(({ year, month }) => [year, month])).toEqual([
+      [2026, 10],
+      [2026, 9],
+    ]);
+    // Across a year: January looks back to December.
+    const january = dayFromIso('2027-01-05') as number;
+    const december = markDailySolved(solved(FIRST_THREE), dayFromIso('2026-12-30') as number);
+    expect(calendarMonths(december, january).map(({ year, month }) => [year, month])).toEqual([
+      [2027, 1],
+      [2026, 12],
+    ]);
+  });
+
+  it('weekdays are right across the DST changes (calendar dates, not elapsed time)', () => {
+    for (const [iso, weekday] of [
+      ['2026-03-08', 6],
+      ['2026-03-09', 0],
+      ['2026-03-29', 6],
+      ['2026-11-01', 6],
+      ['2026-11-02', 0],
+    ] as const) {
+      expect(weekdayIndex(dayFromIso(iso) as number), iso).toBe(weekday);
     }
   });
 });

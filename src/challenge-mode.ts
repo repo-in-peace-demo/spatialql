@@ -1,11 +1,12 @@
 /**
  * Whether this page runs challenge mode (puzzles) or the free-play sandbox.
  *
- * Challenge mode is the default in every build. The sandbox is reached with
- * `?mode=free` (or `?challenge=0`): the welcome screen's Free play button
- * reloads with it, and its Puzzles button reloads without it. In dev,
- * `localStorage['spatialql.mode'] = 'free'` also gives the sandbox, for the
- * managed browser window, which has no address bar (the URL wins).
+ * Free play is DORMANT: removed from the product for now (no button), and
+ * production always runs challenge mode, whatever the address says. The code
+ * stays so it's easy to bring back. In dev only, `?mode=free` (or
+ * `?challenge=0`) opens it, as does `localStorage['spatialql.mode'] = 'free'`
+ * for the managed browser window, which has no address bar (the URL wins);
+ * its Puzzles button reloads without it.
  *
  * Read once at startup: both modes build their slab documents at startup.
  */
@@ -14,6 +15,9 @@ export const MODE_PARAM = 'mode';
 export const MODE_FREE = 'free';
 
 function resolveChallengeMode(): boolean {
+  if (!import.meta.env.DEV) {
+    return true;
+  }
   try {
     const params = new URLSearchParams(window.location.search);
     if (params.get(MODE_PARAM) === MODE_FREE || params.get('challenge') === '0') {
@@ -22,14 +26,11 @@ function resolveChallengeMode(): boolean {
     if (params.has(MODE_PARAM) || params.has('challenge')) {
       return true;
     }
-    if (import.meta.env.DEV) {
-      try {
-        return window.localStorage.getItem('spatialql.mode') !== MODE_FREE;
-      } catch {
-        return true;
-      }
+    try {
+      return window.localStorage.getItem('spatialql.mode') !== MODE_FREE;
+    } catch {
+      return true;
     }
-    return true;
   } catch {
     return true;
   }
@@ -39,7 +40,8 @@ export const CHALLENGE_MODE = resolveChallengeMode();
 
 /**
  * Reloads the page in the other mode, keeping its other query parameters:
- * free play adds `mode=free`; back to puzzles removes the mode parameters.
+ * free play adds `mode=free` (dev only: production ignores it); back to
+ * puzzles removes the mode parameters.
  */
 export function reloadInMode(freePlay: boolean): void {
   const params = new URLSearchParams(window.location.search);

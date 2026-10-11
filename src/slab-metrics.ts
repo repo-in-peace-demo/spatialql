@@ -163,6 +163,30 @@ export function barButtonWidthCm(labels: readonly string[], labelFontCm: number)
 /** The Filter button's chips: at most this many (one per result column with a NULL; tested). */
 export const MAX_FILTER_CHIPS = 6;
 
+/**
+ * Up to this many chips are shown at once, one per row ("D.ID is NULL").
+ * More would take the column's top past VIEW_MAX_ABOVE_GAZE_DEG (5 chips:
+ * about 40.8° at the highest column bottom logged, +1.4°; 6: 44.4°;
+ * measured 2026-10-12). Half-width chips don't fit every header ("PRODUCT"),
+ * so 5 or 6 chips go on pages of CHIPS_PER_PAGE with a More button: as tall
+ * as 4 chips. Nothing else moves either way.
+ */
+export const CHIPS_ONE_PAGE_MAX = 4;
+export const CHIPS_PER_PAGE = 3;
+
+/** How many pages `chips` chips take (1 up to CHIPS_ONE_PAGE_MAX). */
+export function chipPages(chips: number): number {
+  return chips <= CHIPS_ONE_PAGE_MAX ? 1 : Math.ceil(chips / CHIPS_PER_PAGE);
+}
+
+/** The filter area's rows with `chips` chips open: Back, a page of chips, and More when there are pages. */
+export function filterAreaRows(chips: number): number {
+  if (chips <= 0) {
+    return 0;
+  }
+  return chips <= CHIPS_ONE_PAGE_MAX ? chips + 1 : CHIPS_PER_PAGE + 2;
+}
+
 /** The puzzle bar's padding (also the gap between its buttons) and border, cm. */
 export const BAR_PADDING_CM = 0.3;
 export const BAR_BORDER_CM = 0.15;

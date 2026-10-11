@@ -18,6 +18,8 @@
  */
 
 const ENDPOINT = '/__spatialql/log';
+/** The dev server's code stamp (a hash of src/): fetched once at page load, it names the code this page runs. */
+const CODE_ENDPOINT = '/__spatialql/code';
 const SEND_INTERVAL_MS = 1000;
 const SEND_BATCH_LINES = 50;
 const MAX_BUFFERED_LINES = 500;
@@ -39,6 +41,10 @@ const session = {
   device: isHeadset ? 'headset' : 'desktop',
   headerSent: false,
   fileAnnounced: false,
+  /** The code this page loaded (the server's stamp at load), and when. */
+  codeStamp: 'unknown',
+  loadedAt: new Date().toISOString(),
+  staleWarned: false,
 };
 let buffer: SinkLine[] = [];
 let dropped = 0;
@@ -73,6 +79,7 @@ function header(): Record<string, string> {
     'user agent': navigator.userAgent,
     url: location.href,
     'stored flags': flags || '(none)',
+    'page code': `${session.codeStamp} (page loaded ${session.loadedAt})`,
     'reference space': "logged once a session starts ('reference space in use')",
   };
 }
@@ -87,7 +94,14 @@ function takeBatch(): string | null {
     lines.unshift({ t: Date.now(), kind: 'warn', text: `(${dropped} lines dropped: the log buffer was full)` });
     dropped = 0;
   }
-  const body = { id: session.id, device: session.device, header: session.headerSent ? null : header(), lines };
+  const body = {
+    id: session.id,
+    device: session.device,
+    code: session.codeStamp,
+    loadedAt: session.loadedAt,
+    header: session.headerSent ? null : header(),
+    lines,
+  };
   session.headerSent = true;
   return JSON.stringify(body);
 }
@@ -103,13 +117,21 @@ function flush(): void {
   inFlight = true;
   fetch(ENDPOINT, { method: 'POST', headers: { 'content-type': 'application/json' }, body, keepalive: true })
     .then(async (response) => {
+      if (!response.ok) {
+        return;
+      }
+      const { file, serverCode } = (await response.json()) as { file?: string; serverCode?: string };
       // Say once where this page's log goes (it shows on the panel, too).
-      if (!session.fileAnnounced && response.ok) {
-        const { file } = (await response.json()) as { file?: string };
-        if (file) {
-          session.fileAnnounced = true;
-          console.info(`[HUD] debug log: ${file}`);
-        }
+      if (!session.fileAnnounced && file) {
+        session.fileAnnounced = true;
+        console.info(`[HUD] debug log: ${file}`);
+      }
+      // The dev server has newer code than this page runs (a tab left open across changes): say so, once.
+      if (!session.staleWarned && serverCode && session.codeStamp !== 'unknown' && serverCode !== session.codeStamp) {
+        session.staleWarned = true;
+        console.warn(
+          `[HUD] STALE PAGE: this page runs code ${session.codeStamp} (loaded ${session.loadedAt}); the dev server has ${serverCode}. Reload this tab.`,
+        );
       }
     })
     .catch(() => {
@@ -126,6 +148,25 @@ export function startLogSink(): void {
     return;
   }
   started = true;
+  // The code this page runs: the server's stamp now (the page has just loaded
+  // it), and again after a hot update (it then runs the updated modules).
+  const readStamp = (why: string) =>
+    fetch(CODE_ENDPOINT)
+      .then(async (response) => {
+        if (response.ok) {
+          const { code } = (await response.json()) as { code?: string };
+          if (code) {
+            session.codeStamp = code;
+            session.staleWarned = false;
+            console.info(`[HUD] code ${code} (${why})`);
+          }
+        }
+      })
+      .catch(() => {
+        // No stamp: staleness can't be told; the log still works.
+      });
+  void readStamp(`page loaded ${session.loadedAt}`);
+  import.meta.hot?.on('vite:afterUpdate', () => void readStamp('after a hot update'));
   setInterval(flush, SEND_INTERVAL_MS);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {

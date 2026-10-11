@@ -3,7 +3,7 @@
  * a target. The join system places it -- in the gap between the source
  * slabs' rows and the result's rows, slightly in front of both, scaled to
  * fit (`placeInGap`), or, when that gap is too small, semi-transparent just
- * below the gaze, following the head (`placeBelowGaze`). It pulses gently
+ * below the layout anchor's gaze (`placeBelowAnchor`), fixed while the head moves. It pulses gently
  * while shown and fades in and out.
  */
 
@@ -86,11 +86,10 @@ export class ReachBanner {
   }
 
   /** The fallback: BELOW_GAZE_DEG below the head's forward, BELOW_GAZE_DISTANCE_METERS away, semi-transparent. */
-  placeBelowGaze(head: Object3D): void {
-    head.updateWorldMatrix(true, false);
-    head.getWorldPosition(this.document.position);
-    head.getWorldQuaternion(this.document.quaternion);
-    this.document.rotateX((-BELOW_GAZE_DEG * Math.PI) / 180);
+  placeBelowAnchor(eyes: Vector3, yaw: number): void {
+    // The layout anchor's eyes and facing (layout-anchor.ts): it stays put as the head moves.
+    this.document.position.copy(eyes);
+    this.document.rotation.set((-BELOW_GAZE_DEG * Math.PI) / 180, yaw, 0, 'YXZ');
     this.document.translateZ(-BELOW_GAZE_DISTANCE_METERS);
     this.document.scale.setScalar(1);
     this.maxOpacity.value = BELOW_GAZE_OPACITY;

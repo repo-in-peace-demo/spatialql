@@ -266,17 +266,20 @@ class JoinSounds {
   }
 
   /** Challenge solved: three rising notes (a major triad), brighter than the resolve. */
-  playWin(at: Position, delay = 0): void {
+  playWin(at: Position, delay = 0, milestone = false): void {
     this.oneShot('win', at, delay, (ctx, out, t) => {
       const filter = ctx.createBiquadFilter();
       filter.type = 'lowpass';
-      filter.frequency.value = 4000;
+      filter.frequency.value = milestone ? 6000 : 4000;
       filter.connect(out);
-      for (const [freq, offset] of [
+      // A streak milestone: one more, higher note (the octave), slightly brighter.
+      const notes: [number, number][] = [
         [523.25, 0],
         [659.25, 0.1],
         [783.99, 0.2],
-      ] as const) {
+        ...(milestone ? ([[1046.5, 0.3]] as [number, number][]) : []),
+      ];
+      for (const [freq, offset] of notes) {
         const osc = ctx.createOscillator();
         osc.type = 'triangle';
         osc.frequency.value = freq;

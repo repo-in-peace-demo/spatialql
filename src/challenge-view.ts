@@ -21,6 +21,7 @@ import { computed, signal, UIKit, UIKitDocument, type Signal } from '@iwsdk/core
 import { BookOpen } from '@pmndrs/uikit-lucide/dist/BookOpen.js';
 import { Check } from '@pmndrs/uikit-lucide/dist/Check.js';
 import { Eye } from '@pmndrs/uikit-lucide/dist/Eye.js';
+import { Flame } from '@pmndrs/uikit-lucide/dist/Flame.js';
 import { Lock } from '@pmndrs/uikit-lucide/dist/Lock.js';
 import { Coffee } from '@pmndrs/uikit-lucide/dist/Coffee.js';
 import { LocateFixed } from '@pmndrs/uikit-lucide/dist/LocateFixed.js';
@@ -29,6 +30,7 @@ import { School } from '@pmndrs/uikit-lucide/dist/School.js';
 import { ShoppingBag } from '@pmndrs/uikit-lucide/dist/ShoppingBag.js';
 import { arcPlace, BAND_ARC_RADIUS_METERS, type ArcPlacement } from './band-arc.js';
 import { CARD_GOAL_LINES, CARD_MESSAGE_LINES, cardHeadlineFontCm, cardMetrics } from './card-metrics.js';
+import { BAR } from './data/copy.js';
 import type { DatasetIcon } from './data/datasets.js';
 import {
   BAR_BORDER_CM,
@@ -74,6 +76,8 @@ export type PuzzleCardView = {
   title: Text;
   /** Short status (the diff summary, hints used, the streak), on its own line under the title. */
   status: Text;
+  /** Before the status line while it shows the daily streak (hidden otherwise). */
+  statusFlame: InstanceType<typeof Flame>;
   goal: Text;
   /** "Solved!", large, in the goal's slot while won. */
   headline: Text;
@@ -163,7 +167,9 @@ export function buildPuzzleCard(): PuzzleCardView {
   const block = (height: number) =>
     new UIKit.Container({ flexDirection: 'column', height, flexShrink: 0, overflow: 'hidden' });
   const statusRow = block(titleHeight);
-  statusRow.add(status);
+  statusRow.setProperties({ flexDirection: 'row', alignItems: 'center', gapColumn: smallFont * 0.35 });
+  const statusFlame = new Flame({ width: smallFont, height: smallFont, color: COLOR_STREAK_FLAME, display: 'none', flexShrink: 0 });
+  statusRow.add(statusFlame, status);
   const goalBlock = block(goalHeight);
   const goal = new UIKit.Text({ text: '', fontSize: goalFont, fontWeight: 'bold', color: COLOR_TEXT });
   // On a win, the headline takes the goal's two-line slot (the card can't grow).
@@ -190,6 +196,7 @@ export function buildPuzzleCard(): PuzzleCardView {
     root,
     title,
     status,
+    statusFlame,
     goal,
     headline,
     message,
@@ -290,6 +297,7 @@ export type BarButton =
   | 'clear'
   | 'filter'
   | 'filterBack'
+  | 'filterMore'
   | 'chip'
   | 'puzzles'
   | 'pickerBack'
@@ -345,7 +353,10 @@ export { MAX_FILTER_CHIPS };
 export type BarContents = {
   where: string | null;
   filter: boolean;
+  /** The open chips' column headers as the result shows them ("D.ID"), this page's; null: closed. */
   chips: readonly string[] | null;
+  /** More's label while the chips are on pages ("More (1/2)"); null or absent: one page. */
+  chipsMore?: string | null;
   /** The puzzle picker, open (its tiles, in order) in place of Prev | Next, Hint and the filter area; null: closed. */
   picker?: readonly PickerTileView[] | null;
 };
@@ -373,6 +384,9 @@ export type PuzzleBarView = ArcBand & {
   filter: Container;
   /** Back: closes the chips. */
   filterBack: Container;
+  /** More: the next page of chips (only when there are more than fit at once); its label says which page. */
+  filterMore: Container;
+  filterMoreText: Text;
   /** The filter chips (MAX_FILTER_CHIPS, hidden until the chips open). */
   filterChips: { container: Container; text: Text }[];
   /** Puzzles: opens (and closes) the picker; Back on top of the open grid closes it too. */
@@ -426,6 +440,8 @@ export type PuzzleBarView = ArcBand & {
   };
 };
 
+/** The daily streak's flame on the card (as on the welcome screen). */
+const COLOR_STREAK_FLAME = '#d97a1e';
 const BAR_PADDING = BAR_PADDING_CM;
 const BAR_BORDER = BAR_BORDER_CM;
 const BAR_RADIUS = 1.4;
@@ -622,6 +638,8 @@ export function buildPuzzleBar(
   filter.container.setProperties({ display: 'none' });
   const back = button(labels.filterBack, width, false, null);
   back.container.setProperties({ display: 'none' });
+  const more = button(BAR.filterMore(1, 2), width, false, null);
+  more.container.setProperties({ display: 'none' });
   const filterChips: { container: Container; text: Text }[] = [];
   for (let i = 0; i < MAX_FILTER_CHIPS; i++) {
     const chipButton = button('', width, false, null);
@@ -674,6 +692,8 @@ export function buildPuzzleBar(
     clear: clear.container,
     filter: filter.container,
     filterBack: back.container,
+    filterMore: more.container,
+    filterMoreText: more.text,
     filterChips,
     puzzles: puzzles.container,
     pickerBack: pickerBack.container,
@@ -764,6 +784,12 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
   const chips = picker ? [] : (contents.chips ?? []);
   const chipCount = Math.min(chips.length, bar.filterChips.length);
 
+  // Chips on pages (more than fit at once): More, under them, turns the page.
+  const more = open ? (contents.chipsMore ?? null) : null;
+  bar.filterMore.setProperties({ display: more === null ? 'none' : 'flex' });
+  if (more !== null) {
+    bar.filterMoreText.setProperties({ text: more });
+  }
   if (where === null) {
     bar.chip.setProperties({ display: 'none' });
     bar.clear.setProperties({ display: 'none' });
@@ -853,16 +879,21 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
     rows.push([[{ name: 'filter', container: bar.filter, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM]);
   } else if (open) {
     rows.push([[{ name: 'filterBack', container: bar.filterBack, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM]);
-    // The chips above Back, one per row, the first on top.
+    if (more !== null) {
+      rows.push([[{ name: 'filterMore', container: bar.filterMore, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM]);
+    }
+    // The page's chips above Back (and More), one per row, the first on top.
     for (let i = chipCount - 1; i >= 0; i--) {
       rows.push([[{ name: 'chip', container: bar.filterChips[i].container, width, chip: i }], buttonHeight, COLUMN_GAP_CM]);
     }
   }
   bar.filterChips.forEach((chipButton, i) => {
-    const text = i < chips.length ? chips[i] : null;
-    chipButton.container.setProperties({ display: text === null ? 'none' : 'flex' });
-    if (text !== null) {
-      chipButton.text.setProperties({ text: truncateToWidth(text, HEADER_METRICS, label, width - 2 * COLUMN_LABEL_MIN_PADDING_EM * label) });
+    const header = i < chipCount ? chips[i] : null;
+    chipButton.container.setProperties({ display: header === null ? 'none' : 'flex' });
+    if (header !== null) {
+      chipButton.text.setProperties({
+        text: truncateToWidth(BAR.filterChip(header), HEADER_METRICS, label, width - 2 * COLUMN_LABEL_MIN_PADDING_EM * label),
+      });
     }
   });
 
@@ -1131,6 +1162,8 @@ export function barButtonContainer(bar: PuzzleBarView, name: BarButton, index: n
       return bar.filter;
     case 'filterBack':
       return bar.filterBack;
+    case 'filterMore':
+      return bar.filterMore;
     case 'chip':
       return bar.filterChips[target.chip]?.container ?? null;
     case 'puzzles':
