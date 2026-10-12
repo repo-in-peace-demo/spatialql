@@ -22,6 +22,9 @@ import {
 export const CARD_WIDTH_EM = 16;
 export const CARD_GOAL_LINES = 3;
 export const CARD_MESSAGE_LINES = 7;
+/** The session clock above the card: its text relative to the card's small text (secondary to the title). */
+export const CARD_CLOCK_SCALE = 0.85;
+
 /** The card border's width (cm): thicker than a slab's, so the dataset accent reads. */
 export const CARD_BORDER_CM = 0.3;
 const PHASE2_CARD_BORDER_CM = 0.15;

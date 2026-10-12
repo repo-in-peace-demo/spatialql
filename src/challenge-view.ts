@@ -23,13 +23,14 @@ import { Check } from '@pmndrs/uikit-lucide/dist/Check.js';
 import { Eye } from '@pmndrs/uikit-lucide/dist/Eye.js';
 import { Flame } from '@pmndrs/uikit-lucide/dist/Flame.js';
 import { Lock } from '@pmndrs/uikit-lucide/dist/Lock.js';
+import { Clock } from '@pmndrs/uikit-lucide/dist/Clock.js';
 import { Coffee } from '@pmndrs/uikit-lucide/dist/Coffee.js';
 import { LocateFixed } from '@pmndrs/uikit-lucide/dist/LocateFixed.js';
 import { LogOut } from '@pmndrs/uikit-lucide/dist/LogOut.js';
 import { School } from '@pmndrs/uikit-lucide/dist/School.js';
 import { ShoppingBag } from '@pmndrs/uikit-lucide/dist/ShoppingBag.js';
 import { arcPlace, BAND_ARC_RADIUS_METERS, type ArcPlacement } from './band-arc.js';
-import { CARD_GOAL_LINES, CARD_MESSAGE_LINES, cardHeadlineFontCm, cardMetrics } from './card-metrics.js';
+import { CARD_CLOCK_SCALE, CARD_GOAL_LINES, CARD_MESSAGE_LINES, cardHeadlineFontCm, cardMetrics } from './card-metrics.js';
 import { BAR } from './data/copy.js';
 import type { DatasetIcon } from './data/datasets.js';
 import {
@@ -61,6 +62,9 @@ const COLOR_CARD_BORDER = '#c9c2b0';
 const COLOR_CARD_BORDER_WON = '#d08a1e';
 const COLOR_TEXT = '#1c1c1c';
 const COLOR_TEXT_SECONDARY = '#4a4538';
+/** The session clock above the card: quiet, on a card-colored pill so it reads over passthrough. */
+const COLOR_CLOCK_TEXT = '#6e6759';
+
 const COLOR_BAR_TRACK = '#e2ddd0';
 /** The win headline: the result slab's gold caption color. */
 const COLOR_HEADLINE = '#8a4b00';
@@ -90,8 +94,12 @@ export type PuzzleCardView = {
   icons: Record<DatasetIcon, InstanceType<typeof ShoppingBag>>;
   /** The current dataset accent (the border while not won). */
   accent: string;
+  /** The session clock (or "Solved in" on a win), just above the card's top edge at its left. */
+  clockText: Text;
   widthMeters: number;
   heightMeters: number;
+  /** How far the clock rises above the card's top edge (meters): counted in the view checks. */
+  topExtraMeters: number;
 };
 
 export function buildPuzzleCard(): PuzzleCardView {
@@ -190,6 +198,34 @@ export function buildPuzzleCard(): PuzzleCardView {
   messageBlock.add(message, query, note);
 
   root.add(titleRow, statusRow, goalBlock, messageBlock);
+
+  // The session clock: a small pill just above the card, aligned with its left edge; never a target.
+  const clockFont = smallFont * CARD_CLOCK_SCALE;
+  const clockPadX = clockFont * 0.4;
+  const clockHeight = clockFont * LINE_HEIGHT_FACTOR + clockFont * 0.2;
+  const clockGap = smallFont * 0.3;
+  const clock = new UIKit.Container({
+    positionType: 'absolute',
+    // Offsets from the card's padding box: past its border, then the gap.
+    positionTop: -(border + clockGap + clockHeight),
+    positionLeft: -border,
+    height: clockHeight,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gapColumn: clockFont * 0.3,
+    paddingLeft: clockPadX,
+    paddingRight: clockPadX,
+    backgroundColor: COLOR_CARD,
+    borderTopLeftRadius: clockHeight / 2,
+    borderTopRightRadius: clockHeight / 2,
+    borderBottomLeftRadius: clockHeight / 2,
+    borderBottomRightRadius: clockHeight / 2,
+    pointerEvents: 'none',
+  });
+  const clockText = new UIKit.Text({ text: '0:00', fontSize: clockFont, color: COLOR_CLOCK_TEXT, wordBreak: 'keep-all' });
+  clock.add(new Clock({ width: clockFont, height: clockFont, color: COLOR_CLOCK_TEXT, flexShrink: 0 }), clockText);
+  root.add(clock);
+
   return {
     document: new UIKitDocument(root),
     fade,
@@ -204,8 +240,10 @@ export function buildPuzzleCard(): PuzzleCardView {
     note,
     icons,
     accent: COLOR_CARD_BORDER,
+    clockText,
     widthMeters: widthCm / 100,
     heightMeters: heightCm / 100,
+    topExtraMeters: (clockGap + clockHeight) / 100,
   };
 }
 

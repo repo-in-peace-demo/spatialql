@@ -55,7 +55,7 @@ import {
   setRecenterHover,
 } from './challenge-view.js';
 import { compareToTarget, fanOutGroups, type Comparison } from './data/compare.js';
-import { BAR, CARD, COMPLETE, CONCEPT_INTROS, NULL_EXPLAINER, TARGET_OUTLINE, WELCOME } from './data/copy.js';
+import { BAR, CARD, COMPLETE, CONCEPT_INTROS, NULL_EXPLAINER, SESSION, TARGET_OUTLINE, WELCOME } from './data/copy.js';
 import { dailyPuzzleId, isoFromDay } from './data/daily.js';
 import {
   advanceResume,
@@ -123,6 +123,7 @@ import {
 import { buildQueue, type BuildJob } from './build-queue.js';
 import { keepDatasets } from './dataset-cache.js';
 import { allowMoves } from './move-guard.js';
+import { formatClock, SessionClock } from './session-clock.js';
 import { disposeUIKitDocument } from './uikit-dispose.js';
 import { PressDips } from './press-dip.js';
 import { sounds } from './sound.js';
@@ -364,12 +365,31 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
 
     joinBridge.challenge = this;
+    // The session clock above the card: from 0 when a session starts, paused while the headset is off.
+    this.cleanupFuncs.push(
+      this.world.visibilityState.subscribe((state) => {
+        const now = performance.now() / 1000;
+        if (state === VisibilityState.NonImmersive) {
+          this.sessionClock.stop(now);
+          this.inSession = false;
+          return;
+        }
+        if (!this.inSession) {
+          this.inSession = true;
+          this.sessionClock.start(now);
+          this.sessionClock.puzzleStarted(now);
+          this.shownClockSecond = -1;
+        }
+        this.sessionClock.setHidden(state === VisibilityState.Hidden, now);
+      }),
+    );
     this.layout = {
       card: {
         object: this.card.document,
         widthMeters: this.card.widthMeters,
         heightMeters: this.card.heightMeters,
         textFontMeters: cardMetrics().smallFont / 100,
+        topExtraMeters: this.card.topExtraMeters,
       },
       bar: {
         object: this.bar.document,
@@ -479,6 +499,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       return;
     }
     this.clock += delta;
+    this.updateSessionClock();
     this.dips.update(this.clock);
     this.updateFade(delta);
     // The streak explanation counts as given once it's on the card in a session (not on the flat page).
@@ -908,6 +929,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       // A puzzle switch places its card and outline for the new puzzle (move-guard.ts).
       allowMoves('puzzle-switch', performance.now() / 1000, 1);
     }
+    // Its own time starts now; the label goes back to the session time.
+    this.sessionClock.puzzleStarted(performance.now() / 1000);
+    this.solvedClockShown = false;
+    this.shownClockSecond = -1;
     // Any switch closes the picker (a tile closes it first; the debug keys may not).
     if (this.pickerOpen) {
       this.pickerOpen = false;
@@ -1148,6 +1173,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     // The title row's right-hand slot (the diff summary while playing).
     this.setStatus(this.solvedStatus());
+    // Above the card: how long this puzzle took (its active time), until the next puzzle.
+    if (!revealed) {
+      this.solvedClockShown = true;
+      this.card.clockText.setProperties({ text: SESSION.solvedIn(formatClock(this.sessionClock.puzzleElapsed(performance.now() / 1000))) });
+    }
     this.card.document.updateWorldMatrix(true, false);
     this._point.setFromMatrixPosition(this.card.document.matrixWorld);
     if (revealed) {
@@ -1615,6 +1645,27 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     }
     const start = this.filterPage * CHIPS_PER_PAGE;
     return this.filterChoices.slice(start, start + CHIPS_PER_PAGE);
+  }
+
+  // --- The session clock (above the card) -------------------------------------------------
+
+  private readonly sessionClock = new SessionClock();
+  private inSession = false;
+  /** The whole second the label shows (-1: write it next frame). */
+  private shownClockSecond = -1;
+  /** A win's "Solved in" holds the label until the next puzzle. */
+  private solvedClockShown = false;
+
+  /** Each frame: the session time, written only when its whole second changes. */
+  private updateSessionClock(): void {
+    if (this.solvedClockShown || !this.card) {
+      return;
+    }
+    const second = Math.floor(this.sessionClock.elapsed(performance.now() / 1000));
+    if (second !== this.shownClockSecond) {
+      this.shownClockSecond = second;
+      this.card.clockText.setProperties({ text: formatClock(second) });
+    }
   }
 
   // --- The puzzle picker ------------------------------------------------------------------

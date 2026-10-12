@@ -19,6 +19,8 @@ export type PlacedElement = {
   heightMeters: number;
   /** The card's row text size (meters), for the readout's text angle at its actual distance. */
   textFontMeters?: number;
+  /** What rises above its top edge (meters; the card's session clock): counted in the view and reach checks. */
+  topExtraMeters?: number;
 };
 
 /**

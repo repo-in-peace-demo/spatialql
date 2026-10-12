@@ -61,9 +61,12 @@ export type SlabReport = {
 export type PlacementReport = {
   event: string;
   kind: PlacementKind;
+  /** The layout anchor's eyes and yaw (what the placement used). */
   headPosition: Vector3;
   headYawDeg: number;
   headPitchDownDeg: number;
+  /** The live head at the same moment (sensing only), to show how far it is from the anchor. */
+  liveHead?: { position: Vector3; yawDeg: number };
   candidates: SurfaceAssessment[];
   chosen: Entity | null;
   synthetic: { y: number; heightBelowHead: number; center: Vector3; yaw: number } | null;
@@ -158,6 +161,13 @@ export class PlacementDebug {
   logPlacement(report: PlacementReport): void {
     console.groupCollapsed(`${LOG_PREFIX} placement: ${report.event}`);
     this.logHead(report.headPosition, report.headYawDeg, report.headPitchDownDeg);
+    if (report.liveHead) {
+      const live = report.liveHead;
+      console.log(
+        `live head ${fmtVec(live.position)}, yaw ${fmt(live.yawDeg, 1)}°: ${fmt(live.position.distanceTo(report.headPosition), 2)} m ` +
+          `and ${fmt(Math.abs(live.yawDeg - report.headYawDeg), 1)}° from the layout anchor above`,
+      );
+    }
     this.logCandidates(report.candidates, report.chosen);
     if (report.synthetic) {
       console.log(
@@ -236,7 +246,7 @@ export class PlacementDebug {
     console.groupCollapsed(
       `${LOG_PREFIX} chosen surface changed -> ${chosenRecord ? candidateId(chosenRecord) : 'none'}`,
     );
-    console.log(`head position ${fmtVec(headPosition)}; reference space: ${this.referenceSpace}`);
+    console.log(`layout anchor: eyes ${fmtVec(headPosition)}; reference space: ${this.referenceSpace}`);
     this.logCandidates(candidates, chosen);
     console.groupEnd();
     this.drawOutlines(candidates, chosen, null);
@@ -259,7 +269,7 @@ export class PlacementDebug {
 
   private logHead(position: Vector3, yawDeg: number, pitchDownDeg: number): void {
     console.log(
-      `head position ${fmtVec(position)}, yaw ${fmt(yawDeg, 1)}°, pitch ${fmt(pitchDownDeg, 1)}° down; ` +
+      `layout anchor: eyes ${fmtVec(position)}, yaw ${fmt(yawDeg, 1)}°, pitch ${fmt(pitchDownDeg, 1)}° down; ` +
         `reference space: ${this.referenceSpace}`,
     );
   }

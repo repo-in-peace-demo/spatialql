@@ -45,7 +45,8 @@ describe('the live head is read only for sensing', () => {
     'dev-seated.ts': ['*'],
   };
   // In desk-placement, the live head pose may be read for sensing and to set the anchor -- not to place.
-  const READ_HEAD_POSE_ALLOWED = ['requestRecenter', 'updateCountdown', 'update', 'runRecenter', 'beginSessionPlacement'];
+  // ...and reportPlacement: the dev placement report logs the live head beside the anchor (logged, never placed from).
+  const READ_HEAD_POSE_ALLOWED = ['requestRecenter', 'updateCountdown', 'update', 'runRecenter', 'beginSessionPlacement', 'reportPlacement'];
 
   const src = join(__dirname);
   const files = readdirSync(src).filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'));

@@ -3898,7 +3898,7 @@ export class JoinSystem
     const card = this.challengeLayout?.card;
     if (card) {
       card.object.updateWorldMatrix(true, false);
-      this._groupTop.set(0, card.heightMeters / 2, 0);
+      this._groupTop.set(0, card.heightMeters / 2 + (card.topExtraMeters ?? 0), 0);
       card.object.localToWorld(this._groupTop);
       top = Math.max(top, degreesFromForward(this._head, this.headPitchDown, this._groupTop));
     }
@@ -4838,7 +4838,7 @@ export class JoinSystem
     if (card) {
       const w = card.widthMeters / 2;
       const ch = card.heightMeters / 2;
-      span('card', corners(card.object, -w, w, -ch, ch), card.object.getWorldPosition(new Vector3()));
+      span('card', corners(card.object, -w, w, -ch, ch + (card.topExtraMeters ?? 0)), card.object.getWorldPosition(new Vector3()));
     }
     const left = parts.reduce((m, part) => (part.yaw0 < m.yaw0 ? part : m));
     const right = parts.reduce((m, part) => (part.yaw1 > m.yaw1 ? part : m));
@@ -4940,7 +4940,8 @@ export class JoinSystem
     if (card && card.object.visible) {
       const w = card.widthMeters / 2;
       const h = card.heightMeters / 2;
-      rects.push(this.reachRect('card', card.object, -w, w, -h, h));
+      // Its session clock above it counts too: nothing in a reach path.
+      rects.push(this.reachRect('card', card.object, -w, w, -h, h + (card.topExtraMeters ?? 0)));
     }
     const h = bar.heightMeters / 2;
     const arc = (x: number, y: number) => this.arcWorld(bar.object, x, y, 0, new Vector3());
@@ -6261,7 +6262,8 @@ export class JoinSystem
       card.object.updateWorldMatrix(true, false);
       this._a.setFromMatrixPosition(card.object.matrixWorld);
       const cardDistance = this._a.distanceTo(this._head);
-      this._d.set(0, card.heightMeters / 2, 0);
+      // Its top: the session clock's top, just above the card.
+      this._d.set(0, card.heightMeters / 2 + (card.topExtraMeters ?? 0), 0);
       card.object.localToWorld(this._d);
       this._e.set(0, -card.heightMeters / 2, 0);
       card.object.localToWorld(this._e);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CARD_CLOCK_SCALE,
   CARD_GOAL_LINES,
   CARD_MESSAGE_LINES,
   cardGoalLines,
@@ -8,7 +9,8 @@ import {
   wrappedLines,
 } from '../card-metrics.js';
 import { DATA_METRICS, HEADER_METRICS, measureTextCm } from '../slab-metrics.js';
-import { BROWSER_NOTICE, CARD, CONCEPT_INTROS, FREE_PLAY_DORMANT, NULL_EXPLAINER, WELCOME } from './copy.js';
+import { BROWSER_NOTICE, CARD, CONCEPT_INTROS, FREE_PLAY_DORMANT, NULL_EXPLAINER, SESSION, WELCOME } from './copy.js';
+import { formatClock } from '../session-clock.js';
 import { WELCOME_LAYOUT as L } from '../welcome-layout.js';
 import { DATASET_IDS } from './datasets.js';
 import { PRACTICE_ORDER, PUZZLES } from './puzzles.js';
@@ -23,6 +25,19 @@ const m = cardMetrics();
 const titleWidth = m.innerWidthCm - m.smallFont * (1.25 + 0.4);
 const oneLine = (text: string, bold = false) =>
   wrappedLines(text, bold ? HEADER_METRICS : DATA_METRICS, m.smallFont, bold ? titleWidth : m.innerWidthCm);
+
+describe('the session clock above the card fits the card width', () => {
+  it('the clock icon and the longest time, or "Solved in" and it, fit one line; plain ASCII', () => {
+    const font = m.smallFont * CARD_CLOCK_SCALE;
+    // The pill: padding each side, the icon (one font wide), a gap, the text.
+    const chrome = 2 * font * 0.4 + font + font * 0.3;
+    for (const text of [formatClock(9 * 3600 + 59 * 60 + 59), SESSION.solvedIn(formatClock(9 * 3600 + 59 * 60 + 59))]) {
+      expect(measureTextCm(text, DATA_METRICS, font) + chrome, text).toBeLessThanOrEqual(m.innerWidthCm);
+      expect(text).toMatch(/^[\x20-\x7e]+$/);
+    }
+    expect(SESSION.solvedIn('1:42')).toBe('Solved in 1:42');
+  });
+});
 
 describe('the puzzle card fits its text', () => {
   it('every goal fits the goal area', () => {

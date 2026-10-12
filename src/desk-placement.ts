@@ -24,13 +24,13 @@ import {
   XRMesh,
   XRPlane,
   type Entity,
+  type Object3D,
 } from '@iwsdk/core';
 import { CHALLENGE_MODE } from './challenge-mode.js';
 import { challengeStart } from './challenge-start.js';
 import { DATASETS, type DatasetId } from './data/datasets.js';
 import { deskTransition, type DeskState } from './data/desk-session.js';
 import { tableLabel } from './data/join-result.js';
-import { DESK_EDGE_BEYOND_REACH_MAX_METERS, type SurfacePlacementCase } from './surface-placement.js';
 import type { Table } from './data/types.js';
 import { deskBridge, type DeskControls } from './desk-bridge.js';
 import {
@@ -49,8 +49,10 @@ import { buildTableSlabDocument, startTableSlabBuild, type SlabBuild, type Table
 import { BUILD_BUDGET_MS, buildQueue, type BuildJob } from './build-queue.js';
 import { keptDatasets, onKeptDatasets } from './dataset-cache.js';
 import { anchorEyes, layoutAnchor, setLayoutAnchor, type AnchorReason } from './layout-anchor.js';
+import { AnchorSettle } from './anchor-settle.js';
+import { DeskShadows } from './desk-shadow.js';
 import { allowMoves } from './move-guard.js';
-import { decidePlacementMode, planPair, type Footprint, type P3, type PlacementMode, type SlabSize } from './pair-placement.js';
+import { decidePlacementMode, DESK_REST_MAX_BELOW_EYES_METERS, planPair, type Footprint, type P3, type PlacementMode, type SlabSize } from './pair-placement.js';
 import { disposeUIKitDocument } from './uikit-dispose.js';
 import { easeInCubic, easeInOutCubic, easeOutCubic } from './tween.js';
 import {
@@ -73,7 +75,6 @@ import {
 
 const SEARCH_TIMEOUT_SECONDS = 5;
 const STABLE_COMMIT_SECONDS = 1;
-const HEAD_POSE_WAIT_CAP_SECONDS = 1;
 const NEAREST_SURFACE_RADIUS_METERS = 1.0;
 // Head-relative, not floor-relative: XR's default reference space is
 // 'local-floor', but IWSDK falls back to 'local'/'viewer' when that isn't
@@ -117,9 +118,6 @@ const SWITCH_SINK_METERS = 0.06;
 const SWITCH_LEAVE_SECONDS = 0.35;
 const SWITCH_ARRIVE_SECONDS = 0.35;
 const SWITCH_ARRIVE_STAGGER_SECONDS = 0.08;
-
-/** A reference-space reset this soon after a session starts (or before its first placement) is part of the start. */
-const SESSION_START_RESET_SECONDS = 3;
 
 /** Which layout-anchor reason each recenter trigger is (layout-anchor.ts). */
 const ANCHOR_REASON: Record<RecenterReason, AnchorReason> = { button: 'recenter', 'headset-on': 'headset-on', reset: 'reset' };
@@ -270,10 +268,9 @@ export class DeskPlacementSystem
   private readonly _p = new Vector3();
 
   private sessionActive = false;
-  /** When this XR session started (ms): resets right after it are part of its start. */
-  private sessionStartMs = -Infinity;
+  /** The wait for tracking to settle before the session's anchor (anchor-settle.ts). */
+  private readonly settle = new AnchorSettle();
   private headPoseValid = false;
-  private headPoseWaitElapsed = 0;
 
   private searching = false;
   private searchElapsed = 0;
@@ -286,6 +283,12 @@ export class DeskPlacementSystem
 
   // Reusable scratch objects -- allocated once, never inside update().
   private _headPos = new Vector3();
+  /** Soft shadows on a detected desk under the floating slabs (desk-shadow.ts), and their reused inputs. */
+  private shadows: DeskShadows | null = null;
+  private readonly shadowInputs: { object: Object3D | undefined; width: number; height: number }[] = [
+    { object: undefined, width: 0, height: 0 },
+    { object: undefined, width: 0, height: 0 },
+  ];
   /** The placement mode decided at the layout anchor (decideMode); dataset switches keep it. */
   private anchoredMode: PlacementMode = { kind: 'floating' };
   private readonly _footprintPoint = new Vector3();
@@ -349,6 +352,7 @@ export class DeskPlacementSystem
     this.placeAnchored();
     this.reportPlacement('cold start (floating, default head pose)', 'floating', null);
 
+    this.shadows = new DeskShadows(this.world);
     this.queries.grabbedSlabs.subscribe('qualify', (entity) => {
       const slab = this.slabs.find((s) => s.entity === entity);
       if (slab) {
@@ -661,12 +665,13 @@ export class DeskPlacementSystem
       // The new origin in the previous space (WebXR: optional; null when the platform doesn't know it).
       const transform = (event as unknown as { transform?: { inverse: { matrix: Float32Array } } | null }).transform ?? null;
       const debug = import.meta.env.DEV && this.debug;
-      // The Quest resets the space as a session starts: part of the session-start anchoring, not a second anchor.
-      if (!this.headPoseValid || now - this.sessionStartMs < SESSION_START_RESET_SECONDS * 1000) {
+      // Before the session's anchor (tracking still settling): the wait for it starts over; there's nothing to correct yet.
+      if (!this.headPoseValid) {
+        this.settle.onReset(now / 1000);
         if (debug) {
           console.log(
-            `[DeskPlacement debug] reference space reset ${((now - this.sessionStartMs) / 1000).toFixed(1)} s into the session ` +
-              `(${transform ? 'with' : 'without'} a correction): part of the session start; nothing moved, the anchor stays`,
+            `[DeskPlacement debug] reference space reset ${this.settle.waited(now / 1000).toFixed(1)} s into the session ` +
+              `(${transform ? 'with' : 'without'} a correction), before the anchor: waiting for tracking to settle again`,
           );
         }
         return;
@@ -779,7 +784,7 @@ export class DeskPlacementSystem
     // The targets, from the normal placement rules (recorded, not applied).
     this.collectingTargets = true;
     let kind: PlacementKind = 'floating';
-    let placement: SurfacePlacementCase | null = 'floating';
+    let placement: PlacementMode['kind'] = 'floating';
     const surfaceEntity = this.lastSurface?.entity ?? null;
     // The new anchor decides the placement mode (desk or floating) afresh; switches keep it.
     if (surfaceEntity) {
@@ -1026,13 +1031,19 @@ export class DeskPlacementSystem
       this.yawHistory.record(performance.now() / 1000, this._headYaw);
     }
     this.updateRecenter(delta);
-    if (this.sessionActive && !this.headPoseValid) {
-      this.headPoseWaitElapsed += delta;
+    // The session's anchor waits for tracking to settle (anchor-settle.ts): the space attached, no reset and the head still for a moment.
+    if (this.sessionActive && !this.headPoseValid && this.sessionListenersAttached) {
       this.player.head.updateWorldMatrix(true, false);
       this._headPos.setFromMatrixPosition(this.player.head.matrixWorld);
-      const atDefaultOrigin = this._headPos.lengthSq() < 1e-6;
-      if (!atDefaultOrigin || this.headPoseWaitElapsed >= HEAD_POSE_WAIT_CAP_SECONDS) {
+      const now = performance.now() / 1000;
+      if (this.settle.sample(now, this._headPos)) {
         this.headPoseValid = true;
+        if (import.meta.env.DEV && this.debug) {
+          console.log(
+            `[DeskPlacement debug] tracking settled ${this.settle.waited(now).toFixed(1)} s into the session` +
+              ` (${this.settle.resets} reset${this.settle.resets === 1 ? '' : 's'} while waiting): taking the session's anchor`,
+          );
+        }
         this.beginSessionPlacement();
       }
     }
@@ -1040,6 +1051,22 @@ export class DeskPlacementSystem
     if (this.searching) {
       this.updateSurfaceSearch(delta);
     }
+    this.updateShadows();
+  }
+
+  /** The floating slabs' shadows on the desk below them (desk-shadow.ts): only over a detected desk they don't rest on. */
+  private updateShadows(): void {
+    const desk = this.anchoredMode.kind === 'floating' && this.slabs.length === 2 ? (this.anchoredMode.shadow ?? null) : null;
+    if (desk) {
+      for (let i = 0; i < 2; i++) {
+        const slab = this.slabs[i];
+        const input = this.shadowInputs[i];
+        input.object = slab.entity.object3D;
+        input.width = slab.doc.widthMeters;
+        input.height = this.slabHeightMeters(slab.doc);
+      }
+    }
+    this.shadows?.update(this.shadowInputs, desk);
   }
 
   /**
@@ -1097,13 +1124,12 @@ export class DeskPlacementSystem
   private readonly _correctionEuler = new Euler();
 
   private onSessionStart(): void {
-    this.sessionStartMs = performance.now();
+    this.settle.start(performance.now() / 1000);
     for (const slab of this.slabs) {
       slab.touched = false;
     }
     this.headPoseValid = false;
     this.yawHistory.clear();
-    this.headPoseWaitElapsed = 0;
     this.searching = false;
     this.surfaceTooFar = false;
     this.bestCandidateEntity = null;
@@ -1334,10 +1360,8 @@ export class DeskPlacementSystem
     this.surfaceTooFar = placement === 'floating';
     this.reportPlacement(
       placement === 'floating'
-        ? `detected ${kind} too far away (floating kept)`
-        : placement === 'desk-edge'
-          ? `detected ${kind} just beyond the slabs' line (at the line, at its edge)`
-          : `snapped to detected ${kind}`,
+        ? `detected ${kind} doesn't reach the slabs' distance (floating kept)`
+        : `snapped to detected ${kind} (resting on it at the floating distance)`,
       placement === 'floating' ? 'floating' : 'surface',
       this._best,
     );
@@ -1421,11 +1445,12 @@ export class DeskPlacementSystem
     if (import.meta.env.DEV && this.debug) {
       console.log(
         `[DeskPlacement debug] placement mode decided at the anchor (#${layoutAnchor().epoch}): ${decision.mode.kind}` +
-          (decision.surfaceForward === null
+          (decision.onSurface === null || surfaceY === null
             ? ' (no surface)'
-            : ` (the surface puts the slabs' bottom edges ${decision.surfaceForward.toFixed(2)} m ahead; the ` +
-              `${SLAB_VIEW_DISTANCE_METERS} m view distance puts them ${decision.reachForward?.toFixed(2)} m ahead; ` +
-              `desk-edge up to ${DESK_EDGE_BEYOND_REACH_MAX_METERS} m beyond that)`) +
+            : ` (the desk is ${(this._eyes.y - surfaceY).toFixed(2)} m below the eyes ` +
+              `(they rest on one at most ${DESK_REST_MAX_BELOW_EYES_METERS} m below); the floating line is ` +
+              `${decision.forward.toFixed(2)} m ahead and the desk ${decision.onSurface ? 'reaches' : "doesn't reach"} it: ` +
+              `${decision.mode.kind === 'on-surface' ? 'resting on it' : 'floating at the tuned pose, a shadow on the desk below'})`) +
           '; kept until the next anchor',
       );
     }
@@ -1594,9 +1619,12 @@ export class DeskPlacementSystem
     );
     const syntheticY = kind === 'synthetic' ? this._eyes.y - FORCE_SURFACE_HEIGHT_BELOW_HEAD : null;
     this._basePos.copy(this._eyes);
+    // The live head beside the anchor, so a stale anchor shows at once (sensing only: logged, never placed from).
+    this.readHeadPose();
     this.debug.logPlacement({
       event,
       kind,
+      liveHead: { position: this._headPos.clone(), yawDeg: MathUtils.radToDeg(this._headYaw) },
       headPosition: this._basePos,
       headYawDeg: MathUtils.radToDeg(this.eyesYaw),
       headPitchDownDeg: MathUtils.radToDeg(this._headPitchDown),

@@ -303,6 +303,13 @@ export const CARD = {
   doneWithAnswerBefore: 'Done with answer before',
 };
 
+// --- The session clock (just above the puzzle card) ----------------------------------
+
+export const SESSION = {
+  /** On a win, in place of the session time until the next puzzle: that puzzle's active time ("1:42"). */
+  solvedIn: (time: string) => `Solved in ${time}`,
+};
+
 // --- Every puzzle done (the card, after "Finish" on the last puzzle) --------------------
 
 export const COMPLETE = {

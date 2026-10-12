@@ -355,6 +355,49 @@ Since phase 4:
   replay of the 04:20 session's events through the placement: positions change
   only at the anchor events (the old way moved them at every switch).
 
+- **16.** The session clock (2026-10-12): a small pill (clock icon and time,
+  muted, 0.85x the card's small text) just above the puzzle card at its left
+  edge, part of the card (anchored, never a target). From 0:00 when Start enters
+  XR; paused while the headset is off (hidden), not for a system menu; m:ss,
+  then h:mm:ss; written once a second. On a win it reads "Solved in 1:42" (the
+  puzzle's active time, from its load, without headset-off time) until the next
+  puzzle. Counted in the view and reach checks: emulator, floating, seated, all
+  four datasets joined: the card's top 18.8-19.5° above the gaze (limit 40°),
+  the group 51-57° of 80°, the card's reach-path clearance 18.9 cm or more.
+- **17.** Desk placement at the floating distance (2026-10-12): on a desk the
+  slabs' bottom line goes as far ahead as when floating (0.49-0.52 m) and rests
+  on the desk there; a desk that doesn't reach that far (too short, or too far
+  away) isn't used: floating. Decided once per anchor (pair-placement.ts; the
+  old desk-edge band and surface-placement.ts are gone). Emulator, seated, all
+  four datasets joined, both modes:
+  - floating: slabs 0.57-0.60 m, text 1.15-1.21°, width up to ±42.2° (the
+    column and card), height 51.3-57.0° of 80°, reach paths 10.4 cm or more.
+  - desk (forced, 0.45 m below the eyes): slabs 0.67-0.70 m (lower, same
+    distance ahead), text 0.98-1.03° (sized for 0.6 m; target 1.15°), width up
+    to ±42.4° (column and card; the slabs reach ±34.7° at most, from ±48°),
+    height 46.3-54.1°, slab bottoms 36-37° below the gaze, reach paths 12.0 cm
+    or more.
+  Trade-off on a desk: the text is a little small (about 1.0°). Text is built
+  once for 0.6 m; resizing it for a desk would mean rebuilding the slabs.
+
+- **18.** The anchor waits for tracking; desks only when high enough (2026-10-13).
+  The 02:30 headset session (current code, stamp 0550b304) took its anchor the
+  moment XR began; 0.2 s later the Quest reset its space with a correction,
+  which the session-start rule ignored, so the anchor stayed in the old
+  coordinates: the group floated 1.6 m away (reach hint), facing the 53.8° the
+  head had briefly turned; the first Recenter found the player 0.9 m from it.
+  Placement never used the desk's orientation. Now: (1) the session anchor
+  waits until tracking settles (the space attached, no reset and the head
+  within 2 cm for 0.5 s; at most 3 s; anchor-settle.ts); a reset before it
+  restarts the wait; (2) after it, a reset with a correction is always applied;
+  (3) placement reports log the live head beside the anchor; (4) a test: a desk
+  at any angle leaves the pair's facing to the anchor. Desks: the slabs rest on
+  one only when it's within 0.30 m below the eyes
+  (DESK_REST_MAX_BELOW_EYES_METERS) and reaches the floating line; otherwise
+  they float at exactly the tuned pose and cast a soft shadow on the desk below
+  them (desk-shadow.ts). Emulator, forced desk 0.45 m below the eyes: floating,
+  slabs 0.59-0.60 m, text 1.15-1.17°, shadows under both slabs.
+
 **Not started** (submission):
 
 - **19.** Video footage: first join, NULL filter, fan-out win, dataset switch, "All 20 puzzles done."
@@ -380,6 +423,7 @@ Since phase 4:
   an automatic one-way fallback to 72 Hz after sustained misses.
 - **Reload the headset tab first** (the log's first lines name the page's code; a STALE PAGE warning means reload).
 - **The 0.6 m home on a Quest:** comfortable reading and reach across Prev, Next and dataset switches, joined and not.
+- **Entering XR at the desk:** the tables should float in front of you (about 0.6 m), facing you, with soft shadows on the desk; the log's "tracking settled" and "live head" lines should agree with the anchor.
 - **Head movement moves nothing:** lean, turn and sit back while opening Filter,
   the picker and switching puzzles; nothing should move until Recenter.
 - **Recenter facing the button:** recenter while facing about where the Recenter
