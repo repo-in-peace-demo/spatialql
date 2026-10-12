@@ -40,6 +40,17 @@ describe('the session anchor waits for tracking to settle', () => {
     expect(t).toBeGreaterThanOrEqual(ANCHOR_SETTLE_CAP_SECONDS - 0.05);
   });
 
+  it("the prompt's ring fills as the head holds still, and empties when it moves", () => {
+    const settle = new AnchorSettle();
+    settle.start(0);
+    expect(settle.progress(0)).toBe(0);
+    settle.sample(0.1, head(0));
+    expect(settle.progress(0.35)).toBeCloseTo(0.5, 6);
+    settle.sample(0.4, head(0.1));
+    expect(settle.progress(0.4)).toBe(0);
+    expect(settle.progress(2)).toBe(1);
+  });
+
   it('never at the tracking origin placeholder (0, 0, 0), even past the cap', () => {
     const settle = new AnchorSettle();
     settle.start(0);

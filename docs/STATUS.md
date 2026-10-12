@@ -398,6 +398,13 @@ Since phase 4:
   them (desk-shadow.ts). Emulator, forced desk 0.45 m below the eyes: floating,
   slabs 0.59-0.60 m, text 1.15-1.17°, shadows under both slabs.
 
+- **19.** The player's cue at the start (2026-10-13): from Start until the
+  session's anchor is taken (tracking settled: typically 0.5 s, at most 3 s),
+  the layout is hidden and "Look straight ahead" shows at the gaze, its ring
+  filling as the head holds still; then the layout appears in place, the slabs
+  fading in over 0.3 s. No layout at the pre-session pose that then jumps.
+  Emulator: the prompt alone right after Start; the tables 0.5 s later.
+
 **Not started** (submission):
 
 - **19.** Video footage: first join, NULL filter, fan-out win, dataset switch, "All 20 puzzles done."

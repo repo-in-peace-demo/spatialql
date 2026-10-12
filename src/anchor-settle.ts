@@ -58,6 +58,11 @@ export class AnchorSettle {
     return now - this.stillSince >= ANCHOR_SETTLE_SECONDS || now - this.startedAt >= ANCHOR_SETTLE_CAP_SECONDS;
   }
 
+  /** How far along the still stretch is (0-1), for the prompt's ring. */
+  progress(now: number): number {
+    return this.stillAt === null ? 0 : Math.min(1, (now - this.stillSince) / ANCHOR_SETTLE_SECONDS);
+  }
+
   /** Seconds since the session began (for the log). */
   waited(now: number): number {
     return now - this.startedAt;

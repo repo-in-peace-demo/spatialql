@@ -119,6 +119,9 @@ const SWITCH_LEAVE_SECONDS = 0.35;
 const SWITCH_ARRIVE_SECONDS = 0.35;
 const SWITCH_ARRIVE_STAGGER_SECONDS = 0.08;
 
+/** The slabs fade in over this long once the session's anchor is taken. */
+const REVEAL_SECONDS = 0.3;
+
 /** Which layout-anchor reason each recenter trigger is (layout-anchor.ts). */
 const ANCHOR_REASON: Record<RecenterReason, AnchorReason> = { button: 'recenter', 'headset-on': 'headset-on', reset: 'reset' };
 
@@ -268,6 +271,8 @@ export class DeskPlacementSystem
   private readonly _p = new Vector3();
 
   private sessionActive = false;
+  /** Seconds into the slabs' fade-in after the session's anchor, or -1 when none is running. */
+  private revealElapsed = -1;
   /** The wait for tracking to settle before the session's anchor (anchor-settle.ts). */
   private readonly settle = new AnchorSettle();
   private headPoseValid = false;
@@ -1032,6 +1037,10 @@ export class DeskPlacementSystem
     }
     this.updateRecenter(delta);
     // The session's anchor waits for tracking to settle (anchor-settle.ts): the space attached, no reset and the head still for a moment.
+    if (this.sessionActive && !this.headPoseValid) {
+      // The player's cue while it waits: "Look straight ahead" at the gaze, its ring filling as the head holds still.
+      this.prompt.show(this.player.head, this.settle.progress(performance.now() / 1000));
+    }
     if (this.sessionActive && !this.headPoseValid && this.sessionListenersAttached) {
       this.player.head.updateWorldMatrix(true, false);
       this._headPos.setFromMatrixPosition(this.player.head.matrixWorld);
@@ -1045,13 +1054,47 @@ export class DeskPlacementSystem
           );
         }
         this.beginSessionPlacement();
+        this.revealLayout();
       }
     }
+    this.updateReveal(delta);
 
     if (this.searching) {
       this.updateSurfaceSearch(delta);
     }
     this.updateShadows();
+  }
+
+  /** Hides (or shows) everything in the level: the slabs, the card, the column, the outline, the shadows. */
+  private setLayoutHidden(hidden: boolean): void {
+    this.world.getActiveRoot().visible = !hidden;
+  }
+
+  /** The session's anchor is taken and the layout placed: shown, the slabs fading in (REVEAL_SECONDS). */
+  private revealLayout(): void {
+    this.prompt.hide();
+    this.setLayoutHidden(false);
+    this.revealElapsed = 0;
+    for (const slab of this.slabs) {
+      slab.doc.fade.value = 0;
+    }
+  }
+
+  private updateReveal(delta: number): void {
+    if (this.revealElapsed < 0) {
+      return;
+    }
+    this.revealElapsed += delta;
+    const t = Math.min(1, this.revealElapsed / REVEAL_SECONDS);
+    // Only while the desk is settled (a switch runs its own fades).
+    if (this.deskStateValue.phase === 'ready') {
+      for (const slab of this.slabs) {
+        slab.doc.fade.value = t;
+      }
+    }
+    if (t >= 1) {
+      this.revealElapsed = -1;
+    }
   }
 
   /** The floating slabs' shadows on the desk below them (desk-shadow.ts): only over a detected desk they don't rest on. */
@@ -1125,6 +1168,8 @@ export class DeskPlacementSystem
 
   private onSessionStart(): void {
     this.settle.start(performance.now() / 1000);
+    // Nothing shows until the anchor is taken (no layout at the pre-session pose that then jumps).
+    this.setLayoutHidden(true);
     for (const slab of this.slabs) {
       slab.touched = false;
     }
@@ -1140,6 +1185,10 @@ export class DeskPlacementSystem
   }
 
   private onSessionEnd(): void {
+    // A session ending while tracking settled: the layout is shown again, the prompt gone.
+    this.prompt.hide();
+    this.setLayoutHidden(false);
+    this.revealElapsed = -1;
     this.searching = false;
     this.detachSessionListeners();
     this.recenterGliding = false;

@@ -73,7 +73,8 @@ export class RecenterPrompt {
     const document = new UIKitDocument(label);
     document.position.set(0, -LABEL_BELOW_METERS, 0);
     this.root.add(document);
-    world.createTransformEntity(this.root);
+    // Persistent (under the scene root, not the level's): it shows while the layout is hidden at a session's start.
+    world.createTransformEntity(this.root, { persistent: true });
   }
 
   /** Shown at `progress` (0-1), in front of the head (its world pose). */
