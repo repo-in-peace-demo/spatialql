@@ -336,6 +336,49 @@ function captionHeightCmFor(options: SlabBuildOptions, m: SlabMetrics): number {
 }
 
 /**
+ * A slab's columns and width (cm), as `startTableSlabBuild` lays them out:
+ * from the data and the font metrics alone, nothing built.
+ */
+function slabWidthsCm(table: Table, options: SlabBuildOptions, m: SlabMetrics, visibleRows: Row[]) {
+  // Columns fit every row given for sizing (a silhouette builds one row but fits them all).
+  const columnWidths = computeColumnWidths(table, options.sizeRows ?? visibleRows, m);
+  // The diff gutter is a narrow column before the data columns.
+  const gutterWidthCm = options.diffGutter ? BASE_GUTTER_WIDTH * (m.rowFont / BASE_ROW_FONT_CM) : 0;
+  const gutterSpanCm = options.diffGutter ? gutterWidthCm + m.columnGap : 0;
+  let contentWidthCm =
+    gutterSpanCm +
+    columnWidths.reduce((sum, w) => sum + w, 0) +
+    m.columnGap * Math.max(0, table.columns.length - 1);
+  // The caption never shrinks below its fixed size: if it's wider than the
+  // columns, the last column absorbs the difference so rows still span the
+  // full slab width.
+  if (options.caption && columnWidths.length > 0) {
+    const deficit = captionWidthCm(options.caption.fitLines, m) + FIT_EPSILON_CM - contentWidthCm;
+    if (deficit > 0) {
+      columnWidths[columnWidths.length - 1] += deficit;
+      contentWidthCm += deficit;
+    }
+  }
+  // Yoga sizes are border-box: the root's width must include its border as
+  // well as its padding, or the rows get squeezed / spill past the edge.
+  const widthCm = 2 * (m.panelPadding + m.borderWidth) + contentWidthCm;
+  return { columnWidths, gutterWidthCm, gutterSpanCm, contentWidthCm, widthCm };
+}
+
+/**
+ * The size (meters) a slab for `table` with `options` will have once built
+ * (`widthMeters`, `heightMeters` of its document), computed without building
+ * it: placement can plan for a slab still waiting in the build queue.
+ */
+export function tableSlabSizeMeters(table: Table, options: SlabBuildOptions = {}): { widthMeters: number; heightMeters: number } {
+  const m = slabMetrics(options.text);
+  const { visibleRowCount, overflow } = visibleRowLayout(table, options.maxRows ?? MAX_VISIBLE_ROWS);
+  const visibleRows = table.rows.slice(0, visibleRowCount);
+  const heightCm = panelHeightCm(options, m, Math.max(visibleRowCount, options.reserveRows ?? 0), overflow);
+  return { widthMeters: slabWidthsCm(table, options, m, visibleRows).widthCm / 100, heightMeters: heightCm / 100 };
+}
+
+/**
  * Height (meters) a slab for `table` needs with every row displayed, before
  * any `minHeightMeters` padding. Lets callers match slab heights up front.
  */
@@ -505,28 +548,7 @@ export function startTableSlabBuild(table: Table, options: SlabBuildOptions = {}
   const shownRows = visibleRows.filter((_, rowIndex) => !options.hiddenRows?.has(rowIndex)).length;
   const panelHeight = options.animatedHeight ? signal(heightForRowsMeters(shownRows) * 100) : null;
 
-  // Columns fit every row given for sizing (a silhouette builds one row but fits them all).
-  const columnWidths = computeColumnWidths(table, options.sizeRows ?? visibleRows, m);
-  // The diff gutter is a narrow column before the data columns.
-  const gutterWidthCm = options.diffGutter ? BASE_GUTTER_WIDTH * (m.rowFont / BASE_ROW_FONT_CM) : 0;
-  const gutterSpanCm = options.diffGutter ? gutterWidthCm + m.columnGap : 0;
-  let contentWidthCm =
-    gutterSpanCm +
-    columnWidths.reduce((sum, w) => sum + w, 0) +
-    m.columnGap * Math.max(0, table.columns.length - 1);
-  // The caption never shrinks below its fixed size: if it's wider than the
-  // columns, the last column absorbs the difference so rows still span the
-  // full slab width.
-  if (options.caption && columnWidths.length > 0) {
-    const deficit = captionWidthCm(options.caption.fitLines, m) + FIT_EPSILON_CM - contentWidthCm;
-    if (deficit > 0) {
-      columnWidths[columnWidths.length - 1] += deficit;
-      contentWidthCm += deficit;
-    }
-  }
-  // Yoga sizes are border-box: the root's width must include its border as
-  // well as its padding, or the rows get squeezed / spill past the edge.
-  const widthCm = 2 * (m.panelPadding + m.borderWidth) + contentWidthCm;
+  const { columnWidths, gutterWidthCm, gutterSpanCm, contentWidthCm, widthCm } = slabWidthsCm(table, options, m, visibleRows);
 
   const fade = signal(1);
   const anchor = options.anchorTop ? 'top' : 'center';

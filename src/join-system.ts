@@ -168,6 +168,8 @@ import {
   type JoinTypeControlView,
   type TableSlabDocument,
   type SlabBuild,
+  tableSlabSizeMeters,
+  type SlabBuildOptions,
 } from './table-slab-view.js';
 import { buildQueue, type BuildJob } from './build-queue.js';
 import { chooseFrameRate, PREFERRED_FRAME_RATE_HZ } from './frame-rate.js';
@@ -176,7 +178,7 @@ import { anchorEyes, layoutAnchor } from './layout-anchor.js';
 import { allowMoves, checkMove, type Tracked } from './move-guard.js';
 import { PressDips } from './press-dip.js';
 import { censusText, sceneCensus } from './scene-census.js';
-import { disposeUIKitDocument } from './uikit-dispose.js';
+import { disposeUIKitDocumentLater } from './uikit-dispose.js';
 import { sounds } from './sound.js';
 import {
   BOUNCE_FIRST_IMPACT,
@@ -690,6 +692,76 @@ type HomePose = { pos: Vector3; quat: Quaternion; set: boolean };
 
 /** One of a placed bar's buttons. */
 type BarButtonRect = PlacedBar['buttons'][number];
+
+
+/**
+ * A result slab's data and build options, for `leftId` LEFT JOIN `rightId`:
+ * what its build starts from, and what its size is planned from before it's
+ * built (resultSlabSize).
+ */
+function resultSlabSpec(leftId: string, rightId: string) {
+  const left = tableById(leftId)!;
+  const right = tableById(rightId)!;
+  // The slab holds every LEFT JOIN row; INNER hides the trailing ghosts.
+  const result = buildJoinResultTable(left, right, joinTables(left, right, 'left'), 'left');
+  const ghostRows = result.lineage.flatMap((l, index) => (l.ghost ? [index] : []));
+  const sql = { inner: buildJoinSql(left, right, 'inner'), left: buildJoinSql(left, right, 'left') };
+  // Challenge mode reserves a third caption line for `WHERE ... IS NULL`
+  // (hidden until a filter is set, so filtering never relayouts the
+  // caption), sized for every column a filter could name.
+  const whereLines = CHALLENGE_MODE
+    ? result.columns.map((_, index) => buildWhereSql(left, right, filterForColumn(left, right, result, index)))
+    : [];
+  const options: SlabBuildOptions = {
+    maxRows: MAX_RESULT_ROWS,
+    hiddenRows: new Set(ghostRows),
+    caption: CHALLENGE_MODE
+      ? { lines: [...sql.inner, whereLines[0] ?? ''], fitLines: [...sql.inner, ...sql.left, ...whereLines] }
+      : { lines: [...sql.inner], fitLines: [...sql.inner, ...sql.left] },
+    ...(CHALLENGE_MODE
+      ? {
+          diffGutter: true,
+          placeholderRows: RESULT_ROW_CAP,
+          reserveRows: RESULT_ROW_CAP,
+          // The card's state, mirrored where the player looks (the card is beside it).
+          badge: true,
+          // Every NULL here filters: outlined, so it reads as a button.
+          nullTargets: true,
+          accent: DATASETS[datasetOfTable(leftId) ?? 'shop'].theme.accent,
+        }
+      : {}),
+    anchorTop: true,
+    // Same angular text size as the source slabs, at the result's own distance.
+    text: slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS),
+    // Height follows the rows shown (INNER hides the trailing ghost rows).
+    // Placement fits the tallest state (the reserve) but keeps the bottom
+    // edge fixed above the control: it grows upward (followResultHeight).
+    animatedHeight: true,
+    // Each row's LEFT-table and RIGHT-table cells can fly in separately
+    // from their own source rows.
+    cellSides: result.columns.map((column) => column.source),
+  };
+  return { left, right, result, ghostRows, sql, options };
+}
+
+const resultSizes = new Map<string, { widthMeters: number; heightMeters: number }>();
+
+/**
+ * The size the result slab for `leftId` and `rightId` has once built, known
+ * without building it (cached): the group is planned from it, so a result
+ * slab finishing its build in the background never moves the card or the
+ * outline.
+ */
+function resultSlabSize(leftId: string, rightId: string): { widthMeters: number; heightMeters: number } {
+  const key = resultKey(leftId, rightId);
+  let size = resultSizes.get(key);
+  if (!size) {
+    const { result, options } = resultSlabSpec(leftId, rightId);
+    size = tableSlabSizeMeters(result.table, options);
+    resultSizes.set(key, size);
+  }
+  return size;
+}
 
 /** The group's layout (JoinSystem.planGroup); angles in degrees, yaws + right of straight ahead. */
 type GroupPlan = {
@@ -2230,7 +2302,7 @@ export class JoinSystem
       return;
     }
     for (const done of buildQueue.finished.splice(0)) {
-      this.debug.note(`build queue: ${done.name} built in ${done.frames} frame(s), ${done.ms.toFixed(1)} ms in all`);
+      this.debug.note(`build queue: ${done.name} done in ${done.frames} frame(s), ${done.ms.toFixed(1)} ms in all`);
     }
   }
 
@@ -2776,15 +2848,15 @@ export class JoinSystem
         this.active = null;
       }
       view.cleanup.forEach((fn) => fn());
-      disposeUIKitDocument(view.doc.document);
-      view.entity.dispose();
+      // Out of the scene now, released over the next frames (uikit-dispose.ts).
+      disposeUIKitDocumentLater(`${key} result`, view.doc.document, view.entity);
       this.results.delete(key);
     }
     for (const [key, pending] of this.resultBuilds) {
       const [leftId, rightId] = key.split('>');
       if (!(keep(leftId) && keep(rightId))) {
         buildQueue.remove(pending.job);
-        disposeUIKitDocument(pending.build?.doc.document);
+        disposeUIKitDocumentLater(`${key} result (unfinished)`, pending.build?.doc.document);
         this.resultBuilds.delete(key);
       }
     }
@@ -2835,48 +2907,8 @@ export class JoinSystem
 
   /** A queued result slab's first step: its data, and its document started (hidden, parked). */
   private startResultBuild(key: string, leftId: string, rightId: string, entry: ResultBuild): void {
-    const left = tableById(leftId)!;
-    const right = tableById(rightId)!;
-
-    // The slab holds every LEFT JOIN row; INNER hides the trailing ghosts.
-    const result = buildJoinResultTable(left, right, joinTables(left, right, 'left'), 'left');
-    const ghostRows = result.lineage.flatMap((l, index) => (l.ghost ? [index] : []));
-    const sql = { inner: buildJoinSql(left, right, 'inner'), left: buildJoinSql(left, right, 'left') };
-    // Challenge mode reserves a third caption line for `WHERE ... IS NULL`
-    // (hidden until a filter is set, so filtering never relayouts the
-    // caption), sized for every column a filter could name.
-    const whereLines = CHALLENGE_MODE
-      ? result.columns.map((_, index) => buildWhereSql(left, right, filterForColumn(left, right, result, index)))
-      : [];
-    const build = startTableSlabBuild(result.table, {
-      maxRows: MAX_RESULT_ROWS,
-      hiddenRows: new Set(ghostRows),
-      caption: CHALLENGE_MODE
-        ? { lines: [...sql.inner, whereLines[0] ?? ''], fitLines: [...sql.inner, ...sql.left, ...whereLines] }
-        : { lines: [...sql.inner], fitLines: [...sql.inner, ...sql.left] },
-      ...(CHALLENGE_MODE
-        ? {
-            diffGutter: true,
-            placeholderRows: RESULT_ROW_CAP,
-            reserveRows: RESULT_ROW_CAP,
-            // The card's state, mirrored where the player looks (the card is beside it).
-            badge: true,
-            // Every NULL here filters: outlined, so it reads as a button.
-            nullTargets: true,
-            accent: DATASETS[datasetOfTable(leftId) ?? 'shop'].theme.accent,
-          }
-        : {}),
-      anchorTop: true,
-      // Same angular text size as the source slabs, at the result's own distance.
-      text: slabTextSizeAt(PLANNED_RESULT_DISTANCE_METERS),
-      // Height follows the rows shown (INNER hides the trailing ghost rows).
-      // Placement fits the tallest state (the reserve) but keeps the bottom
-      // edge fixed above the control: it grows upward (followResultHeight).
-      animatedHeight: true,
-      // Each row's LEFT-table and RIGHT-table cells can fly in separately
-      // from their own source rows.
-      cellSides: result.columns.map((column) => column.source),
-    });
+    const { left, right, result, ghostRows, sql, options } = resultSlabSpec(leftId, rightId);
+    const build = startTableSlabBuild(result.table, options);
     const doc = build.doc;
     doc.fade.value = 0;
     doc.document.visible = false;
@@ -2888,7 +2920,17 @@ export class JoinSystem
     entry.finish = () => {
       this.resultBuilds.delete(key);
       const view = this.finishResultView(key, leftId, rightId, left, right, result, ghostRows, sql, doc);
-      // The group is laid out for the pair's result width.
+      if (import.meta.env.DEV && this.debug) {
+        // The group was planned from this size before it was built (resultSlabSize): they must agree, or the card moves now.
+        const planned = resultSlabSize(leftId, rightId);
+        if (Math.abs(planned.widthMeters - doc.widthMeters) > 1e-6 || Math.abs(planned.heightMeters - doc.heightMeters) > 1e-6) {
+          this.debug.warn(
+            `result slab ${key} built at ${cm(doc.widthMeters)} x ${cm(doc.heightMeters)}, planned ${cm(planned.widthMeters)} x ` +
+              `${cm(planned.heightMeters)}: the group re-plans now`,
+          );
+        }
+      }
+      // The group is laid out again (its size was planned already: nothing should move).
       this.layoutDirty = true;
       return view;
     };
@@ -4595,7 +4637,8 @@ export class JoinSystem
     plan.floorDeg = plan.pairTopDeg + RESULT_FLOOR_GAP_DEG;
     let width = slotWidth;
     for (const key of [resultKey(a.id, b.id), resultKey(b.id, a.id)]) {
-      width = Math.max(width, this.results.get(key)?.doc.widthMeters ?? 0);
+      // Planned, built or not (resultSlabSize): a build finishing never re-plans the group.
+      width = Math.max(width, resultSizeForKey(key).widthMeters);
     }
     plan.resultWidth = width;
     const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
@@ -5089,7 +5132,7 @@ export class JoinSystem
     // height: so the outline and the result share their bottom edge.
     let fitHeight = slot.heightMeters;
     for (const key of [resultKey(a.id, b.id), resultKey(b.id, a.id)]) {
-      fitHeight = Math.max(fitHeight, this.results.get(key)?.doc.heightMeters ?? 0);
+      fitHeight = Math.max(fitHeight, resultSizeForKey(key).heightMeters);
     }
     const plan = this.placeInGroup(a, b, false, slot.object, slot.widthMeters, fitHeight, 0, slot.heightMeters);
     this.placeColumn(false);
@@ -6596,6 +6639,12 @@ export class JoinSystem
 
 function resultKey(leftId: string, rightId: string): string {
   return `${leftId}>${rightId}`;
+}
+
+/** `resultSlabSize` by its `resultKey`. */
+function resultSizeForKey(key: string): { widthMeters: number; heightMeters: number } {
+  const [leftId, rightId] = key.split('>');
+  return resultSlabSize(leftId, rightId);
 }
 
 /** Recomputes each result row's display slot from `rowShown` (hidden rows: -1). */

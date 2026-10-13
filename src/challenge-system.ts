@@ -124,7 +124,7 @@ import { buildQueue, type BuildJob } from './build-queue.js';
 import { keepDatasets } from './dataset-cache.js';
 import { allowMoves } from './move-guard.js';
 import { formatClock, SessionClock } from './session-clock.js';
-import { disposeUIKitDocument } from './uikit-dispose.js';
+import { disposeUIKitDocumentLater } from './uikit-dispose.js';
 import { PressDips } from './press-dip.js';
 import { sounds } from './sound.js';
 import { isTouchPointerClick, setRect, touchProbe, type PressPath } from './touch-probe.js';
@@ -1012,6 +1012,12 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       }
       return;
     }
+    const loadStart = performance.now();
+    if (import.meta.env.DEV) {
+      // The card and outline re-lay out for the new puzzle over the next frames; after a
+      // dataset switch that's ~0.8 s after loadPuzzle's allowance began (move-guard.ts).
+      allowMoves('puzzle-switch', loadStart / 1000, 1);
+    }
     this.puzzle = getPuzzle(id);
     this.text = puzzleText(this.puzzle);
     this.target = puzzleTarget(this.puzzle);
@@ -1101,7 +1107,8 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         `puzzle ${PRACTICE_ORDER.indexOf(id) + 1} (${id}) loaded on ${this.puzzle.datasetId}` +
           `${this.isDaily ? ` as the daily for ${isoFromDay(this.today)}` : ''}; ` +
           `target ${visibleRowIndices(this.target).length} rows` +
-          (ahead.length > 0 ? `; ahead of practice: ${ahead.join(', ')}` : ''),
+          (ahead.length > 0 ? `; ahead of practice: ${ahead.join(', ')}` : '') +
+          `; perf: loaded in ${(performance.now() - loadStart).toFixed(1)} ms (dropped datasets are released in the background)`,
       );
     }
   }
@@ -1831,7 +1838,9 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
    * Builds ahead, in the background, what the previous and the next puzzle
    * need -- their target outlines, and their datasets' tables and result
    * slabs (desk placement and the join system keep those) -- and lets go of
-   * everything else: the current puzzle and its neighbors stay cached.
+   * everything else: the current puzzle and its neighbors stay cached. Today's
+   * daily's dataset is kept too (Today and the picker go there), so a switch
+   * to it builds nothing.
    */
   private prefetchNeighbors(): void {
     if (!this.puzzle) {
@@ -1843,8 +1852,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
     for (const [id, entry] of this.silhouettes) {
       if (!ids.includes(id) && entry !== this.silhouette) {
         buildQueue.remove(entry.job);
-        disposeUIKitDocument(entry.doc?.document);
-        entry.entity?.dispose();
+        disposeUIKitDocumentLater(`${id} outline`, entry.doc?.document, entry.entity);
         this.silhouettes.delete(id);
       }
     }
@@ -1852,7 +1860,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       const puzzle = getPuzzle(id);
       this.silhouetteFor(puzzle, puzzleTarget(puzzle));
     }
-    const datasets = [...new Set(ids.map((id) => getPuzzle(id).datasetId))];
+    const datasets = [...new Set([...ids, dailyPuzzleId(this.today)].map((id) => getPuzzle(id).datasetId))];
     keepDatasets(datasets);
     if (import.meta.env.DEV && this.debug) {
       this.debug.note(`cache: puzzles ${ids.join(', ')}; datasets ${datasets.join(', ')} (built ahead in the background)`);

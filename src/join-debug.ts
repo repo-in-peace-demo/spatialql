@@ -53,6 +53,8 @@ function describe(state: JoinState): string {
 }
 /** How long a GC sentinel is held before it's dropped (it must survive the minor GCs meanwhile). */
 const GC_SENTINEL_MS = 2000;
+/** Sentinel finalizations closer together than this are one major GC (well under GC_SENTINEL_MS). */
+const GC_BURST_MS = 500;
 /** FinalizationRegistry (ES2021; this project's TypeScript lib predates it), where the browser has it. */
 const Registry = (
   globalThis as { FinalizationRegistry?: new (onFinalize: (held: number) => void) => { register(target: object, held: number): void } }
@@ -66,15 +68,21 @@ export class JoinDebug {
    * Major garbage collections, seen through a sentinel: an object held
    * GC_SENTINEL_MS (long enough to be promoted to the old generation) and
    * then dropped can only be reclaimed by a major GC, whose finalization
-   * callback follows shortly after it. One live sentinel at a time.
+   * callback follows shortly after it. One live sentinel at a time; but a
+   * major GC reclaims every sentinel dropped since the last one (the Quest
+   * collected 54 at once on 2026-10-14), so finalizations within
+   * GC_BURST_MS of each other count as one collection.
    */
   private sentinel: object | null = null;
   private lastMajorGcMs = -Infinity;
   private majorGcs = 0;
   private readonly gcRegistry = Registry
     ? new Registry(() => {
-        this.lastMajorGcMs = performance.now();
-        this.majorGcs++;
+        const now = performance.now();
+        if (now - this.lastMajorGcMs > GC_BURST_MS) {
+          this.majorGcs++;
+        }
+        this.lastMajorGcMs = now;
       })
     : null;
   private readonly sentinelTimer = window.setInterval(() => {

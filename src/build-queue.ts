@@ -7,7 +7,9 @@
  * first step, so queuing costs nothing. The join system runs the queue only
  * once nothing has moved for a moment, for at most BUILD_BUDGET_MS of real
  * time per frame (at least one step), and not at all once it's empty.
- * Jobs run in the order added; `urgent` ones go first.
+ * Jobs run in the order added; `urgent` ones go first, and `last` ones (the
+ * release of dropped documents, uikit-dispose.ts) only once every build is
+ * done, so they never delay what the player needs next.
  */
 
 /** Real time (ms) the queue may use per frame (one step can run over: a step is one cell, or a document's start). */
@@ -25,15 +27,22 @@ class BuildQueue {
   /** Dev: the jobs finished, with how many frames each took (read by the log). */
   readonly finished: { name: string; frames: number; ms: number }[] = [];
   private readonly started = new Map<BuildJob, { frames: number; ms: number }>();
+  /** The `last` jobs (always at the end of `jobs`). */
+  private readonly lastJobs = new Set<BuildJob>();
 
-  add(job: BuildJob, urgent = false): void {
+  add(job: BuildJob, level: 'urgent' | 'normal' | 'last' = 'normal'): void {
     if (this.jobs.includes(job)) {
       return;
     }
-    if (urgent) {
+    if (level === 'urgent') {
       this.jobs.unshift(job);
-    } else {
+    } else if (level === 'last') {
+      this.lastJobs.add(job);
       this.jobs.push(job);
+    } else {
+      // Ahead of the `last` jobs, after the other builds.
+      const firstLast = this.jobs.findIndex((queued) => this.lastJobs.has(queued));
+      this.jobs.splice(firstLast < 0 ? this.jobs.length : firstLast, 0, job);
     }
   }
 
@@ -47,6 +56,7 @@ class BuildQueue {
     if (index >= 0) {
       this.jobs.splice(index, 1);
       this.started.delete(job);
+      this.lastJobs.delete(job);
     }
   }
 
@@ -72,6 +82,7 @@ class BuildQueue {
       if (done) {
         this.jobs.shift();
         this.started.delete(job);
+        this.lastJobs.delete(job);
         if (import.meta.env.DEV) {
           this.finished.push({ name: job.name, frames: stats.frames + 1, ms: stats.ms });
         }

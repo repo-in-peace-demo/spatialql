@@ -53,7 +53,7 @@ import { AnchorSettle } from './anchor-settle.js';
 import { DeskShadows } from './desk-shadow.js';
 import { allowMoves } from './move-guard.js';
 import { decidePlacementMode, DESK_REST_MAX_BELOW_EYES_METERS, planPair, type Footprint, type P3, type PlacementMode, type SlabSize } from './pair-placement.js';
-import { disposeUIKitDocument } from './uikit-dispose.js';
+import { disposeUIKitDocumentLater } from './uikit-dispose.js';
 import { easeInCubic, easeInOutCubic, easeOutCubic } from './tween.js';
 import {
   RECENTER_AFTER_HIDDEN_SECONDS,
@@ -477,10 +477,10 @@ export class DeskPlacementSystem
     if (!entries) {
       return;
     }
+    // Out of the scene now, released over the next frames (uikit-dispose.ts).
     for (const entry of entries) {
       buildQueue.remove(entry.job);
-      disposeUIKitDocument(entry.slab?.doc.document);
-      entry.slab?.entity.dispose();
+      disposeUIKitDocumentLater(`${entry.table.id} table`, entry.slab?.doc.document, entry.slab?.entity);
     }
     this.parked.delete(dataset);
   }
@@ -918,8 +918,7 @@ export class DeskPlacementSystem
           );
         } else {
           for (const slab of this.slabs) {
-            disposeUIKitDocument(slab.doc.document);
-            slab.entity.dispose();
+            disposeUIKitDocumentLater(`${slab.table.id} table`, slab.doc.document, slab.entity);
           }
         }
         this.slabs = [];
@@ -1040,6 +1039,10 @@ export class DeskPlacementSystem
     if (this.sessionActive && !this.headPoseValid) {
       // The player's cue while it waits: "Look straight ahead" at the gaze, its ring filling as the head holds still.
       this.prompt.show(this.player.head, this.settle.progress(performance.now() / 1000));
+      if (import.meta.env.DEV) {
+        // The layout is hidden until the anchor: whatever settles meanwhile is placement (move-guard.ts).
+        allowMoves('placement', performance.now() / 1000, 0.5);
+      }
     }
     if (this.sessionActive && !this.headPoseValid && this.sessionListenersAttached) {
       this.player.head.updateWorldMatrix(true, false);

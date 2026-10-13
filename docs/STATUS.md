@@ -404,6 +404,36 @@ Since phase 4:
   filling as the head holds still; then the layout appears in place, the slabs
   fading in over 0.3 s. No layout at the pre-session pose that then jumps.
   Emulator: the prompt alone right after Start; the tables 0.5 s later.
+- **20.** No pause when a puzzle load drops a dataset (2026-10-14). The
+  headset's 281-392 ms long tasks (2026-10-14 04:00 log) came on Next, three of
+  four within one dataset: not building (that was already sliced and done
+  ahead) but disposing the dataset dropped from the kept set -- its parked
+  tables and result slabs, in one go. Dropped documents now leave the scene at
+  once (hidden, detached) and are disposed in the build queue, 2 ms a frame
+  (`disposeUIKitDocumentLater`, src/uikit-dispose.ts), for dropped datasets,
+  the outgoing tables of a switch and dropped outlines. Today's daily's dataset
+  is kept built too (with the previous and next puzzles'), so Today and the
+  picker's daily switch without building. Emulator, Next while joined (drops
+  shop): the load 44.5 ms before (trimResultViews 31.5, trimParked 8.9), 1.9 ms
+  after; then each result slab released in 9 frames (16 ms in all), each table
+  in 3-4 (4-5 ms); loads after a switch 0.5 ms; the census back to 17 UIKit
+  roots once settled. Dev: each load logs "perf: loaded in N ms"; the GC
+  counter counts one collection per burst of sentinel finalizations (the 128
+  "major GCs" of that log were about 4); the move guard allows the card's
+  re-layout when a puzzle activates (after a switch that's 0.8 s after Next)
+  and anything while the layout is hidden before the anchor.
+  Then (headset, 04:27 log: loads 2.1-14.3 ms, no long tasks after the start)
+  two card moves (5.8 and 2.0 cm) 1-3 s after loads: the group was planned
+  from the pair's result slabs' sizes once built (the outline's until then),
+  so a result slab finishing in the background re-planned it. Now the sizes
+  are computed from the data without building (`tableSlabSizeMeters`,
+  `resultSlabSize`), and dropped documents are released only after every
+  build (the queue's `last` jobs), so they never delay one. Dev warns if a
+  built result's size differs from its plan. Emulator with the build budget
+  cut to 0.15 ms (Quest-like: result slabs done 1.1-2.3 s after loads), the
+  same run of Next presses through four datasets: the old planning moved the
+  card twice (4.7 and 2.7 cm, each just after a result slab finished); the new
+  none, and no size mismatch in any dataset.
 
 **Not started** (submission):
 
@@ -422,17 +452,30 @@ Since phase 4:
 - **17.** Answered (2026-10-11): with the panel off, frame times matched the
   earlier panel-on sessions; the panel's cost is small. Being joined (1-2.5 ms a
   frame) and puzzle loads (now under 50 ms) were the real costs.
-- **72 Hz with the leak fixed, then 80 Hz again:** a 5+ minute session through
-  all four datasets: work should stay near its first-minute level; check long
-  tasks for "major GC". If it holds with room, retry 80 Hz.
+- **72 Hz with the leak fixed:** verified on the headset (2026-10-14 04:00 log,
+  4 min 46 s, all four datasets, dev with `?debug=1`): 72 Hz set; no growth --
+  UIKit roots 12-13 with one dataset kept, 17 with two, 21 with three, the same
+  each time; geometries level at 93-107, textures 10; about 4 major GCs, none
+  causing a stall. The long tasks were the dataset disposals (fixed in 20).
+- **Puzzle loads under 50 ms on a Quest (after 20):** verified (2026-10-14 04:27
+  log): 2.1-14.3 ms, no long task after any load.
+- **No card moves after puzzle loads (after 20's second part):** verified on the
+  headset (2026-10-14 04:41 log): Next and Prev through all four datasets, 5
+  switches, 22 loads in 2.0-13.4 ms; no "moved without an allowed reason", no
+  "the group re-plans now"; one major GC in the minute (54 ms).
+- **80 Hz again:** if 72 Hz holds with room, retry 80 Hz.
 - **80 Hz holds (superseded by the line above):** a 3+ minute session with joins; the joined windows' frame gap
   p95 should stay near 12.5 ms (`scripts/headset_log.py frames`). If not, consider
   an automatic one-way fallback to 72 Hz after sustained misses.
 - **Reload the headset tab first** (the log's first lines name the page's code; a STALE PAGE warning means reload).
-- **The 0.6 m home on a Quest:** comfortable reading and reach across Prev, Next and dataset switches, joined and not.
-- **Entering XR at the desk:** the tables should float in front of you (about 0.6 m), facing you, with soft shadows on the desk; the log's "tracking settled" and "live head" lines should agree with the anchor.
-- **Head movement moves nothing:** lean, turn and sit back while opening Filter,
-  the picker and switching puzzles; nothing should move until Recenter.
+- **The session clock:** verified on the headset, production (2026-10-14): the time above the card, and "Solved in 1:07" on a win.
+- **The 0.6 m home on a Quest:** comfortable reading and reach across Prev, Next and dataset switches, joined and not. Measured on the headset (2026-10-14 04:00 log, all four datasets): slabs 0.57-0.60 m from the eyes, rows 1.15-1.21°, column buttons 0.50 m (0.49-0.54 m from the left shoulder), reach paths at least 10.3 cm, the group within ±42.2°, the lowest edge -35°, the card 0.85 m. Comfort: the user's call.
+- **Entering XR at the desk:** verified on the headset, production (2026-10-14): the tables appear close and facing you. Still to see: the soft shadows on the desk (none visible in the 2026-10-14 photos; check with `?debug=1` whether a desk was detected).
+- **Prev, Next and a dataset switch move nothing:** verified on the headset, production (2026-10-14).
+- **Head movement moves nothing:** verified on the headset (2026-10-14 04:00
+  log): the head ended 7-8 cm and up to 5.5° from the anchor and nothing
+  followed it; the move guard's two card warnings were its own gaps (before the
+  anchor, and a card re-layout 0.4 s after a switch), fixed in 20.
 - **Recenter facing the button:** recenter while facing about where the Recenter
   button is (the case that cancelled on 2026-10-11); it should complete there.
 - **Picker by hand:** tiles, Back and Puzzles by pinch and poke; a locked tile;
