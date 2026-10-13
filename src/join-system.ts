@@ -915,6 +915,8 @@ export class JoinSystem
   private recenterHovered = false;
   // The hold buttons: Exit, Show answer (see updateHolds).
   private exitHovered = false;
+  /** Whether the hold button's label is shown (challenge mode's Show answer: hovered or held). */
+  private holdButtonHovered = false;
   /** How long the hold button `holdName` has been held (seconds; 0 when not). */
   private holdHeld = 0;
   private holdName = '';
@@ -1493,10 +1495,21 @@ export class JoinSystem
         this.challengeLayout?.bar.onExitHover?.(exit);
       }
     }
+    // Challenge mode's hold button (Show answer before the answer): "Hold to show the answer", hovered or held.
+    const holdButton = this.challengeLayout?.bar.holdButton?.name ?? '';
+    const held = holdButton !== '' && ((this.holdHeld > 0 && this.holdName === holdButton) || this.iconHovered(holdButton));
+    if (held !== this.holdButtonHovered) {
+      this.holdButtonHovered = held;
+      this.challengeLayout?.bar.onHoldHover?.(held);
+    }
+  }
+
+  holdingButton(): string {
+    return this.holdHeld > 0 ? this.holdName : '';
   }
 
   /** Whether a fingertip is just in front of the bar's `name` button, or a hand pointer is on it. */
-  private iconHovered(name: 'recenter' | 'exit'): boolean {
+  private iconHovered(name: string): boolean {
     const bar = this.challengeLayout?.bar ?? this.freeBarPlaced;
     if (!bar || !bar.object.visible) {
       return false;

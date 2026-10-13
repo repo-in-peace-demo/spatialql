@@ -55,6 +55,8 @@ export type PlacedBar = PlacedElement & {
   onArcLean?: (leanRad: number) => void;
   /** Shows or hides its Exit button's "Hold to exit" label (hovered or held). */
   onExitHover?: (hovered: boolean) => void;
+  /** Shows or hides `holdButton`'s hover label (hovered or held); false once there's no hold button. */
+  onHoldHover?: (hovered: boolean) => void;
   /** The hand pointer is on `buttons[index]` (-1: none); `previous` was hovered before. Outlines it. */
   onPointerHover?: (index: number, previous: number) => void;
 };
@@ -134,6 +136,8 @@ export interface JoinControls {
   isGliding(): boolean;
   /** Whether `hand` is holding a source slab (its pokes and pinches on the side column are ignored). */
   handHoldsSlab(hand: 'left' | 'right'): boolean;
+  /** The bar button being held toward its hold right now ('' if none): a press that isn't a hold shows it. */
+  holdingButton(): string;
 }
 
 export const joinBridge: { join: JoinControls | null; challenge: ChallengeHooks | null } = {

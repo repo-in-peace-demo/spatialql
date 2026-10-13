@@ -434,6 +434,17 @@ Since phase 4:
   same run of Next presses through four datasets: the old planning moved the
   card twice (4.7 and 2.7 cm, each just after a result slab finished); the new
   none, and no size mismatch in any dataset.
+- **21.** Show answer's hold made discoverable (2026-10-14; a tester's quick
+  presses on the Vercel link seemed to do nothing). A "Hold to show the
+  answer" label below the column while Show answer is hovered (fingertip or
+  hand pointer) or held, like Recenter's and Exit's; every quick press now
+  says to hold it -- a hold let go early, or a press that never became one
+  (no hold under way 0.2 s after it: the point-and-pinch case that was
+  silent) -- with "Hold Show answer to see it." on the card and a soft tick
+  at the column, at most once a second. The ring (shared with Exit) was
+  already there. Emulator, controller ray: a 0.1 s click gave one reminder
+  and the tick (the click event that followed it, none); a hold showed the
+  label, completed at 0.8 s with no reminder, and showed the answer.
 
 **Not started** (submission):
 
@@ -459,6 +470,10 @@ Since phase 4:
   causing a stall. The long tasks were the dataset disposals (fixed in 20).
 - **Puzzle loads under 50 ms on a Quest (after 20):** verified (2026-10-14 04:27
   log): 2.1-14.3 ms, no long task after any load.
+- **Show answer's hold on a Quest (21):** quick poke, pinch and point-and-pinch
+  each show "Hold Show answer to see it." -- verified on the headset
+  (2026-10-14). Still to see: the "Hold to show the answer" label on hover, the
+  tick, and the ring filling on a hold.
 - **No card moves after puzzle loads (after 20's second part):** verified on the
   headset (2026-10-14 04:41 log): Next and Prev through all four datasets, 5
   switches, 22 loads in 2.0-13.4 ms; no "moved without an allowed reason", no

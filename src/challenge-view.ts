@@ -447,6 +447,8 @@ export type PuzzleBarView = ArcBand & {
   recenter: RecenterButtonView;
   /** Exit: an icon button; held for a moment, it ends the session ("Hold to exit" on hover). */
   exit: RecenterButtonView;
+  /** "Hold to show the answer": while Show answer acts only when held, shown on hover and while held. */
+  answerLabel: HoverLabelView;
   /** Opacity of the Next button (pulses once the puzzle is won). */
   nextOpacity: Signal<number>;
   /**
@@ -602,6 +604,8 @@ export function buildPuzzleBar(
     next: readonly string[];
     recenter: string;
     exit: string;
+    /** Show answer's hover label while it acts only when held. */
+    answerHold: string;
     clear: string;
     filter: string;
     filterBack: string;
@@ -712,6 +716,7 @@ export function buildPuzzleBar(
   const recenter = recenterButton(root, root, labelFontCm, buttonHeight, labels.recenter, fade, LocateFixed, half);
   // Exit: held for a moment, it ends the session.
   const exit = recenterButton(root, root, labelFontCm, buttonHeight, labels.exit, fade, LogOut, half);
+  const answerLabel = hoverLabel(root, labels.answerHold, labelFontCm, fade);
 
   const bar: PuzzleBarView = {
     curved: [],
@@ -739,6 +744,7 @@ export function buildPuzzleBar(
     extendLeftMeters: 0,
     recenter,
     exit,
+    answerLabel,
     nextOpacity,
     widthMeters: width / 100,
     heightMeters: 0,
@@ -970,8 +976,8 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
   });
   targets.sort((p, q) => q.centerY - p.centerY || p.centerX - q.centerX);
   bar.buttons.push(...targets);
-  // Recenter's and Exit's hover labels: just below the column, centered under it, on the arc too.
-  placeIconLabels(bar, bar.recenter, bar.exit, width, heightCm, shift);
+  // The hover labels: just below the column, centered under it, on the arc too.
+  placeIconLabels(bar, [bar.recenter, bar.exit, bar.answerLabel], width, heightCm, shift);
 }
 
 /** A tile's resting border: today's daily keeps its accent outline (hover replaces it while hovered). */
@@ -991,16 +997,9 @@ function applyTileLook(tile: PuzzleBarView['pickerTiles'][number], data: PickerT
   tile.today.setProperties({ display: data.today ? 'flex' : 'none' });
 }
 
-/** Recenter's and Exit's hover labels: centered just below the column (toward the slabs, never over the result). */
-function placeIconLabels(
-  band: ArcBand,
-  recenter: RecenterButtonView,
-  exit: RecenterButtonView,
-  widthCm: number,
-  heightCm: number,
-  shiftCm = 0,
-): void {
-  for (const view of [recenter, exit]) {
+/** The hover labels (Recenter's, Exit's, Show answer's): centered just below the column (toward the slabs, never over the result). */
+function placeIconLabels(band: ArcBand, views: readonly HoverLabelView[], widthCm: number, heightCm: number, shiftCm = 0): void {
+  for (const view of views) {
     const y = -heightCm / 2 - COLUMN_GAP_CM - view.labelHeightCm / 2;
     placeFlat(view.label, shiftCm + widthCm / 2, y, view.labelWidthCm, view.labelHeightCm, heightCm);
     curveOntoArc(band, view.label, shiftCm + widthCm / 2, y);
@@ -1010,11 +1009,15 @@ function placeIconLabels(
 // --- Recenter (the bar's icon button, and free play's one-button bar) ---------------
 
 /** The Recenter icon button and its hover label (absolute, above the button; never a target). */
-export type RecenterButtonView = {
-  container: Container;
+/** A hover label: a dark pill just below the column, shown while its button is hovered (or held). */
+export type HoverLabelView = {
   label: Container;
   labelWidthCm: number;
   labelHeightCm: number;
+};
+
+export type RecenterButtonView = HoverLabelView & {
+  container: Container;
 };
 
 const COLOR_RECENTER_LABEL = '#4a4538';
@@ -1056,7 +1059,11 @@ function recenterButton(
   const iconSize = labelFontCm * 1.3;
   container.add(new Icon({ width: iconSize, height: iconSize, color: style.color }));
   parent.add(container);
+  return { container, ...hoverLabel(root, label, labelFontCm, fade) };
+}
 
+/** A hover label for `text`, as an absolute layer of `root` (hidden; placed by `placeIconLabels`). */
+function hoverLabel(root: Container, label: string, labelFontCm: number, fade: Signal<number>): HoverLabelView {
   const labelWidthCm = measureHeaderTextCm(label, labelFontCm) + 2 * labelFontCm * BAR_BUTTON_PADDING_EM;
   const labelHeightCm = labelFontCm * LINE_HEIGHT_FACTOR + labelFontCm * 0.3;
   const tag = new UIKit.Container({
@@ -1087,11 +1094,11 @@ function recenterButton(
     }),
   );
   root.add(tag);
-  return { container, label: tag, labelWidthCm, labelHeightCm };
+  return { label: tag, labelWidthCm, labelHeightCm };
 }
 
-/** Shows or hides the Recenter label (a fingertip or a hand's ray over the button). */
-export function setRecenterHover(view: RecenterButtonView, hovered: boolean): void {
+/** Shows or hides a hover label (Recenter's, Exit's, Show answer's: a fingertip or a hand's ray over the button, or held). */
+export function setRecenterHover(view: HoverLabelView, hovered: boolean): void {
   view.label.setProperties({ display: hovered ? 'flex' : 'none' });
 }
 
@@ -1146,7 +1153,7 @@ export function buildRecenterBar(
   placeFlat(exit.container, exitCenter, rowY, half, buttonHeight, heightCm);
   curveOntoArc(band, recenter.container, recenterCenter, rowY);
   curveOntoArc(band, exit.container, exitCenter, rowY);
-  placeIconLabels(band, recenter, exit, widthCm, heightCm);
+  placeIconLabels(band, [recenter, exit], widthCm, heightCm);
   return {
     ...band,
     document: new UIKitDocument(root),

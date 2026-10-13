@@ -161,6 +161,10 @@ const INDEX_TIP: readonly XRHandJoint[] = ['index-finger-tip'];
 const BAR_PRESS_DEBOUNCE_SECONDS = 0.3;
 /** How long "Solve it first, or use Hint." shows after pressing an inactive Next. */
 const STATUS_FLASH_SECONDS = 2.5;
+/** A Show answer press is a hold if one is under way this long after it (else it's told to hold). */
+const ANSWER_PRESS_CHECK_SECONDS = 0.2;
+/** At most one "hold Show answer" reminder this often (a press, then its cancelled hold). */
+const ANSWER_REMIND_GAP_SECONDS = 1;
 /** The bar's WHERE label pulse (a press on a NULL in the column already filtered). */
 const WHERE_PULSE_SECONDS = 0.45;
 /** How long "Poke a NULL in the result above, or use Filter." shows in the message area. */
@@ -241,6 +245,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
   private revealFrames = 0;
   /** When a brief status line ("Solve it first") gives way again (clock seconds; 0 = none). */
   private statusFlashUntil = 0;
+  /** When Show answer was last pressed (-1: checked), to tell a press from a hold (update). */
+  private answerPressAt = -1;
+  /** When the card last said to hold Show answer (remindAnswerHold). */
+  private lastAnswerRemind = -Infinity;
   /** The card's intro lines under the message (the daily's intros, or "Make these moves..."), as last set. */
   private introLines: readonly string[] = [];
   /** A brief message ("Poke a NULL in the result above...") showing until then (clock seconds; 0 = none)... */
@@ -323,6 +331,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       next: NEXT_LABELS,
       recenter: BAR.recenter,
       exit: BAR.exit,
+      answerHold: BAR.answerHold,
       clear: BAR.clearFilter,
       filter: BAR.filter,
       filterBack: BAR.filterBack,
@@ -403,6 +412,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
         holdButton: null,
         onRecenterHover: (hovered) => setRecenterHover(this.bar.recenter, hovered),
         onExitHover: (hovered) => setRecenterHover(this.bar.exit, hovered),
+        onHoldHover: (hovered) => setRecenterHover(this.bar.answerLabel, hovered),
         onArcLean: (leanRad) => setArcLean(this.bar, leanRad),
         onPointerHover: (index) => {
           this.pointerHover = index;
@@ -509,6 +519,13 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       this.save();
       if (import.meta.env.DEV && this.debug) {
         this.debug.note('streak explained on the card (shown once)');
+      }
+    }
+    // A quick press on Show answer that didn't become a hold: say to hold it (remindAnswerHold).
+    if (this.answerPressAt >= 0 && this.clock - this.answerPressAt >= ANSWER_PRESS_CHECK_SECONDS) {
+      this.answerPressAt = -1;
+      if (this.nextHintRevealsAnswer() && join.holdingButton() !== 'hint') {
+        this.remindAnswerHold('a press, not a hold');
       }
     }
     if (this.awaitingRecenter && deskBridge.desk?.recenterGliding) {
@@ -843,9 +860,31 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
 
   onHoldCancelled(name: string): void {
     // Let go before its time: nothing happened, and the card says why.
-    if (name === 'hint' && this.nextHintRevealsAnswer() && !this.pending) {
-      this.setStatus(CARD.holdForAnswer);
-      this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
+    if (name === 'hint' && this.nextHintRevealsAnswer()) {
+      this.answerPressAt = -1;
+      this.remindAnswerHold('let go before 0.8 s');
+    }
+  }
+
+  /**
+   * Show answer pressed but not held (a tap, a quick pinch, a ray click) or
+   * let go early: the card says "Hold Show answer to see it." and a soft
+   * tick plays at the column, so a press always shows it was felt (a
+   * 2026-10-13 tester's quick presses seemed to do nothing). Once per
+   * ANSWER_REMIND_GAP_SECONDS (a press and its cancelled hold are one).
+   */
+  private remindAnswerHold(why: string): void {
+    if (this.pending || this.clock - this.lastAnswerRemind < ANSWER_REMIND_GAP_SECONDS) {
+      return;
+    }
+    this.lastAnswerRemind = this.clock;
+    this.setStatus(CARD.holdForAnswer);
+    this.statusFlashUntil = this.clock + STATUS_FLASH_SECONDS;
+    this.bar.document.updateWorldMatrix(true, false);
+    this._point.setFromMatrixPosition(this.bar.document.matrixWorld);
+    sounds.playLineTick(this._point, 0, 1);
+    if (import.meta.env.DEV && this.debug) {
+      this.debug.note(`Show answer: ${why}; "${CARD.holdForAnswer}" and a soft tick`);
     }
   }
 
@@ -1597,9 +1636,11 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       }
       return;
     }
-    // Hint: spaced presses; Show answer (before the answer) only acts when held, so a press does nothing.
+    // Hint: spaced presses; Show answer (before the answer) only acts when held: a press alone
+    // shows nothing, but one that doesn't become a hold is told to hold (see update).
     if (button === 'hint') {
       if (this.nextHintRevealsAnswer()) {
+        this.answerPressAt = this.clock;
         return;
       }
       if (this.hintGate.press(this.clock) === 'ignored') {

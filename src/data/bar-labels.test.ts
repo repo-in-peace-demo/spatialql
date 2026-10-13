@@ -56,6 +56,12 @@ describe('puzzle bar labels', () => {
     expect(BAR.exit).toMatch(/^[\x20-\x7e]+$/);
   });
 
+  it('the Show answer hover label ("Hold to show the answer") is one short line, plain ASCII', () => {
+    const label = measureTextCm(BAR.answerHold, HEADER_METRICS, LABEL_FONT_CM) + 2 * BAR_BUTTON_PADDING_EM * LABEL_FONT_CM;
+    expect(label).toBeLessThanOrEqual(11 + 4);
+    expect(BAR.answerHold).toMatch(/^[\x20-\x7e]+$/);
+  });
+
   it('Prev is a full touch target (at least the minimum, like every bar button)', () => {
     expect(barButtonWidthCm([BAR.prev], LABEL_FONT_CM)).toBeGreaterThanOrEqual(CONTROL_OPTION_MIN_WIDTH_CM);
   });

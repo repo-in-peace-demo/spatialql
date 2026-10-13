@@ -363,6 +363,8 @@ export const BAR = {
    * nothing; held for a moment (a ring fills), it ends the session.
    */
   exit: 'Hold to exit',
+  /** Show answer's hover label (above the column, like Exit's) while it acts only when held. */
+  answerHold: 'Hold to show the answer',
   daily: 'Today',
   /** The filter chip's own button, after its WHERE clause. */
   clearFilter: 'Clear',
