@@ -34,8 +34,8 @@ All taken on a Meta Quest 3 in passthrough, at a real desk.
 3. Reach out and **pinch** a table, bring it to the other, and **let go**. The tables snap together and the join plays out.
 4. Choose **INNER** or **LEFT** on the switch in the column on the left. Pull a table away to undo the join.
 5. When the result has NULLs, press **Filter** and pick a chip (e.g. `O.ID is NULL`), or poke a NULL cell in the result.
-6. Stuck? **Hint** gives a hint, then **Another hint**, then **Show answer** (hold it).
-7. **Prev**, **Next** and **Puzzles** move between puzzles. **Recenter** brings everything back in front of you and **Exit** ends the session; both act only when held.
+6. Stuck? **Hint** gives a hint, then **Another hint**, then **Show answer**: hold it until its ring fills (a quick press says to hold it). A puzzle finished after Show answer, or skipped, is marked "Answer shown"; solving it later without the answer turns it into a solve.
+7. **Prev**, **Next** and **Puzzles** move between puzzles. The **Puzzles** grid (and **Choose puzzle** on the welcome page) marks each puzzle, with a legend under the grid: the current one (filled, with a dot), today's daily (outlined, "Today"), solved (a check), answer shown (an eye) and locked (a lock). On the welcome page, tap a picked puzzle again to clear the pick. **Recenter** brings everything back in front of you and **Exit** ends the session; both act only when held.
 
 Start with three short practice puzzles; after that a **daily puzzle** appears each day. Solving it builds your **streak**, which the welcome page shows on a month calendar. There are **20 puzzles** across four fictional datasets: Corner shop, Library, School clubs and Cafe.
 

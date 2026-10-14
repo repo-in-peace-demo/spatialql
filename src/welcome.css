@@ -510,6 +510,72 @@
   cursor: default;
 }
 
+/* The picked tile's dot (light on its fill), before its mark. */
+.wl-dot {
+  display: inline-block;
+  width: calc(7 * var(--u));
+  height: calc(7 * var(--u));
+  border-radius: 50%;
+  background: #fff;
+}
+
+.wl-tile .wl-dot {
+  margin-right: calc(4 * var(--u));
+}
+
+/* The picker's legend: two lines under the grid, each mark as the tiles show it. */
+.wl-legend {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(4 * var(--u));
+  margin-top: calc(12 * var(--u));
+  font-size: calc(14 * var(--u));
+  color: var(--wl-muted);
+}
+
+.wl-legend-line {
+  display: flex;
+  gap: calc(16 * var(--u));
+}
+
+.wl-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--u));
+  white-space: nowrap;
+}
+
+.wl-swatch {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(16 * var(--u));
+  height: calc(16 * var(--u));
+  border-radius: calc(4 * var(--u));
+}
+
+.wl-swatch-selected {
+  background: var(--wl-accent);
+}
+
+.wl-swatch-selected .wl-dot {
+  width: calc(6 * var(--u));
+  height: calc(6 * var(--u));
+}
+
+.wl-swatch-today {
+  background: #fff;
+  border: calc(3 * var(--u)) solid var(--wl-legend-today, var(--wl-muted));
+}
+
+.wl-legend .wl-icon {
+  width: calc(16 * var(--u));
+  height: calc(16 * var(--u));
+  color: var(--wl-muted);
+}
+
 /* The browser-support notices (xr-support.ts). The note sits along the top: the page below makes room for it. */
 body:has(.wl-note) .wl-root {
   padding-top: calc(80 * var(--u));

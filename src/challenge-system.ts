@@ -52,6 +52,7 @@ import {
   setNextLabel,
   setNextWaiting,
   setPrevAvailable,
+  setPickerLegendAccent,
   setRecenterHover,
 } from './challenge-view.js';
 import { compareToTarget, fanOutGroups, type Comparison } from './data/compare.js';
@@ -337,6 +338,7 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       filterBack: BAR.filterBack,
       puzzles: BAR.puzzles,
       pickerBack: BAR.pickerBack,
+      legend: BAR.pickerLegend,
       today: BAR.pickerToday,
     }, joinTypeControlSizeCm(labelFontCm));
     this.barEntity = this.world.createTransformEntity(this.bar.document);
@@ -1559,6 +1561,10 @@ export class ChallengeSystem extends createSystem({}) implements ChallengeHooks,
       return;
     }
     this.barKey = key;
+    if (picker) {
+      // The legend's "Today's daily" mark in today's daily's accent, as its tile.
+      setPickerLegendAccent(this.bar, DATASETS[getPuzzle(dailyPuzzleId(this.today)).datasetId].theme.accent);
+    }
     // The bar resizes to its buttons; re-place it so it stays clear of the control.
     setBarContents(this.bar, { where, filter: this.filterChoices.length > 0, chips, chipsMore, picker });
     // Its outlines were reset: the hover is drawn again for the new buttons.

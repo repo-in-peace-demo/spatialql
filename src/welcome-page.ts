@@ -58,6 +58,8 @@ function show(element: HTMLElement, shown: boolean): void {
 export type WelcomeActions = {
   start(): void;
   pick(id: PuzzleId): void;
+  /** The picked tile tapped again: no pick (Start opens what it would have). */
+  unpick(): void;
   reset(): void;
   /** Dormant free play (dev only): back to the puzzles. */
   puzzles(): void;
@@ -86,6 +88,8 @@ export class WelcomePage {
   private readonly practice = el('p', 'wl-practice');
   private readonly save = el('p', 'wl-save');
   private readonly picker = el('div', 'wl-picker');
+  /** Under the picker: each tile mark and what it means (as the in-XR picker's legend). */
+  private readonly legend = el('div', 'wl-legend');
   private readonly tiles: TileView[] = [];
   private readonly more = el('nav', 'wl-more');
   private readonly chooseButton = button('', WELCOME.choosePuzzle);
@@ -187,7 +191,9 @@ export class WelcomePage {
     this.picker.setAttribute('role', 'group');
     this.picker.setAttribute('aria-label', WELCOME.pickerLabel);
     show(this.picker, false);
-    this.side.append(this.progress, this.picker);
+    this.buildLegend();
+    show(this.legend, false);
+    this.side.append(this.progress, this.picker, this.legend);
   }
 
   private buildMore(): void {
@@ -281,7 +287,12 @@ export class WelcomePage {
       view.button.setAttribute('aria-label', WELCOME.tileLabel(data.number, data.status, data.today));
       view.number.textContent = String(data.number);
       view.marks.replaceChildren();
+      // The picked tile: a dot before its mark (its fill says it too; beside "Today" there's no room).
+      if (isPicked && !data.today) {
+        view.marks.append(el('span', 'wl-dot'));
+      }
       if (data.today) {
+        this.legend.style.setProperty('--wl-legend-today', accent);
         view.marks.textContent = WELCOME.pickerToday;
       } else if (data.status === 'solved') {
         view.marks.append(icon('check'));
@@ -295,6 +306,35 @@ export class WelcomePage {
     this.startLabel.textContent = number > 0 ? WELCOME.startPuzzle(number) : WELCOME.start;
   }
 
+  /** The legend's two lines: each mark as the tiles show it, then its words (copy.ts). */
+  private buildLegend(): void {
+    const marks: (() => Element)[] = [
+      () => {
+        const swatch = el('span', 'wl-swatch wl-swatch-selected');
+        swatch.append(el('span', 'wl-dot'));
+        return swatch;
+      },
+      () => el('span', 'wl-swatch wl-swatch-today'),
+      () => icon('check'),
+      () => icon('eye'),
+      () => icon('lock'),
+    ];
+    let next = 0;
+    for (const words of WELCOME.pickerLegend) {
+      const line = el('div', 'wl-legend-line');
+      for (const text of words) {
+        const item = el('span', 'wl-legend-item');
+        const mark = marks[next++];
+        if (mark) {
+          item.append(mark());
+        }
+        item.append(el('span', '', text));
+        line.append(item);
+      }
+      this.legend.append(line);
+    }
+  }
+
   private addTile(): TileView {
     const tile = button('wl-tile', '');
     const number = el('span', '');
@@ -302,7 +342,13 @@ export class WelcomePage {
     tile.append(number, marks);
     const view: TileView = { button: tile, number, marks, data: null };
     tile.addEventListener('click', () => {
-      if (view.data?.selectable) {
+      if (!view.data?.selectable) {
+        return;
+      }
+      // The picked tile again clears the pick (a toggle, as aria-pressed says).
+      if (view.button.getAttribute('aria-pressed') === 'true') {
+        this.actions.unpick();
+      } else {
         this.actions.pick(view.data.id);
       }
     });
@@ -315,6 +361,7 @@ export class WelcomePage {
   setPickerOpen(open: boolean): void {
     this.pickerOpen = open;
     show(this.picker, open);
+    show(this.legend, open);
     show(this.progress, !open);
     this.updateButtons();
     (open ? this.backButton : this.chooseButton).focus({ preventScroll: true });
@@ -332,6 +379,7 @@ export class WelcomePage {
     this.pickerOpen = false;
     this.confirmOpen = false;
     show(this.picker, false);
+    show(this.legend, false);
     show(this.progress, true);
     this.updateButtons();
   }

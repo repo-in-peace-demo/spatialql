@@ -10,6 +10,7 @@ import {
   PICKER_TILE_WIDTH_CM,
   PICKER_WIDTH_CM,
   pickerColumnHeightCm,
+  pickerLegendLineWidthCm,
 } from '../challenge-view.js';
 import {
   BAR_BUTTON_PADDING_EM,
@@ -29,7 +30,7 @@ import { BAND_ARC_RADIUS_METERS } from '../band-arc.js';
 import { VIEW_MAX_ABOVE_GAZE_DEG } from '../view-comfort.js';
 import { PLANNED_CONTROL_DISTANCE_METERS, slabTextSizeAt } from '../text-angles.js';
 import { joinTypeControlSizeCm } from '../table-slab-view.js';
-import { BAR } from './copy.js';
+import { BAR, WELCOME } from './copy.js';
 import { columnHeaderText } from './join-result.js';
 import { getPuzzle, PUZZLES, runPuzzleQuery } from './puzzles.js';
 import { puzzleText } from './puzzle-text.js';
@@ -240,7 +241,7 @@ describe('the Filter chips', () => {
     });
 
     it('open, the column is at most 31 cm tall (its tallest with five filter rows is about the same)', () => {
-      expect(pickerColumnHeightCm(buttonHeight, lead.heightCm)).toBeLessThanOrEqual(31);
+      expect(pickerColumnHeightCm(buttonHeight, lead.heightCm, LABEL_FONT_CM)).toBeLessThanOrEqual(31);
       expect(PICKER_TILE_GAP_CM).toBeGreaterThan(0);
     });
   });
@@ -262,3 +263,31 @@ describe('takeaways name columns through placeholders', () => {
   });
 });
 
+
+describe('the puzzle pickers\' legend', () => {
+  it('in XR: two lines, each within the grid\'s width, in plain ASCII', () => {
+    expect(BAR.pickerLegend).toHaveLength(2);
+    for (const line of BAR.pickerLegend) {
+      expect(pickerLegendLineWidthCm(line, LABEL_FONT_CM), line.join(' | ')).toBeLessThanOrEqual(PICKER_WIDTH_CM);
+      for (const words of line) {
+        expect(words).toMatch(/^[\x20-\x7e]+$/);
+      }
+    }
+  });
+
+  it('on the welcome screen: the same marks, each line within its grid (welcome.css: 5 tiles of 64 and 4 gaps of 10)', () => {
+    // welcome.css, in its units: text 14, a mark 16 and 6 to its words, 16 between items.
+    const grid = 5 * 64 + 4 * 10;
+    for (const line of WELCOME.pickerLegend) {
+      const width = line.reduce((sum, words) => sum + 16 + 6 + measureTextCm(words, DATA_METRICS, 14), 0) + 16 * (line.length - 1);
+      expect(width, line.join(' | ')).toBeLessThanOrEqual(grid);
+      for (const words of line) {
+        expect(words).toMatch(/^[\x20-\x7e]+$/);
+      }
+    }
+    // The marks after the first mean the same in both pickers.
+    expect(WELCOME.pickerLegend.map((line) => line.slice(line === WELCOME.pickerLegend[0] ? 1 : 0))).toEqual(
+      BAR.pickerLegend.map((line) => line.slice(line === BAR.pickerLegend[0] ? 1 : 0)),
+    );
+  });
+});

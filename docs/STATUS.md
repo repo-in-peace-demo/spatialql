@@ -445,6 +445,25 @@ Since phase 4:
   already there. Emulator, controller ray: a 0.1 s click gave one reminder
   and the tick (the click event that followed it, none); a hold showed the
   label, completed at 0.8 s with no reminder, and showed the answer.
+- **22.** The puzzle pickers' tile states explained (2026-10-14; a black 8
+  and a plain 9 on the live app read as unexplained). The states: the puzzle
+  on the desk (in XR) or picked for Start (welcome): filled, now with a dot
+  before its mark; today's daily: an accent outline and "Today" in place of a
+  mark; solved: a check; done with the answer: an eye; locked: a lock, dimmed;
+  unlocked, not solved: plain. A two-line legend under each grid, with the
+  same marks: "Current | Daily | Solved" / "Answer shown | Locked" in XR,
+  "Selected" in place of "Current" on the welcome screen (copy.ts,
+  `pickerLegend`; one line didn't fit: 23 cm at the tiles' "Today" size
+  against the XR grid's 12.9). Tested: each XR line within the grid (11.1 and
+  10.3 cm at 0.68 cm text), each welcome line within its 360-unit grid, and
+  the open column still at most 31 cm tall. Emulator: both pickers, the
+  current and picked tiles' dots, the daily's outline in its accent. The XR
+  legend spans the grid's width (as Back), its lines centered. On the welcome
+  screen, the picked tile tapped again clears the pick: Start reads "Start"
+  again and the puzzle behind the page goes back to what Start opens with no
+  pick (today's daily if not done, else the resume point); emulator: 3
+  picked, tapped again, the daily (6) loaded, Start plain. Both verified on
+  the headset (2026-10-14).
 
 **Not started** (submission):
 
@@ -470,15 +489,15 @@ Since phase 4:
   causing a stall. The long tasks were the dataset disposals (fixed in 20).
 - **Puzzle loads under 50 ms on a Quest (after 20):** verified (2026-10-14 04:27
   log): 2.1-14.3 ms, no long task after any load.
-- **Show answer's hold on a Quest (21):** quick poke, pinch and point-and-pinch
-  each show "Hold Show answer to see it." -- verified on the headset
-  (2026-10-14). Still to see: the "Hold to show the answer" label on hover, the
-  tick, and the ring filling on a hold.
+- **Show answer's hold on a Quest (21):** verified on the headset, production
+  (2026-10-14): quick poke, pinch and point-and-pinch each show "Hold Show
+  answer to see it." with the tick; the "Hold to show the answer" label on
+  hover; a hold fills the ring and shows the answer.
 - **No card moves after puzzle loads (after 20's second part):** verified on the
   headset (2026-10-14 04:41 log): Next and Prev through all four datasets, 5
   switches, 22 loads in 2.0-13.4 ms; no "moved without an allowed reason", no
   "the group re-plans now"; one major GC in the minute (54 ms).
-- **80 Hz again:** if 72 Hz holds with room, retry 80 Hz.
+- **80 Hz again:** skipped (2026-10-14): production stays at 72 Hz.
 - **80 Hz holds (superseded by the line above):** a 3+ minute session with joins; the joined windows' frame gap
   p95 should stay near 12.5 ms (`scripts/headset_log.py frames`). If not, consider
   an automatic one-way fallback to 72 Hz after sustained misses.
@@ -491,10 +510,12 @@ Since phase 4:
   log): the head ended 7-8 cm and up to 5.5° from the anchor and nothing
   followed it; the move guard's two card warnings were its own gaps (before the
   anchor, and a card re-layout 0.4 s after a switch), fixed in 20.
-- **Recenter facing the button:** recenter while facing about where the Recenter
-  button is (the case that cancelled on 2026-10-11); it should complete there.
+- **Recenter facing the button:** verified on the headset (2026-10-14): it
+  completes while facing about where the Recenter button is (the case that
+  cancelled on 2026-10-11).
 - **Picker by hand:** tiles, Back and Puzzles by pinch and poke; a locked tile;
-  a tile that switches datasets.
+  a tile that switches datasets. The legend (22) verified on the headset
+  (2026-10-14): it lines up with the grid and reads; the welcome pick clears.
 
 **Deferred:** 11 (the left-handed setting) and 12 (persistent anchors).
 

@@ -48,6 +48,7 @@ import {
   CONTROL_OPTION_MIN_WIDTH_CM,
   controlOptionStyle,
   FONT_FAMILIES,
+  measureDataTextCm,
   measureHeaderTextCm,
   setTargetHover,
 } from './table-slab-view.js';
@@ -371,6 +372,93 @@ export const PICKER_TILE_GAP_CM = 0.3;
 export const PICKER_WIDTH_CM = PICKER_COLUMNS * PICKER_TILE_WIDTH_CM + (PICKER_COLUMNS - 1) * PICKER_TILE_GAP_CM;
 const PICKER_TODAY_BORDER_CM = 0.2;
 const PICKER_LOCKED_OPACITY = 0.45;
+/** The legend's text, relative to the column's label size (as the tiles' "Today"). */
+export const PICKER_LEGEND_FONT_SCALE = 0.6;
+/** A legend mark's size, its gap to its words, and the gap between items (all in ems of the legend's text). */
+const LEGEND_MARK_EM = 1.1;
+const LEGEND_MARK_GAP_EM = 0.35;
+export const LEGEND_ITEM_GAP_EM = 1;
+const LEGEND_LINE_HEIGHT_EM = 1.45;
+const LEGEND_PADDING_EM = 0.45;
+/** The current tile's dot, relative to the tile's mark size. */
+const CURRENT_DOT_SCALE = 0.45;
+
+/** UIKit's four corner radii, all `r` (cm). */
+function roundedCm(r: number) {
+  return { borderTopLeftRadius: r, borderTopRightRadius: r, borderBottomLeftRadius: r, borderBottomRightRadius: r };
+}
+
+/**
+ * The picker's legend: two lines under the grid, each mark as the tiles show
+ * it, then what it means -- the puzzle on the desk (filled, a dot), today's
+ * daily (outlined; its accent set by setPickerLegendAccent), solved, answer
+ * shown, locked. On the column's track color, so it reads over passthrough.
+ */
+function buildPickerLegend(labelFontCm: number, lines: readonly (readonly string[])[]): { container: Container; today: Container } {
+  const font = labelFontCm * PICKER_LEGEND_FONT_SCALE;
+  const mark = font * LEGEND_MARK_EM;
+  const idle = controlOptionStyle(false);
+  const selected = controlOptionStyle(true);
+  // The grid's width (as Back's above it), its lines centered.
+  const container = new UIKit.Container({
+    positionType: 'absolute',
+    display: 'none',
+    width: PICKER_WIDTH_CM,
+    height: pickerLegendHeightCm(labelFontCm),
+    flexDirection: 'column',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: font * LEGEND_PADDING_EM,
+    backgroundColor: idle.backgroundColor,
+    ...roundedCm(BAR_RADIUS - BAR_PADDING),
+  });
+  const swatch = (props: Record<string, unknown>) =>
+    new UIKit.Container({ width: mark, height: mark, flexShrink: 0, justifyContent: 'center', alignItems: 'center', ...roundedCm(mark * 0.25), ...props });
+  // The marks, in the copy's order: current, today's daily, solved; answer shown, locked.
+  const current = swatch({ backgroundColor: selected.backgroundColor });
+  const dot = mark * CURRENT_DOT_SCALE;
+  current.add(new UIKit.Container({ width: dot, height: dot, ...roundedCm(dot / 2), backgroundColor: selected.color }));
+  const today = swatch({ backgroundColor: '#ffffff', borderWidth: font * 0.18, borderColor: idle.color });
+  const icon = (Icon: typeof Check) => {
+    const wrapper = swatch({});
+    wrapper.add(new Icon({ width: mark * 0.9, height: mark * 0.9, color: idle.color }));
+    return wrapper;
+  };
+  const marks = [current, today, icon(Check), icon(Eye), icon(Lock)];
+  let next = 0;
+  for (const words of lines) {
+    const line = new UIKit.Container({ flexDirection: 'row', alignItems: 'center', height: font * LEGEND_LINE_HEIGHT_EM, gapColumn: font * LEGEND_ITEM_GAP_EM });
+    for (const text of words) {
+      const item = new UIKit.Container({ flexDirection: 'row', alignItems: 'center', gapColumn: font * LEGEND_MARK_GAP_EM });
+      const markView = marks[next++];
+      if (markView) {
+        item.add(markView);
+      }
+      item.add(new UIKit.Text({ text, fontSize: font, color: idle.color, wordBreak: 'keep-all' }));
+      line.add(item);
+    }
+    container.add(line);
+  }
+  return { container, today };
+}
+
+/** The legend's "Today's daily" mark, outlined in today's daily's accent (as its tile). */
+export function setPickerLegendAccent(bar: PuzzleBarView, accent: string): void {
+  bar.pickerLegendToday.setProperties({ borderColor: accent });
+}
+
+/** One legend line's width (cm): each item a mark and its words, with gaps between items. Exported for the tests. */
+export function pickerLegendLineWidthCm(words: readonly string[], labelFontCm: number): number {
+  const font = labelFontCm * PICKER_LEGEND_FONT_SCALE;
+  const items = words.map((text) => font * (LEGEND_MARK_EM + LEGEND_MARK_GAP_EM) + measureDataTextCm(text, font));
+  return items.reduce((sum, w) => sum + w, 0) + Math.max(0, words.length - 1) * font * LEGEND_ITEM_GAP_EM + 2 * font * LEGEND_PADDING_EM;
+}
+
+/** The legend's height (cm): two lines and its padding. */
+export function pickerLegendHeightCm(labelFontCm: number): number {
+  const font = labelFontCm * PICKER_LEGEND_FONT_SCALE;
+  return 2 * font * LEGEND_LINE_HEIGHT_EM + 2 * font * LEGEND_PADDING_EM;
+}
 
 export { MAX_FILTER_CHIPS };
 
@@ -435,9 +523,15 @@ export type PuzzleBarView = ArcBand & {
     container: Container;
     number: Text;
     today: Container;
+    /** The puzzle on the desk's dot (beside its status mark; its fill says it too). */
+    dot: Container;
     icons: { solved: Container; revealed: Container; locked: Container };
     data: PickerTileView | null;
   }[];
+  /** The picker's legend under the grid (two lines: each mark and what it means); hidden while closed. */
+  pickerLegend: Container;
+  /** Its "Today's daily" mark, outlined in today's daily's accent (setPickerLegendAccent). */
+  pickerLegendToday: Container;
   /**
    * While the picker is open, how much wider than the column the bar is
    * (meters): the grid extends to the left, the column's own items stay put.
@@ -611,6 +705,8 @@ export function buildPuzzleBar(
     filterBack: string;
     puzzles: string;
     pickerBack: string;
+    /** The picker's legend: two lines of mark labels (current, today's daily, solved; answer shown, locked). */
+    legend: readonly (readonly string[])[];
     today: string;
   },
   /** INNER | LEFT's size (cm): the column leaves a row for it. */
@@ -705,13 +801,26 @@ export function buildPuzzleBar(
       marks.add(wrapper);
       return wrapper;
     };
+    // The puzzle on the desk: a dot before its mark (light, on its dark fill).
+    const dotSize = markSize * CURRENT_DOT_SCALE;
+    const dot = new UIKit.Container({
+      display: 'none',
+      width: dotSize,
+      height: dotSize,
+      marginRight: markSize * 0.25,
+      ...roundedCm(dotSize / 2),
+      backgroundColor: controlOptionStyle(true).color,
+    });
+    marks.add(dot);
     const icons = { solved: icon(Check), revealed: icon(Eye), locked: icon(Lock) };
     const today = new UIKit.Container({ display: 'none' });
     today.add(new UIKit.Text({ text: labels.today, fontSize: markSize * 0.85, fontWeight: 'bold', wordBreak: 'keep-all' }));
     marks.add(today);
     tile.container.add(marks);
-    pickerTiles.push({ container: tile.container, number: tile.text, today, icons, data: null });
+    pickerTiles.push({ container: tile.container, number: tile.text, today, dot, icons, data: null });
   }
+  const legend = buildPickerLegend(labelFontCm, labels.legend);
+  root.add(legend.container);
   // Recenter and Exit: icons, their labels below them on hover.
   const recenter = recenterButton(root, root, labelFontCm, buttonHeight, labels.recenter, fade, LocateFixed, half);
   // Exit: held for a moment, it ends the session.
@@ -741,6 +850,8 @@ export function buildPuzzleBar(
     puzzles: puzzles.container,
     pickerBack: pickerBack.container,
     pickerTiles,
+    pickerLegend: legend.container,
+    pickerLegendToday: legend.today,
     extendLeftMeters: 0,
     recenter,
     exit,
@@ -787,11 +898,11 @@ export function columnHeightCm(buttonHeightCm: number, leadHeightCm: number, fil
 
 /**
  * The column's height (cm) with the picker open: Recenter | Exit, INNER |
- * LEFT, Puzzles, the tiles' rows, and Back on top. Exported for the tests.
+ * LEFT, Puzzles, the legend, the tiles' rows, and Back on top. Exported for the tests.
  */
-export function pickerColumnHeightCm(buttonHeightCm: number, leadHeightCm: number): number {
+export function pickerColumnHeightCm(buttonHeightCm: number, leadHeightCm: number, labelFontCm: number): number {
   const grid = PICKER_ROWS * buttonHeightCm + (PICKER_ROWS - 1) * PICKER_TILE_GAP_CM;
-  return leadHeightCm + 3 * buttonHeightCm + grid + 4 * COLUMN_GAP_CM;
+  return leadHeightCm + 3 * buttonHeightCm + grid + pickerLegendHeightCm(labelFontCm) + 5 * COLUMN_GAP_CM;
 }
 
 /**
@@ -860,6 +971,7 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
   }
   bar.puzzles.setProperties(controlOptionStyle(picker !== null));
   bar.pickerBack.setProperties({ display: picker ? 'flex' : 'none' });
+  bar.pickerLegend.setProperties({ display: picker ? 'flex' : 'none' });
   bar.pickerTiles.forEach((tile, i) => {
     const data = picker?.[i] ?? null;
     tile.data = data;
@@ -888,6 +1000,8 @@ export function setBarContents(bar: PuzzleBarView, contents: BarContents): void 
   ];
   if (picker) {
     rows.push([[{ name: 'puzzles', container: bar.puzzles, width, chip: -1 }], buttonHeight, COLUMN_GAP_CM]);
+    // The legend, under the grid, its width.
+    rows.push([[{ name: null, container: bar.pickerLegend, width: PICKER_WIDTH_CM, chip: -1, left: 0 }], pickerLegendHeightCm(label), COLUMN_GAP_CM]);
     // The tiles, bottom row first (17-20), four across from the bar's left edge; Back on top.
     for (let row = PICKER_ROWS - 1; row >= 0; row--) {
       const items: Item[] = [];
@@ -985,12 +1099,14 @@ function tileRest(data: PickerTileView | null): { color: string; width: number }
   return data?.today ? { color: data.accent, width: PICKER_TODAY_BORDER_CM } : null;
 }
 
-/** A picker tile's look: the puzzle on the desk filled; its status mark or "Today"; locked dimmed. */
+/** A picker tile's look: the puzzle on the desk filled, with a dot; its status mark or "Today"; locked dimmed. */
 function applyTileLook(tile: PuzzleBarView['pickerTiles'][number], data: PickerTileView): void {
   const style = controlOptionStyle(data.current);
   tile.container.setProperties({ ...style, opacity: data.selectable ? 1 : PICKER_LOCKED_OPACITY });
   setTargetHover(tile.container, false, tileRest(data));
   tile.number.setProperties({ text: String(data.number) });
+  // The fill says "current" too; beside "Today" there's no room for the dot.
+  tile.dot.setProperties({ display: data.current && !data.today ? 'flex' : 'none' });
   tile.icons.solved.setProperties({ display: !data.today && data.status === 'solved' ? 'flex' : 'none' });
   tile.icons.revealed.setProperties({ display: !data.today && data.status === 'revealed' ? 'flex' : 'none' });
   tile.icons.locked.setProperties({ display: !data.today && data.status === 'locked' ? 'flex' : 'none' });

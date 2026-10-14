@@ -8,7 +8,7 @@
 import { createSystem, VisibilityState } from '@iwsdk/core';
 import { CHALLENGE_MODE, reloadInMode } from './challenge-mode.js';
 import { challengeStart, liveProgress, pickPuzzle, PLAYABLE, resetAllProgress } from './challenge-start.js';
-import { puzzleTiles, welcomeLines } from './data/daily-flow.js';
+import { puzzleTiles, startPuzzle, welcomeLines } from './data/daily-flow.js';
 import type { PuzzleId } from './data/puzzles.js';
 import { sounds } from './sound.js';
 import { WelcomePage } from './welcome-page.js';
@@ -60,6 +60,12 @@ export class PanelSystem extends createSystem({}) {
         this.picked = id;
         // The challenge system loads it now (behind the page), switching tables if needed.
         pickPuzzle(id);
+        this.fillPicker();
+      },
+      unpick: () => {
+        this.picked = null;
+        // Back to what Start opens with no pick: today's daily if it's not done, else the resume point.
+        pickPuzzle(startPuzzle(liveProgress().progress, challengeStart().today, PLAYABLE).puzzleId);
         this.fillPicker();
       },
       reset: () => resetAllProgress(),

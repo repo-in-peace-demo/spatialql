@@ -51,6 +51,18 @@ export const CONCEPT_INTROS: Readonly<Record<Concept, string>> = {
   nullvalue: 'New: NULL can be stored in a table, too.',
 };
 
+/**
+ * The tile marks both puzzle pickers' legends name (in XR and on the welcome
+ * screen). "Daily", not "Today's daily": the XR legend's first line must fit
+ * the 12.9 cm grid (the daily's tile itself says "Today").
+ */
+const TILE_LEGEND = {
+  today: 'Daily',
+  solved: 'Solved',
+  revealed: 'Answer shown',
+  locked: 'Locked',
+} as const;
+
 /** Shown the first time a NULL appears in a result. */
 export const NULL_EXPLAINER = 'NULL means "nothing here".';
 
@@ -382,6 +394,15 @@ export const BAR = {
   pickerBack: 'Back',
   /** Under today's daily's number in the picker (as on the welcome screen). */
   pickerToday: 'Today',
+  /**
+   * The picker's legend, two lines under the grid, each beside its mark:
+   * the puzzle on the desk (filled, with a dot), today's daily (outlined;
+   * its tile says "Today"), and the status marks. An unmarked tile is unlocked, not solved.
+   */
+  pickerLegend: [
+    ['Current', TILE_LEGEND.today, TILE_LEGEND.solved],
+    [TILE_LEGEND.revealed, TILE_LEGEND.locked],
+  ] as const,
 };
 
 // --- The target outline (in the result's place, before a join) --------------------------
@@ -460,6 +481,11 @@ export const WELCOME = {
   pickerBack: 'Back',
   /** Under today's daily's number in the picker. */
   pickerToday: 'Today',
+  /** The picker's legend (as in XR's, with the tile picked for Start in place of the puzzle on the desk). */
+  pickerLegend: [
+    ['Selected', TILE_LEGEND.today, TILE_LEGEND.solved],
+    [TILE_LEGEND.revealed, TILE_LEGEND.locked],
+  ] as const,
   /** For screen readers: the picker grid, and each tile. */
   pickerLabel: 'Puzzles 1 to 20',
   tileLabel: (number: number, status: 'solved' | 'revealed' | 'open' | 'locked', today: boolean) =>
