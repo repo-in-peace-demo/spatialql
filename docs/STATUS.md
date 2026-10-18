@@ -465,11 +465,14 @@ Since phase 4:
   picked, tapped again, the daily (6) loaded, Start plain. Both verified on
   the headset (2026-10-14).
 
-**Not started** (submission):
+**Submission** (done, 2026-10-14):
 
-- **19.** Video footage: first join, NULL filter, fan-out win, dataset switch, "All 20 puzzles done."
-- **20.** The edited video (under 3 minutes), the description (500 words), the tagline (140 characters), the hand-interaction section, and screenshots.
-- **21.** A final check of the Vercel link on a Quest, then submitting.
+- **19.** Video footage: first join, NULL filter, fan-out win, dataset switch, "All 20 puzzles done." Done.
+- **20.** The edited video (under 3 minutes), the description (500 words), the tagline (140 characters), the hand-interaction section, and screenshots. Done.
+- **21.** A final check of the Vercel link on a Quest, then submitting. Done.
+
+**Still to do:**
+
 - **22.** After submitting: a release tag in Git, and Vercel's automatic deploys off.
 
 **To verify:**
@@ -513,9 +516,10 @@ Since phase 4:
 - **Recenter facing the button:** verified on the headset (2026-10-14): it
   completes while facing about where the Recenter button is (the case that
   cancelled on 2026-10-11).
-- **Picker by hand:** tiles, Back and Puzzles by pinch and poke; a locked tile;
-  a tile that switches datasets. The legend (22) verified on the headset
-  (2026-10-14): it lines up with the grid and reads; the welcome pick clears.
+- **Picker by hand:** verified on the headset (2026-10-14): tiles, Back and
+  Puzzles by pinch and poke; a locked tile ("Locked: solve earlier ones.", no
+  load, no click); a tile that switches datasets; the legend (22) lines up
+  with the grid and reads; the welcome pick clears.
 
 **Deferred:** 11 (the left-handed setting) and 12 (persistent anchors).
 
